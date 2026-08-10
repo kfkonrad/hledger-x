@@ -560,9 +560,11 @@ impl Session {
                     .collect()
             }
             Field::Amount(_) => {
-                // Commodities, completed against the trailing non-numeric
-                // token of the buffer.
-                let (head, tail) = split_commodity_query(query);
+                // Commodities — the face commodity and equally the second
+                // one after a cost or assertion tail.
+                let Some((head, tail)) = split_commodity_query(query) else {
+                    return Vec::new();
+                };
                 let mut pool: Vec<String> = self
                     .ctx
                     .index
@@ -1030,23 +1032,34 @@ fn attach_commodity(number: &str, symbol: &str, ctx: &AmountCtx) -> String {
     }
 }
 
-/// Split an amount buffer into (numeric head, trailing partial commodity)
-/// for commodity completion: `23.45 EU` → (`23.45`, `EU`).
-fn split_commodity_query(buffer: &str) -> (&str, &str) {
-    buffer.rfind(char::is_whitespace).map_or_else(
-        || {
-            if buffer.chars().all(|c| !c.is_alphabetic()) {
-                (buffer, "")
-            } else {
-                ("", buffer)
-            }
-        },
-        |i| {
-            let head = buffer.get(..i).unwrap_or_default();
-            let tail = buffer.get(i.saturating_add(1)..).unwrap_or_default();
-            (head, tail)
-        },
-    )
+/// Where commodity completion applies in an amount buffer, classified by
+/// the last whitespace-separated token. This makes the *second* commodity —
+/// after an `@`/`@@` cost or `=`/`==`/`=*`/`==*` assertion tail —
+/// completable exactly like the first.
+///
+/// - partial commodity (`23.45 EU`, `5 USD @ 1.10 E`) → `(head, partial)`:
+///   complete the token
+/// - number (`23.45`, `5 USD @ 1.10`) → `(buffer, "")`: offer commodities
+///   to append
+/// - operator (`5 USD @`) → `None`: a price/assertion number must come
+///   first, so nothing to offer
+fn split_commodity_query(buffer: &str) -> Option<(&str, &str)> {
+    if buffer.is_empty() {
+        return Some(("", ""));
+    }
+    let (head, last) = buffer.rfind(char::is_whitespace).map_or(("", buffer), |i| {
+        (
+            buffer.get(..i).unwrap_or_default(),
+            buffer.get(i.saturating_add(1)..).unwrap_or_default(),
+        )
+    });
+    if crate::lex::is_rest_start(last) {
+        return None;
+    }
+    if last.chars().any(|c| c.is_ascii_digit()) {
+        return Some((buffer, ""));
+    }
+    Some((head, last))
 }
 
 /// Levenshtein distance over chars (two-row DP, no indexing).
@@ -1436,6 +1449,38 @@ mod tests {
         type_in(&mut s, "12.50 E");
         let c = s.candidates();
         assert_eq!(c, vec!["12.50 EUR"]);
+        // A bare number offers commodities to append.
+        type_in(&mut s, "12.50");
+        assert_eq!(s.candidates(), vec!["12.50 EUR"]);
+    }
+
+    #[test]
+    fn commodity_completion_reaches_the_second_commodity_of_a_tail() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        // After the price number of @ / @@ and the assertion amount of
+        // = / == / =* / ==*, the second commodity completes too.
+        for op in ["@", "@@", "=", "==", "=*", "==*"] {
+            type_in(&mut s, &format!("5 USD {op} 1.10 E"));
+            assert_eq!(
+                s.candidates(),
+                vec![format!("5 USD {op} 1.10 EUR")],
+                "completing after {op}"
+            );
+            type_in(&mut s, &format!("5 USD {op} 1.10"));
+            assert_eq!(
+                s.candidates(),
+                vec![format!("5 USD {op} 1.10 EUR")],
+                "appending after {op}"
+            );
+            // Right after the bare operator a number must come first.
+            type_in(&mut s, &format!("5 USD {op}"));
+            assert!(s.candidates().is_empty(), "no candidates after bare {op}");
+        }
     }
 
     #[test]

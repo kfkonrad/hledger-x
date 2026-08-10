@@ -143,7 +143,9 @@ date, description, then account/amount pairs — with:
 - **completion** everywhere: ghost-text suggestion (`→` accepts) plus a
   `Tab` menu, ranked by frecency and conditioned on the description already
   entered. Account queries match by substring, or per-segment once the query
-  contains a colon (`ex:gro` → `expenses:groceries`)
+  contains a colon (`ex:gro` → `expenses:groceries`). In amounts, commodities
+  complete both for the face amount and for the second commodity of an
+  `@`/`@@` cost or `=`/`==`/`=*`/`==*` assertion tail
 - an optional **strict mode** (`strict = true`): using an account or
   commodity that is not declared at the insertion point asks first — "…is
   not a declared account — use it anyway?" — surfacing near-misses ("did
