@@ -13,7 +13,7 @@ use chrono::NaiveDate;
 
 use super::parser::FileMap;
 use crate::fmt::posting::{parse_posting, render};
-use crate::fmt::{format, format_sorted, unlines, widths};
+use crate::fmt::{format_sorted_with, format_with, unlines, widths_with};
 use crate::lex::{is_blank, split_amount};
 
 /// Where a new transaction goes in the file.
@@ -117,8 +117,21 @@ impl NewTransaction {
 /// entire file *including* the new transactions.
 #[must_use]
 pub fn integrate(src: &str, txns: &[NewTransaction], opts: &WriteOptions) -> Integrated {
+    let ctx = crate::fmt::scan_ctx(&crate::fmt::lines(src));
+    integrate_with(src, txns, opts, &ctx)
+}
+
+/// [`integrate`] with the caller's declared styles — the include tree's,
+/// which the target file's own text cannot see.
+#[must_use]
+pub fn integrate_with(
+    src: &str,
+    txns: &[NewTransaction],
+    opts: &WriteOptions,
+    ctx: &crate::amount::AmountCtx,
+) -> Integrated {
     let mut warnings = Vec::new();
-    let map = FileMap::build(src);
+    let map = FileMap::build_with(src, ctx);
 
     if opts.format_file && !map.formatted && !src.is_empty() {
         warnings.push("file was not formatted; it will be reformatted on write".to_owned());
@@ -138,9 +151,9 @@ pub fn integrate(src: &str, txns: &[NewTransaction], opts: &WriteOptions) -> Int
     if opts.format_file {
         let joined = unlines(&lines);
         let contents = if opts.sort {
-            format_sorted(&joined)
+            format_sorted_with(&joined, ctx)
         } else {
-            format(&joined)
+            format_with(&joined, ctx)
         };
         return Integrated { contents, warnings };
     }
@@ -149,7 +162,7 @@ pub fn integrate(src: &str, txns: &[NewTransaction], opts: &WriteOptions) -> Int
     // the whole file including the new transactions.
     let joined = unlines(&lines);
     let all: Vec<&str> = crate::fmt::lines(&joined);
-    let (mut acc_w, mut num_w) = widths(&all);
+    let (mut acc_w, mut num_w) = widths_with(&all, ctx);
     for t in txns {
         let (a, n) = t.own_widths();
         acc_w = acc_w.max(a);
@@ -172,7 +185,11 @@ pub fn integrate(src: &str, txns: &[NewTransaction], opts: &WriteOptions) -> Int
             .cloned()
             .unwrap_or_default()];
         for raw in txn.raw_lines().iter().skip(1) {
-            rendered.push(render(acc_w, num_w, &parse_posting(raw)));
+            rendered.push(render(
+                acc_w,
+                num_w,
+                &crate::fmt::posting::restyle(parse_posting(raw), ctx),
+            ));
         }
         splice(&mut lines, at, &rendered);
     }

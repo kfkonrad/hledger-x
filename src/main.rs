@@ -13,8 +13,12 @@ use color_eyre::eyre::{bail, eyre, Result};
 
 use rledger::add::parser::{parse_journal, FileMap};
 use rledger::add::ui::{plain, term, Session, SessionCtx};
-use rledger::add::write::{integrate, Recovery};
-use rledger::fmt::{format, format_sorted, is_formatted, is_formatted_sorted};
+use rledger::add::write::{integrate_with, Recovery};
+use rledger::amount::AmountCtx;
+use rledger::fmt::{
+    format, format_sorted, format_sorted_with, format_with, is_formatted, is_formatted_sorted,
+    is_formatted_sorted_with, is_formatted_with,
+};
 
 #[derive(Parser)]
 #[command(name = "rledger", version, about = "Plain text accounting tooling")]
@@ -93,8 +97,11 @@ fn run_add(args: &AddArgs) -> Result<ExitCode> {
     } else {
         main_file
     };
+    // The include tree's declared styles: the target's own text may not
+    // contain the `commodity` directives that govern its amounts.
+    let styles = journal.amount_ctx();
     let target_src = fs::read_to_string(&target)?;
-    let map = FileMap::build(&target_src);
+    let map = FileMap::build_with(&target_src, &styles);
 
     let today = chrono::Local::now().date_naive();
     let ctx = SessionCtx::new(journal, config.clone(), today, target.clone(), &map);
@@ -118,7 +125,7 @@ fn run_add(args: &AddArgs) -> Result<ExitCode> {
 
     // Re-read the target in case something else wrote to it mid-session.
     let src = fs::read_to_string(&target)?;
-    let result = integrate(&src, &completed, &config.write_options());
+    let result = integrate_with(&src, &completed, &config.write_options(), &styles);
     for w in &result.warnings {
         eprintln!("warning: {w}");
     }
@@ -138,22 +145,34 @@ fn crossterm_is_tty() -> bool {
     io::stdin().is_tty()
 }
 
-/// The transform applied to a file's contents, per `--sort`.
-fn transform(sort: bool, src: &str) -> String {
-    if sort {
-        format_sorted(src)
-    } else {
-        format(src)
+/// The transform applied to a file's contents, per `--sort`. With a context,
+/// amounts restyle to the include tree's declared styles; without one, to
+/// the styles declared in the text itself.
+fn transform(sort: bool, src: &str, ctx: Option<&AmountCtx>) -> String {
+    match (sort, ctx) {
+        (true, Some(c)) => format_sorted_with(src, c),
+        (true, None) => format_sorted(src),
+        (false, Some(c)) => format_with(src, c),
+        (false, None) => format(src),
     }
 }
 
 /// Whether a file's contents are already in final form, per `--sort`.
-fn formatted(sort: bool, src: &str) -> bool {
-    if sort {
-        is_formatted_sorted(src)
-    } else {
-        is_formatted(src)
+fn formatted(sort: bool, src: &str, ctx: Option<&AmountCtx>) -> bool {
+    match (sort, ctx) {
+        (true, Some(c)) => is_formatted_sorted_with(src, c),
+        (true, None) => is_formatted_sorted(src),
+        (false, Some(c)) => is_formatted_with(src, c),
+        (false, None) => is_formatted(src),
     }
+}
+
+/// The declared commodity styles visible from `path` — its whole include
+/// tree's, the way hledger resolves them. `None` (falling back to the text's
+/// own directives) when the tree cannot be walked; `fmt` never refuses to
+/// format over a parse problem.
+fn include_tree_ctx(path: &Path) -> Option<AmountCtx> {
+    parse_journal(path).ok().map(|j| j.amount_ctx())
 }
 
 fn run_fmt(args: &FmtArgs) -> ExitCode {
@@ -177,9 +196,9 @@ fn run_stdin(check: bool, sort: bool) -> bool {
         return false;
     }
     if check {
-        return formatted(sort, &src);
+        return formatted(sort, &src, None);
     }
-    let out = transform(sort, &src);
+    let out = transform(sort, &src, None);
     if let Err(e) = io::stdout().write_all(out.as_bytes()) {
         eprintln!("rledger fmt: stdout: {e}");
         return false;
@@ -201,14 +220,15 @@ fn run_files(args: &FmtArgs) -> bool {
                 continue;
             }
         };
+        let ctx = include_tree_ctx(path);
         if args.check {
-            if !formatted(args.sort, &src) {
+            if !formatted(args.sort, &src, ctx.as_ref()) {
                 eprintln!("unformatted: {}", path.display());
                 ok = false;
             }
             continue;
         }
-        let out = transform(args.sort, &src);
+        let out = transform(args.sort, &src, ctx.as_ref());
         // Leave an already-formatted file untouched on disk.
         if out != src {
             if let Err(e) = fs::write(path, &out) {

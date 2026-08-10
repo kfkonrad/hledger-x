@@ -16,7 +16,7 @@ use crossterm::QueueableCommand;
 
 use super::plain::{render_done, rewrite_recovery};
 use super::{Session, Submit};
-use crate::add::amount::render_amount;
+use crate::amount::render_amount;
 use crate::add::write::{NewTransaction, Recovery};
 
 /// Open completion menu state.

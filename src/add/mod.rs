@@ -4,7 +4,6 @@
 //! direction is one-way. Everything except `ui` is terminal-free and
 //! unit-testable headlessly.
 
-pub mod amount;
 pub mod index;
 pub mod parser;
 pub mod ui;

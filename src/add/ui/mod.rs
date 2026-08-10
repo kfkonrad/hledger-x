@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-use super::amount::{imbalance, parse_amount, render_amount, style_from_sample, AmountCtx};
+use crate::amount::{imbalance, parse_amount, render_amount, AmountCtx};
 use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
 use super::write::NewTransaction;
@@ -153,14 +153,7 @@ impl SessionCtx {
     ) -> Self {
         let index = Index::build(&journal, today, config.half_life_days);
 
-        let mut amount_ctx = AmountCtx::default();
-        for c in &journal.commodities {
-            if let Some(sample) = &c.sample {
-                if let Some((name, style)) = style_from_sample(sample) {
-                    amount_ctx.styles.insert(name, style);
-                }
-            }
-        }
+        let mut amount_ctx = journal.amount_ctx();
         let target_file = journal.file(&target).cloned();
         let (insertion_pos, state) = target_file.map_or((usize::MAX, None), |f| {
             (f.eof_pos, Some(f.state_at_eof))
@@ -738,6 +731,10 @@ impl Session {
                 commodity = symbol;
             }
         }
+        // Normalize what was typed to the declared display style — the form
+        // `fmt` (and `hledger print`) would write. Amounts of undeclared
+        // commodities stay as typed.
+        text = crate::amount::restyle_field(&text, &self.ctx.amount_ctx);
         // Strict mode mirrors `hledger check commodities`, covering the face
         // commodity and any second commodity in a cost/assertion tail. A
         // unitless amount is always valid, even in strict mode.
@@ -746,7 +743,7 @@ impl Session {
             if !commodity.is_empty() {
                 names.push(commodity);
             }
-            for c in crate::add::amount::tail_commodities(&text) {
+            for c in crate::amount::tail_commodities(&text) {
                 if !names.contains(&c) {
                     names.push(c);
                 }
@@ -1034,7 +1031,7 @@ fn closest<'a, I: Iterator<Item = &'a String>>(name: &str, pool: I) -> Option<St
 /// commodity's declared style for side and spacing (right with a space when
 /// no style is declared). The typed number itself is never restyled.
 fn attach_commodity(number: &str, symbol: &str, ctx: &AmountCtx) -> String {
-    use crate::add::amount::Side;
+    use crate::amount::Side;
     let (side, spaced) = ctx.styles.get(symbol).map_or((Side::Right, true), |s| {
         (s.symbol_side, s.symbol_space)
     });
@@ -1141,6 +1138,27 @@ mod tests {
 
     fn type_in(s: &mut Session, text: &str) {
         s.draft.set_buffer(text);
+    }
+
+    #[test]
+    fn typed_amounts_are_restyled_to_the_declared_style() {
+        let src = "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    expenses:groceries   23.45 EUR\n    assets:bank         -23.45 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit(); // date
+        type_in(&mut s, "Ikea");
+        s.submit(); // description
+        type_in(&mut s, "expenses:household");
+        s.submit();
+        type_in(&mut s, "1234EUR");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Committed as hledger would print it; typed precision kept.
+        assert_eq!(s.draft.postings[0].1, "1_234 EUR");
+        // Undeclared commodities stay as typed.
+        type_in(&mut s, "liabilities:cc");
+        s.submit();
+        type_in(&mut s, "-10USD");
+        assert_eq!(s.submit(), Submit::AdvancedWithNote("USD is a commodity new to this journal".to_owned()));
+        assert_eq!(s.draft.postings[1].1, "-10USD");
     }
 
     #[test]

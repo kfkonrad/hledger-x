@@ -11,15 +11,17 @@ Cargo.toml
 src/
   main.rs          CLI dispatch
   lex.rs           shared lexical layer  (epic 1, used by both)
+  amount.rs        decimal parse/render, display styles, restyling
+                   (crate-level: fmt restyles amounts but must not depend
+                   on add)
   fmt/
-    mod.rs         format, format_sorted, is_formatted, is_formatted_sorted
-    posting.rs     Posting parse + render, width computation
+    mod.rs         format[_with], sorted/check variants, scan_ctx, widths
+    posting.rs     Posting parse + restyle + render, width computation
     sort.rs        Entry parse, directive-bounded stable sort
   add/             (epic 2)
     mod.rs
     parser.rs      include walk, directive extraction, scope stack
     index.rs       frecency indices
-    amount.rs      decimal parse/render, commodity display styles
     ui.rs          reedline integration, field state machine, live preview
     write.rs       insertion, write modes, recovery journal
   config.rs        (epic 2)
@@ -244,7 +246,9 @@ build order and the shapes.
 
 1. `add/parser.rs` — include walk + directives. Testable headlessly.
 2. `add/index.rs` — frecency indices. Pure function of the parse.
-3. `add/amount.rs` — decimal parse/render, commodity styles.
+3. `amount.rs` — decimal parse/render, commodity styles. (Built under
+   `add/`, later moved to the crate level so `fmt`'s restyling can use it
+   without depending on `add`.)
 4. `add/write.rs` — write modes and insertion, driven by fixtures.
 5. `add/ui.rs` — last, because it is the only part that needs a terminal.
 6. `config.rs` — alongside whatever first needs it.
@@ -324,9 +328,12 @@ candidate reachable). Do not unify them.
 - Parse a `commodity` directive's format sample (`1.000,00 EUR`) into a display
   style: decimal mark, group separator, group sizes, decimal places, symbol
   side and spacing. Amounts we generate must match it.
-- Parsing is needed **only** for the transaction being entered — running
-  imbalance and the balancing amount. On failure, show "imbalance unknown"
-  rather than writing anything.
+- Parsing is needed for the transaction being entered — running imbalance
+  and the balancing amount — and for restyling amounts of declared-style
+  commodities (`restyle_field` / `restyle_face_fields` / `restyle_tail`,
+  used by `fmt` and by `add`'s submit path; value-preserving, precision
+  kept). On any parse failure nothing is rewritten and the imbalance shows
+  as unknown rather than wrong.
 
 ## `ui.rs`
 

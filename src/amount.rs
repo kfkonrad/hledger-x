@@ -439,13 +439,21 @@ pub fn imbalance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decim
 /// round it.
 #[must_use]
 pub fn render_amount(value: Decimal, commodity: &str, ctx: &AmountCtx) -> String {
-    let style = ctx.styles.get(commodity).cloned().unwrap_or_else(|| DisplayStyle {
-        decimal_mark: ctx.decimal_mark.unwrap_or('.'),
-        group_sep: None,
-        decimal_places: value.scale(),
-        ..DisplayStyle::default()
-    });
+    let style = ctx.styles.get(commodity).map_or_else(
+        || DisplayStyle {
+            decimal_mark: ctx.decimal_mark.unwrap_or('.'),
+            group_sep: None,
+            decimal_places: value.scale(),
+            ..DisplayStyle::default()
+        },
+        |s| effective_style(s, ctx),
+    );
     let places = style.decimal_places.max(value.scale());
+    render_styled(value, commodity, &style, places)
+}
+
+/// Render `value` in `style` with exactly `places` fraction digits.
+fn render_styled(value: Decimal, commodity: &str, style: &DisplayStyle, places: u32) -> String {
     let mut v = value;
     v.rescale(places);
     let plain = v.abs().to_string();
@@ -475,6 +483,142 @@ pub fn render_amount(value: Decimal, commodity: &str, ctx: &AmountCtx) -> String
         Side::Left => format!("{commodity}{space}{num}"),
         Side::Right => format!("{num}{space}{commodity}"),
     }
+}
+
+/// Re-render a face amount in its commodity's declared style, mirroring
+/// `hledger print`.
+///
+/// Symbol side, spacing, digit grouping and decimal mark are normalized; the
+/// typed precision is kept exactly — no padding, no rounding. `None` when
+/// there is nothing to restyle: a unitless amount, a commodity without a
+/// declared style, or text that does not parse.
+#[must_use]
+pub fn restyle_face_text(field: &str, ctx: &AmountCtx) -> Option<String> {
+    let toks: Vec<&str> = field.split_whitespace().collect();
+    let (num_field, commodity, rest) = split_amount(&toks);
+    if !rest.is_empty() {
+        return None;
+    }
+    restyle_pair(&num_field, &commodity, ctx)
+}
+
+/// The style actually used for rendering under `ctx`.
+///
+/// A `decimal-mark` directive forces how amounts in its file *parse*, so a
+/// rendered amount must keep that mark or it would re-read as a different
+/// value (`10.5` under `decimal-mark ,` is 105). This deliberately deviates
+/// from `hledger print`, whose output drops the directives and so can
+/// switch marks safely — a formatter writing back into the file cannot.
+/// When the style's group separator collides with the forced mark, the two
+/// marks swap: `1.000,00` under `decimal-mark .` renders as `1,000.00`.
+fn effective_style(style: &DisplayStyle, ctx: &AmountCtx) -> DisplayStyle {
+    let mut s = style.clone();
+    if let Some(mark) = ctx.decimal_mark {
+        if s.decimal_mark != mark {
+            if s.group_sep == Some(mark) {
+                s.group_sep = Some(s.decimal_mark);
+            }
+            s.decimal_mark = mark;
+        }
+    }
+    s
+}
+
+/// The core of restyling: parse the face, require a declared style, render
+/// with the value's own scale.
+fn restyle_pair(num_field: &str, commodity: &str, ctx: &AmountCtx) -> Option<String> {
+    let (value, commodity) = parse_face(num_field, commodity, ctx)?;
+    if commodity.is_empty() {
+        return None;
+    }
+    let style = effective_style(ctx.styles.get(&commodity)?, ctx);
+    Some(render_styled(value, &commodity, &style, value.scale()))
+}
+
+/// Restyle a posting's (number field, commodity token) pair for column
+/// rendering.
+///
+/// A right-side spaced style keeps the commodity in its own column; attached
+/// and left-side styles put the whole rendered amount in the number field,
+/// the way `$100` is aligned today. `None` when nothing restyles — the
+/// caller keeps the fields as parsed.
+#[must_use]
+pub fn restyle_face_fields(num: &str, commodity: &str, ctx: &AmountCtx) -> Option<(String, String)> {
+    let (value, name) = parse_face(num, commodity, ctx)?;
+    if name.is_empty() {
+        return None;
+    }
+    let style = effective_style(ctx.styles.get(&name)?, ctx);
+    if style.symbol_side == Side::Right && style.symbol_space {
+        Some((render_styled(value, "", &style, value.scale()), name))
+    } else {
+        Some((render_styled(value, &name, &style, value.scale()), String::new()))
+    }
+}
+
+/// Restyle the amounts inside a cost/assertion tail. Operator tokens pass
+/// through; each amount group after an operator is restyled like a face.
+/// Any group that does not restyle stays exactly as written.
+#[must_use]
+pub fn restyle_tail(rest: &[&str], ctx: &AmountCtx) -> Vec<String> {
+    const OPS: [&str; 6] = ["==*", "=*", "==", "=", "@@", "@"];
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while let Some(tok) = rest.get(i) {
+        i = i.saturating_add(1);
+        if !crate::lex::is_rest_start(tok) {
+            out.push((*tok).to_owned());
+            continue;
+        }
+        let Some(op) = OPS.iter().find(|o| tok.starts_with(**o)) else {
+            out.push((*tok).to_owned());
+            continue;
+        };
+        // An amount attached to the operator (`=5EUR`) joins the group.
+        let attached = tok.get(op.len()..).unwrap_or("");
+        let mut group: Vec<&str> = if attached.is_empty() {
+            Vec::new()
+        } else {
+            vec![attached]
+        };
+        while let Some(next) = rest.get(i) {
+            if crate::lex::is_rest_start(next) {
+                break;
+            }
+            group.push(next);
+            i = i.saturating_add(1);
+        }
+        if let Some(s) = restyle_face_text(&group.join(" "), ctx) {
+            out.push((*op).to_owned());
+            out.extend(s.split_whitespace().map(ToOwned::to_owned));
+        } else {
+            out.push((*tok).to_owned());
+            let skip = usize::from(!attached.is_empty());
+            out.extend(group.iter().skip(skip).map(|t| (*t).to_owned()));
+        }
+    }
+    out
+}
+
+/// Restyle a whole typed amount field — face plus any cost/assertion tail —
+/// leaving every part without a declared style, or that does not parse,
+/// exactly as typed.
+#[must_use]
+pub fn restyle_field(text: &str, ctx: &AmountCtx) -> String {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    let (num_field, commodity, rest) = split_amount(&toks);
+    let face_src = if commodity.is_empty() {
+        num_field.clone()
+    } else {
+        format!("{num_field} {commodity}")
+    };
+    let mut out: Vec<String> = Vec::new();
+    match restyle_pair(&num_field, &commodity, ctx) {
+        Some(s) => out.extend(s.split_whitespace().map(ToOwned::to_owned)),
+        None => out.extend(face_src.split_whitespace().map(ToOwned::to_owned)),
+    }
+    out.extend(restyle_tail(&rest, ctx));
+    out.join(" ")
 }
 
 /// Insert group separators from the right, sizes repeating the last.
@@ -748,6 +892,125 @@ mod tests {
     fn render_left_symbol() {
         let c = ctx_with("$", "$1000.00");
         assert_eq!(render_amount(dec("-5.2"), "$", &c), "$-5.20");
+    }
+
+    // ---- restyling, mirroring verified `hledger print` behaviour ----
+
+    #[test]
+    fn restyle_normalizes_side_space_and_grouping_but_never_pads() {
+        // Verified: hledger prints `10 EUR`, not `10.00 EUR`.
+        let c = ctx_with("EUR", "1_000.00 EUR");
+        assert_eq!(restyle_face_text("10EUR", &c).unwrap(), "10 EUR");
+        assert_eq!(restyle_face_text("EUR10", &c).unwrap(), "10 EUR");
+        assert_eq!(restyle_face_text("EUR 10", &c).unwrap(), "10 EUR");
+        assert_eq!(restyle_face_text("-1234.5 EUR", &c).unwrap(), "-1_234.5 EUR");
+        // Verified: trailing zeros are kept.
+        assert_eq!(restyle_face_text("10.500 EUR", &c).unwrap(), "10.500 EUR");
+    }
+
+    #[test]
+    fn restyle_converts_the_decimal_mark() {
+        let c = ctx_with("EUR", "1.000,00 EUR");
+        assert_eq!(restyle_face_text("1000,50 EUR", &c).unwrap(), "1.000,50 EUR");
+        // Verified: under a comma-decimal style hledger reads `10.5` as 105.
+        assert_eq!(restyle_face_text("10.5 EUR", &c).unwrap(), "105 EUR");
+        // A decimal-mark directive governs parsing AND stays in the rendered
+        // number: switching to the style's mark would change the value on
+        // re-read. (hledger print switches marks, but its output drops the
+        // directive; a formatter writing back into the file cannot.)
+        let mut c = ctx_with("EUR", "1_000.00 EUR");
+        c.decimal_mark = Some(',');
+        assert_eq!(restyle_face_text("10,5 EUR", &c).unwrap(), "10,5 EUR");
+        assert_eq!(restyle_face_text("1000,5 EUR", &c).unwrap(), "1_000,5 EUR");
+        // A colliding group separator swaps with the displaced decimal mark.
+        let mut c = ctx_with("EUR", "1.000,00 EUR");
+        c.decimal_mark = Some('.');
+        assert_eq!(restyle_face_text("1000.5 EUR", &c).unwrap(), "1,000.5 EUR");
+    }
+
+    #[test]
+    fn restyle_leaves_the_undeclared_and_the_unparseable_alone() {
+        let c = ctx_with("EUR", "1_000.00 EUR");
+        assert_eq!(restyle_face_text("10USD", &c), None);
+        assert_eq!(restyle_face_text("42", &c), None); // unitless
+        assert_eq!(restyle_face_text("wat", &c), None);
+        assert_eq!(restyle_face_text("", &c), None);
+    }
+
+    #[test]
+    fn restyle_fields_split_by_symbol_placement() {
+        let c = ctx_with("EUR", "1_000.00 EUR");
+        assert_eq!(
+            restyle_face_fields("10EUR", "", &c).unwrap(),
+            ("10".to_owned(), "EUR".to_owned())
+        );
+        // Attached left symbol: the whole amount is the number field.
+        let c = ctx_with("$", "$1000.00");
+        assert_eq!(
+            restyle_face_fields("5", "$", &c).unwrap(),
+            ("$5".to_owned(), String::new())
+        );
+        assert_eq!(
+            restyle_face_fields("-$5.2", "", &c).unwrap(),
+            ("$-5.2".to_owned(), String::new())
+        );
+        // Spaced left symbol: also one field, aligned as a unit.
+        let c = ctx_with("USD", "USD 1,000.00");
+        assert_eq!(
+            restyle_face_fields("100USD", "", &c).unwrap(),
+            ("USD 100".to_owned(), String::new())
+        );
+    }
+
+    #[test]
+    fn restyle_tail_reaches_costs_and_assertions() {
+        let mut c = ctx_with("EUR", "1_000.00 EUR");
+        let (n, s) = style_from_sample("1,000.00 USD").unwrap();
+        c.styles.insert(n, s);
+        assert_eq!(
+            restyle_tail(&["@", "1.1USD"], &c),
+            vec!["@", "1.1", "USD"]
+        );
+        assert_eq!(
+            restyle_tail(&["=", "-11USD"], &c),
+            vec!["=", "-11", "USD"]
+        );
+        // Attached operator amounts restyle too.
+        assert_eq!(restyle_tail(&["=5EUR"], &c), vec!["=", "5", "EUR"]);
+        // Undeclared or unparseable groups stay verbatim.
+        assert_eq!(
+            restyle_tail(&["@", "1.1", "GBP"], &c),
+            vec!["@", "1.1", "GBP"]
+        );
+        assert_eq!(restyle_tail(&["@", "wat"], &c), vec!["@", "wat"]);
+    }
+
+    #[test]
+    fn restyle_field_covers_face_and_tail() {
+        let mut c = ctx_with("EUR", "1_000.00 EUR");
+        let (n, s) = style_from_sample("1,000.00 USD").unwrap();
+        c.styles.insert(n, s);
+        assert_eq!(
+            restyle_field("10EUR @ 1.1USD = 5EUR", &c),
+            "10 EUR @ 1.1 USD = 5 EUR"
+        );
+        // Nothing restylable: byte-identical tokens, single-spaced.
+        assert_eq!(restyle_field("10 GBP", &c), "10 GBP");
+    }
+
+    #[test]
+    fn restyling_never_changes_the_parsed_value() {
+        let mut c = ctx_with("EUR", "1.000,00 EUR");
+        let (n, s) = style_from_sample("1,000.00 USD").unwrap();
+        c.styles.insert(n, s);
+        for src in ["10EUR", "1000,50 EUR", "10.5 EUR", "-5EUR @ 1.2USD"] {
+            let restyled = restyle_field(src, &c);
+            assert_eq!(
+                parse_amount(src, &c).unwrap(),
+                parse_amount(&restyled, &c).unwrap(),
+                "value drifted for {src:?} -> {restyled:?}"
+            );
+        }
     }
 
     #[test]

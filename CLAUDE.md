@@ -78,13 +78,21 @@ cargo clippy --all-targets  # must be clean
 These are load-bearing. Violating any of them is a design regression, not a
 style choice.
 
-1. **`fmt` never builds a semantic model.** It is line-oriented and passes
-   directives through byte-for-byte. That blindness is why it is safe on
-   price-only and include-only files. `add` depends on `fmt`; `fmt` must never
-   depend on `add`.
-2. **Never interpret a historical amount.** Amounts from existing transactions
-   are carried as raw text and pre-filled verbatim. The only numbers ever
-   parsed are those in the transaction being entered right now.
+1. **`fmt` stays line-oriented and passes directives through byte-for-byte.**
+   That blindness is why it is safe on price-only and include-only files. The
+   one sanctioned semantic *reading* (2026-08, with the user) is declared
+   commodity display styles — `commodity`, its `format` subdirective, `D`,
+   `decimal-mark` — used to restyle amounts as `hledger print` would (see
+   `DESIGN.md` § Amount restyling). `fmt` never interprets anything else.
+   `add` depends on `fmt`; `fmt` must never depend on `add` (shared amount
+   machinery lives in the crate-level `amount` module).
+2. **Amounts are only ever rewritten value-preservingly.** An amount is
+   re-rendered only when its commodity has a *declared* style, via exact
+   decimals, and only into a form hledger reads back to the same value (the
+   `decimal-mark` in effect stays in the output for that reason). Unitless
+   amounts, undeclared commodities and anything that does not parse pass
+   through byte-for-byte — never guess, never a lossy rewrite. Template
+   pre-fills in `add` remain the raw text as it stands in the journal.
 3. **Never infer a commodity.** A unitless amount is valid. A default may be
    offered as editable pre-filled text, never applied silently at write time.
 4. **Balancing amounts are always explicit**, never elided.

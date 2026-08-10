@@ -10,10 +10,11 @@ Format hledger journals and enter transactions ergonomically
   [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)
 - `rledger add` — ergonomic interactive data entry, a better `hledger add`
 
-The formatter is line-oriented and never builds a semantic model. Directives,
-comments, `include` lines and `P` price lines pass through byte-for-byte, so
-price-only and include-only files are safe by construction. Only posting lines
-are reflowed.
+The formatter is line-oriented. Directives, comments, `include` lines and `P`
+price lines pass through byte-for-byte, so price-only and include-only files
+are safe by construction. Only posting lines are reflowed — and amounts of a
+commodity with a declared display style are restyled to it, the way
+`hledger print` shows them.
 
 ## Table of Contents
 
@@ -107,8 +108,17 @@ remaining files are still processed and the run exits non-zero.
    or cost reserves the number and commodity columns with blanks, so the tail
    lines up as if a zero amount stood in front of it.
 6. Inline posting comments are normalized to 2 spaces before the `;`.
-7. Numbers are never restyled — digit grouping, decimal places and sign spacing
-   are copied through unchanged.
+7. Amounts of a commodity with a declared display style — a `commodity`
+   directive sample such as `commodity 1_000.00 EUR`, its indented `format`
+   subdirective, or `D` — are restyled to it, as `hledger print` shows them:
+   `10EUR` and `EUR10` become `10 EUR`, `3042.03 EUR` becomes `3_042.03 EUR`.
+   Symbol side, spacing, digit grouping and decimal mark are normalized;
+   the entered precision is kept (no padding, no rounding), and cost and
+   assertion tails restyle too. Styles are collected across the `include`
+   tree when formatting files (stdin sees only its own directives). Unitless
+   amounts, undeclared commodities and anything unparseable are copied
+   through unchanged — a `decimal-mark` directive keeps its mark in the
+   output so every rewrite reads back to the same value.
 8. Blank lines collapse to empty. Transaction headers lose trailing whitespace
    and nothing more.
 9. Output always ends in a newline, and formatting is idempotent.
@@ -182,10 +192,12 @@ nothing goes wrong.
 When stdin is not a terminal, `rledger add` falls back to plain line-based
 prompts, so it can be scripted and tested through pipes.
 
-Amounts are handled exactly (never floating point), historical amounts are
-never reinterpreted — pre-fills reproduce them verbatim — and a commodity is
-never inferred invisibly: generated amounts follow the journal's `commodity` /
-`decimal-mark` display styles. A default commodity (from `D` or the config)
+Amounts are handled exactly (never floating point), template pre-fills
+reproduce the journal's text verbatim, and a commodity is never inferred
+invisibly. Typed amounts are normalized to the declared display style as you
+accept them — a typed `10EUR` commits as `10 EUR`, precision kept — and
+generated balancing amounts follow the same `commodity` / `decimal-mark`
+styles, padded to the style's decimal places. A default commodity (from `D` or the config)
 is written into bare amounts as you accept them — visible in the preview and
 editable like any other text (`↑` to go back), never attached behind your
 back at write time. Without it, a bare `12.50` and the `-12.50 EUR`

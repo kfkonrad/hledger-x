@@ -36,6 +36,60 @@ fn have_hledger() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Restyling fixtures: declared styles plus deliberately mis-styled amounts.
+/// Everything here restyles somewhere — the invariant is that `hledger
+/// print` cannot tell the difference.
+const RESTYLE_FIXTURES: &[(&str, &str)] = &[
+    (
+        "sides-and-grouping",
+        "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234EUR\n    b  EUR-1234\n",
+    ),
+    (
+        "comma-decimal-reinterpretation",
+        // Under the comma-decimal style hledger reads `10.5` as 105.
+        "commodity 1.000,00 EUR\n\n2026-01-01 x\n    a  10.5 EUR\n    b  -105,00 EUR\n",
+    ),
+    (
+        "decimal-mark-directive",
+        // The forced mark stays in the output; only the grouping normalizes.
+        "decimal-mark ,\ncommodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1000,5 EUR\n    b  -1000,5 EUR\n",
+    ),
+    (
+        "cost-and-assertion-tails",
+        "commodity 1_000.00 EUR\ncommodity 1,000.00 USD\n\n2026-01-01 x\n    a  10EUR @ 1.1USD\n    b  -11 USD = -11USD\n",
+    ),
+    (
+        "format-subdirective-and-d",
+        "commodity EUR\n    format 1.000,00 EUR\nD 1_000.00 GBP\n\n2026-01-01 x\n    a  1000EUR\n    b  -1000 EUR\n\n2026-01-02 y\n    a  10GBP\n    b  -10 GBP\n",
+    ),
+];
+
+#[test]
+fn restyling_preserves_hledger_semantics() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-restyle"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+    for (name, src) in RESTYLE_FIXTURES {
+        let before_path = tmp.join(format!("{name}.before.journal"));
+        fs::write(&before_path, src).unwrap();
+        let before = hledger_print(&before_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected the fixture"));
+        let out = format(src);
+        assert_ne!(out, *src, "{name}: fixture was expected to restyle");
+        assert_eq!(format(&out), out, "{name}: restyling is not idempotent");
+        let after_path = tmp.join(format!("{name}.after.journal"));
+        fs::write(&after_path, &out).unwrap();
+        let after = hledger_print(&after_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected the output"));
+        assert_eq!(after, before, "{name}: print output changed");
+    }
+}
+
 #[test]
 fn hledger_print_is_unchanged_by_formatting() {
     if !have_hledger() {

@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 
 use crate::lex::{
-    is_indented_non_blank, opens_txn, rstrip, split_account_amount, split_amount, split_comment,
+    directive_arg, is_indented_non_blank, opens_txn, rstrip, split_account_amount, split_amount,
+    split_comment,
 };
 
 /// Parse state — scope model 1.
@@ -166,6 +167,35 @@ impl Journal {
         let canon = canonical(path);
         self.files.iter().find(|f| canonical(&f.path) == canon)
     }
+
+    /// Declared display styles over the whole include tree, for amount
+    /// parsing and restyling.
+    ///
+    /// The main file's `D` sample ranks below `commodity` samples, and the
+    /// last declaration of a commodity wins — hledger 1.99's verified
+    /// precedence. `decimal_mark` is left unset: it is file-scoped parse
+    /// state, not journal-wide, and callers set it for their file.
+    #[must_use]
+    pub fn amount_ctx(&self) -> crate::amount::AmountCtx {
+        let mut ctx = crate::amount::AmountCtx::default();
+        let d_sample = self
+            .files
+            .first()
+            .and_then(|f| f.state_at_eof.default_commodity.as_deref());
+        if let Some(sample) = d_sample {
+            if let Some((name, style)) = crate::amount::style_from_sample(sample) {
+                ctx.styles.insert(name, style);
+            }
+        }
+        for c in &self.commodities {
+            if let Some(sample) = &c.sample {
+                if let Some((name, style)) = crate::amount::style_from_sample(sample) {
+                    ctx.styles.insert(name, style);
+                }
+            }
+        }
+        ctx
+    }
 }
 
 /// The write-target file map: raw text plus the positions the write path
@@ -197,11 +227,24 @@ pub struct TxnSpan {
 }
 
 impl FileMap {
-    /// Build the map from a file's raw contents.
+    /// Build the map from a file's raw contents, styles taken from the text
+    /// itself.
     #[must_use]
     pub fn build(src: &str) -> Self {
         let lines = crate::fmt::lines(src);
-        let (acc_w, num_w) = crate::fmt::widths(&lines);
+        Self::build_inner(src, &crate::fmt::scan_ctx(&lines))
+    }
+
+    /// Build the map with the caller's declared styles — the include tree's,
+    /// typically, which the target file's own text cannot see.
+    #[must_use]
+    pub fn build_with(src: &str, ctx: &crate::amount::AmountCtx) -> Self {
+        Self::build_inner(src, ctx)
+    }
+
+    fn build_inner(src: &str, ctx: &crate::amount::AmountCtx) -> Self {
+        let lines = crate::fmt::lines(src);
+        let (acc_w, num_w) = crate::fmt::widths_with(&lines, ctx);
         let mut transactions = Vec::new();
         let mut i = 0usize;
         while let Some(line) = lines.get(i) {
@@ -224,7 +267,7 @@ impl FileMap {
         Self {
             lines: lines.into_iter().map(ToOwned::to_owned).collect(),
             transactions,
-            formatted: crate::fmt::is_formatted(src),
+            formatted: crate::fmt::is_formatted_with(src, ctx),
             acc_w,
             num_w,
         }
@@ -288,11 +331,30 @@ impl Walk {
 
         let lines: Vec<&str> = crate::fmt::lines(src);
         let mut i = 0usize;
+        // Index of the `commodity` declaration whose indented subdirective
+        // block we are inside, if any — where a `format` line may still
+        // supply the display-style sample.
+        let mut open_commodity: Option<usize> = None;
         while let Some(line) = lines.get(i) {
             let lineno = i.saturating_add(1);
             let line_pos = self.pos;
             self.pos = self.pos.saturating_add(1);
             i = i.saturating_add(1);
+
+            if is_indented_non_blank(line) {
+                // An indented line outside a transaction: a subdirective. The
+                // only one carrying semantics we use is `format` under
+                // `commodity`; everything else stays ignored.
+                if let Some(ci) = open_commodity {
+                    if let Some(sample) = directive_arg(line.trim_start(), "format") {
+                        if let Some(decl) = self.journal.commodities.get_mut(ci) {
+                            decl.sample = Some(sample.to_owned());
+                        }
+                    }
+                }
+                continue;
+            }
+            open_commodity = None;
 
             if opens_txn(line) {
                 // Consume the posting run along with the header.
@@ -320,6 +382,7 @@ impl Walk {
                     pos: line_pos,
                 });
             } else if let Some(sample) = directive_arg(line, "commodity") {
+                open_commodity = Some(self.journal.commodities.len());
                 self.journal.commodities.push(parse_commodity(sample, line_pos));
             } else if let Some(mark) = directive_arg(line, "decimal-mark") {
                 state.decimal_mark = mark.chars().next();
@@ -387,25 +450,6 @@ fn expand_include(base: &Path, pattern: &str) -> Vec<PathBuf> {
     }
 }
 
-/// If `line` is the directive `keyword`, return its argument with any inline
-/// comment stripped. `keyword` must be followed by whitespace.
-fn directive_arg<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
-    let rest = line.strip_prefix(keyword)?;
-    if !rest.chars().next().is_some_and(char::is_whitespace) {
-        return None;
-    }
-    let (body, _comment) = split_comment(rest.trim_start_matches(char::is_whitespace));
-    // The argument itself ends at a 2+ space run (which is what separates an
-    // inline comment-less annotation in e.g. `account a:b  ; type: Asset`).
-    let (arg, _tail) = split_account_amount(body);
-    let arg = rstrip(arg);
-    if arg.is_empty() {
-        None
-    } else {
-        Some(arg)
-    }
-}
-
 /// Parse a `commodity` directive argument: a bare symbol (`USD`), a sample
 /// amount with a separate symbol (`1_000.00 EUR`), or one with an attached
 /// symbol (`$1000.00`).
@@ -420,7 +464,7 @@ fn parse_commodity(sample: &str, pos: usize) -> CommodityDecl {
         };
     }
     // An attached symbol still carries a style; a bare symbol does not.
-    crate::add::amount::style_from_sample(sample).map_or(
+    crate::amount::style_from_sample(sample).map_or(
         CommodityDecl {
             name: num,
             sample: None,
@@ -553,6 +597,36 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn a_format_subdirective_supplies_the_commodity_sample() {
+        let t = tree(&[(
+            "main.journal",
+            "commodity EUR\n    format 1.000,00 EUR\ncommodity USD\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.commodities.len(), 2);
+        assert_eq!(j.commodities[0].name, "EUR");
+        assert_eq!(j.commodities[0].sample.as_deref(), Some("1.000,00 EUR"));
+        assert_eq!(j.commodities[1].sample, None);
+    }
+
+    #[test]
+    fn amount_ctx_collects_styles_with_hledger_precedence() {
+        // D ranks below commodity, even when D comes later; the last
+        // commodity declaration wins — both verified against hledger 1.99.
+        let t = tree(&[
+            (
+                "main.journal",
+                "include sub.journal\ncommodity 1_000.00 EUR\nD 1.000,00 EUR\n",
+            ),
+            ("sub.journal", "commodity 1,000.00 USD\ncommodity 1_000.00 USD\n"),
+        ]);
+        let ctx = parse(&t, "main.journal").amount_ctx();
+        assert_eq!(ctx.styles["EUR"].group_sep, Some('_'));
+        assert_eq!(ctx.styles["USD"].group_sep, Some('_'));
+        assert_eq!(ctx.decimal_mark, None);
     }
 
     #[test]

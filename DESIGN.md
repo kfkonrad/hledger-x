@@ -54,9 +54,15 @@ Observed by driving `hledger 1.99` with piped input:
 `fmt` is line-oriented and builds **no semantic model**. That is not a
 limitation, it is where its safety comes from: because directives pass through
 byte-for-byte, price-only and include-only files are correct by construction.
+(One deliberate carve-out, added later with the user: `fmt` *reads* declared
+commodity display styles — `commodity`, its `format` subdirective, `D`,
+`decimal-mark` — to restyle amounts the way `hledger print` does. It still
+never writes or otherwise interprets a directive. See § Amount restyling.)
 
 `add` needs a full semantic model. It is built **on top of** `fmt`, never the
-other way around. `fmt` must never learn what a directive means.
+other way around. `fmt` must never learn what any other directive means; the
+shared amount machinery lives in the crate-level `amount` module so `fmt`
+still does not depend on `add`.
 
 ```
         ┌─────────────────────────────────────┐
@@ -132,9 +138,10 @@ rledger fmt [--check] [--sort] [FILE|-]...
    are reserved with blanks so the tail lines up as if a zero amount stood in
    front of it.
 6. Inline posting comments normalized to **2 spaces** before `;`.
-7. Numbers are never restyled — digit grouping, decimal places and sign spacing
-   copied through unchanged. (This is the rule for *existing* text. Amounts
-   `add` generates must still respect `commodity` / `decimal-mark` directives.)
+7. Numbers of a commodity **with a declared display style** are restyled to
+   that style, the way `hledger print` shows them (see § Amount restyling).
+   Everything else — unitless amounts, undeclared commodities, anything that
+   does not parse — is copied through unchanged, byte-for-byte.
 8. Blank lines collapse to empty. Transaction headers get trailing whitespace
    trimmed, nothing more. Directives, top-level comments, `include`, `P` lines
    and indented sub-directives pass through verbatim.
@@ -154,6 +161,54 @@ Therefore adding one transaction whose account or number is longer than the
 current maximum **reflows every posting line in the file**. This is the single
 most consequential fact about the formatter, and it drives the write modes in
 epic 2.
+
+## Amount restyling — declared styles only
+
+Added 2026-08 with the user (amending the original "numbers are never
+restyled" rule): under `commodity 1_000.00 EUR`, a sloppy `10EUR` or `EUR10`
+becomes `10 EUR`, in `fmt` and in the transaction `add` is building alike.
+
+What restyling normalizes — all verified against hledger 1.99's `print`:
+symbol side, symbol spacing, digit grouping and the decimal mark. The entered
+precision is kept exactly: hledger prints `10 EUR`, not `10.00 EUR`, keeps
+trailing zeros (`10.500`), and never rounds. Cost and assertion tails restyle
+too. Parsing honours the marks in effect, so under a comma-decimal style a
+historical `10.5` genuinely *means* 105 and is rewritten as such — that is
+hledger's reading of the file, not ours.
+
+Where styles come from (verified):
+
+- `commodity` directive samples, including the indented `format`
+  subdirective. A bare `commodity EUR` declares no style.
+- `D` as a fallback: a `commodity` style beats it even when `D` comes later;
+  otherwise the last declaration of a commodity wins.
+- Styles apply journal-wide regardless of position — a directive after a
+  transaction still styles it.
+- Styles cross include boundaries. The `fmt` CLI walks the include tree of
+  each file argument (read-only; on any parse problem it leniently falls
+  back to the text's own directives — `fmt` never refuses to run). Stdin has
+  no include tree, so only in-text directives apply there.
+
+Two deliberate deviations from `hledger print`:
+
+1. **No style inference.** hledger also infers a style from the amounts
+   themselves (first one seen sets side/spacing, and so on); we restyle only
+   commodities with a *declared* style. Inference would let one sloppy entry
+   silently reflow a whole journal — explicit over implicit.
+2. **A `decimal-mark` directive stays in the rendered number.** `hledger
+   print` switches to the style's mark, which is safe only because its
+   output drops the directives; rewriting `10,5` as `10.5` inside a
+   `decimal-mark ,` file would re-read as 105. The forced mark wins, and a
+   colliding group separator swaps with the displaced mark: `1.000,00` under
+   `decimal-mark .` renders as `1,000.00`.
+
+Restyling is value-preserving by construction (parse to exact decimal,
+re-render; unit tests assert re-parse equality) and `hledger print` output
+is byte-identical before and after (semantic tests plus a real-journal
+regression). In `add`, a typed amount is normalized at submit time, so the
+live preview and the written file agree; generated balancing amounts still
+pad to the style's decimal places, while typed amounts keep their typed
+precision — exactly what hledger does with such a file.
 
 ## Sorting (`--sort`)
 

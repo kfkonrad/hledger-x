@@ -1,5 +1,6 @@
 //! Posting parsing and rendering.
 
+use crate::amount::{restyle_face_fields, restyle_tail, AmountCtx};
 use crate::lex::{
     is_number_like, is_rest_start, rstrip, split_account_amount, split_amount, split_comment,
 };
@@ -55,6 +56,37 @@ pub fn parse_posting(raw: &str) -> Posting {
         commodity,
         rest: rest.into_iter().map(ToOwned::to_owned).collect(),
         comment,
+    }
+}
+
+/// Re-render a posting's amounts in their commodities' declared styles
+/// (see `amount::restyle_face_fields` / `amount::restyle_tail`).
+///
+/// Amounts of undeclared commodities, unitless amounts, and anything that
+/// does not parse stay exactly as written.
+#[must_use]
+pub fn restyle(p: Posting, ctx: &AmountCtx) -> Posting {
+    match p {
+        Posting::Amount {
+            account,
+            num,
+            commodity,
+            rest,
+            comment,
+        } => {
+            let rest_refs: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let rest = restyle_tail(&rest_refs, ctx);
+            let (num, commodity) =
+                restyle_face_fields(&num, &commodity, ctx).unwrap_or((num, commodity));
+            Posting::Amount {
+                account,
+                num,
+                commodity,
+                rest,
+                comment,
+            }
+        }
+        other => other,
     }
 }
 

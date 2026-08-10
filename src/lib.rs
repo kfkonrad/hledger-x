@@ -5,6 +5,7 @@
 //! learn what a directive means.
 
 pub mod add;
+pub mod amount;
 pub mod config;
 pub mod fmt;
 pub mod lex;

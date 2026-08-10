@@ -89,6 +89,27 @@ pub fn is_number_like(t: &str) -> bool {
         && t.chars().any(|c| c.is_ascii_digit())
 }
 
+/// The argument of a top-level `keyword` directive line, comment and 2+
+/// space-separated annotation stripped. `None` when the line is not that
+/// directive.
+#[must_use]
+pub fn directive_arg<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(keyword)?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let (body, _comment) = split_comment(rest.trim_start_matches(char::is_whitespace));
+    // The argument itself ends at a 2+ space run (which is what separates an
+    // inline comment-less annotation in e.g. `account a:b  ; type: Asset`).
+    let (arg, _tail) = split_account_amount(body);
+    let arg = rstrip(arg);
+    if arg.is_empty() {
+        None
+    } else {
+        Some(arg)
+    }
+}
+
 /// Split amount tokens into (number field, commodity, remaining tokens).
 ///
 /// The remainder is the cost/assertion tail, kept verbatim and never aligned.

@@ -333,3 +333,50 @@ fn add_respects_local_config() {
     let late = text.find("late").unwrap();
     assert!(early < middle && middle < late, "file was:\n{text}");
 }
+
+#[test]
+fn fmt_restyles_amounts_using_styles_from_included_files() {
+    let dir = scratch("fmt_include_styles");
+    write(&dir, "conf.journal", "commodity 1_000.00 EUR\n");
+    let main = write(
+        &dir,
+        "main.journal",
+        "include conf.journal\n\n2026-01-01 x\n    a:b  1234EUR\n    c:d  -1234 EUR\n",
+    );
+    let out = run(&["fmt", main.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let text = fs::read_to_string(&main).unwrap();
+    assert_eq!(
+        text,
+        "include conf.journal\n\n2026-01-01 x\n    a:b   1_234 EUR\n    c:d  -1_234 EUR\n"
+    );
+    // The included file itself is untouched.
+    assert_eq!(
+        fs::read_to_string(dir.join("conf.journal")).unwrap(),
+        "commodity 1_000.00 EUR\n"
+    );
+    // stdin has no include tree: only the text's own directives apply.
+    let out = run(&["fmt"], "2026-01-01 x\n    a:b  1234EUR\n");
+    assert_eq!(out.stdout, "2026-01-01 x\n    a:b  1234EUR\n");
+}
+
+#[test]
+fn add_writes_typed_amounts_in_the_declared_style() {
+    let dir = scratch("add_restyle");
+    write(&dir, "conf.journal", "commodity 1_000.00 EUR\n");
+    let journal = write(
+        &dir,
+        "main.journal",
+        "include conf.journal\n\n2026-01-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
+    );
+    let input = "2026-06-15\nIkea\ne:f\n1234EUR\ng:h\n\n.\n";
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    let text = fs::read_to_string(&journal).unwrap();
+    // The typed amount is restyled with its precision kept; the generated
+    // balancing amount pads to the style's decimal places.
+    assert!(
+        text.contains("1_234 EUR") && text.contains("-1_234.00 EUR"),
+        "file was:\n{text}"
+    );
+}
