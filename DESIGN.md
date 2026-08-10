@@ -3,7 +3,9 @@
 A Rust CLI for plain text accounting journals: ergonomic interactive data entry
 (a better `hledger add`) plus a formatter.
 
-Status: design discussion. No code yet.
+Status: epics 1 (`fmt`) and 2 (`add`) are implemented. Epic 3 (deferred
+directives) is not started. Where the implementation deviates from what is
+written here, the deviation is recorded inline.
 
 ## Name and CLI surface
 
@@ -94,9 +96,11 @@ cursor and redraws them. Same model as `fish`'s completion menu or
 `fzf --height`. A full TUI stays on the table only if the CLI proves
 insufficient.
 
-Likely library: **reedline** (custom completers, columnar/list menus,
-ghost-text autosuggestion, rebindable keys, multi-line prompts). Falling back
-to raw `crossterm` is a contained rewrite of one module.
+**Built on raw `crossterm`.** `reedline` was the first choice (custom
+completers, list menus, ghost-text autosuggestion, rebindable keys), and this
+design sanctioned falling back to `crossterm` as a contained rewrite of one
+module. That is what happened: the live preview block and the field-navigation
+keys fight reedline's line-editor repaint model.
 
 ---
 
@@ -104,10 +108,11 @@ to raw `crossterm` is a contained rewrite of one module.
 
 Self-contained and fully specified. Depends on nothing else here.
 
-Reference: github.com/mikluko/hledger-fmt
+Reference: [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)
 (`src/Hledger/Fmt.hs`, 341 lines of Haskell, `base`-only; goldens in
-`test/testdata`). To be reimplemented in Rust — roughly 120 lines of real
-logic.
+`test/testdata`). Reimplemented in Rust — roughly 120 lines of real logic.
+The binary is not installed; ask the user for a checkout if the source is
+needed again.
 
 ## CLI
 
@@ -327,9 +332,12 @@ can and thoroughly only where we must.
 **(2) File map** — for the **write-target file only**, needs raw text and
 positions:
 - line range and date of each transaction (for chronological insertion)
-- positions of directives and standalone comment blocks (sort barriers)
 - whether the file is already formatted
 - file-wide `accW` / `numW`
+
+Sort barriers (directives and standalone comment blocks) are deliberately
+*not* recorded here: the write path reuses `fmt`'s own sort, which recomputes
+them, rather than keeping a second notion of where a barrier is.
 
 ### Amounts: parse only what we are about to write
 
@@ -463,12 +471,17 @@ was typed explicitly.
 | `↑` / `↓` | move between fields, loading existing text for editing |
 | `Tab` / `Shift-Tab` | pick up the grey suggestion, else open completion menu / cycle candidates |
 | `→` | pick up the grey suggestion / accept ghost-text autosuggestion |
-| `Ctrl-R` | history search (Up/Down are field navigation, not history) |
 | `Ctrl-E` | open the whole transaction in `$EDITOR`, reparse on close |
+| `Ctrl-U` | clear the buffer |
 | `Ctrl-W` | delete a word; on account fields, one `:`-segment at a time (stopping just short of the previous colon) |
 | `Ctrl-C` | abort the current transaction, not the program |
 | `Ctrl-D` | quit, saving everything completed |
 | `q` at the date prompt | same as `Ctrl-D` — the discoverable exit |
+
+**No separate history key.** A `Ctrl-R` history search was specified and then
+dropped: `Tab` on an empty buffer already opens the field's whole candidate
+list, frecency-ranked, which is the same thing with one fewer key to know.
+Up/Down stay field navigation, never history.
 
 No "save this transaction? [y]" confirmation — redundant when the transaction
 has been visible the whole time. `u` at the date prompt undoes the last
@@ -504,7 +517,8 @@ obvious answer.
 **Presentation** — both at once, fish-style:
 - ghost text of the top candidate, `→` accepts (zero extra keystrokes in the
   common case)
-- `Tab` opens the menu, `Tab`/`Shift-Tab` cycle, arrows navigate. Entries are
+- `Tab` or `Shift-Tab` opens the menu — on an empty buffer that is the whole
+  candidate list — and once open they cycle it, arrows navigate. Entries are
   bare names — no hint columns — and the menu is as tall as the screen
   allows, scrolling beyond that
 
@@ -601,7 +615,7 @@ Interactions:
 
 | Directive | Use | Scope |
 | --- | --- | --- |
-| `account` | completion pool (incl. accounts never used in a transaction); triggers `new_account = confirm` | declaration — journal-wide, position-sensitive |
+| `account` | completion pool (incl. accounts never used in a transaction); the set strict mode checks against | declaration — journal-wide, position-sensitive |
 | `commodity` | valid commodities; display style — decimal mark, digit grouping, decimal places, symbol placement and spacing | declaration — journal-wide, position-sensitive |
 | `decimal-mark` | parsing and rendering of typed input | parse state — file-scoped, inherited by includes |
 | `D` | default commodity, surfaced as editable pre-filled text | parse state — file-scoped, inherited by includes |

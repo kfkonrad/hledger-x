@@ -196,8 +196,9 @@ impl Ui {
     }
 
     /// The navigation keys: within an open menu they move the selection,
-    /// otherwise ↑/↓ move between fields and Tab picks up the grey
-    /// suggestion or opens the menu.
+    /// otherwise ↑/↓ move between fields and Tab/Shift-Tab pick up the grey
+    /// suggestion or open the menu. On an empty buffer that menu is the
+    /// field's whole candidate list, so it doubles as history.
     fn navigate(&mut self, session: &mut Session, code: KeyCode) {
         let rows = self.menu_rows;
         if let Some(m) = &mut self.menu {
@@ -224,7 +225,7 @@ impl Ui {
                 session.draft.nav_down();
                 self.note = Note::None;
             }
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 if let Some(s) = session.suggestion() {
                     session.draft.set_buffer(&s);
                 } else {
@@ -258,14 +259,6 @@ impl Ui {
                 let account_mode = matches!(session.draft.field, super::Field::Account(_));
                 session.draft.delete_word(account_mode);
                 self.menu = None;
-            }
-            KeyCode::Char('r') => {
-                // History list: all candidates for the field, unfiltered.
-                let saved = session.draft.buffer.clone();
-                session.draft.set_buffer("");
-                let all = session.candidates();
-                session.draft.set_buffer(&saved);
-                self.open_menu(all);
             }
             KeyCode::Char('e') => {
                 self.menu = None;

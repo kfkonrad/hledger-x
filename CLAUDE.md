@@ -25,7 +25,7 @@ flagged "unproven" in the design — expect user feedback to reshape it.
    test strategy.
 
 Epic 2's build order is `parser.rs` → `index.rs` → `amount.rs` → `write.rs` →
-`ui.rs`; keep the first four free of any terminal dependency.
+`ui/`; keep the first four free of any terminal dependency.
 
 ## How to work here
 

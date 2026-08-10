@@ -155,7 +155,9 @@ date, description, then account/amount pairs — with:
   explicitly and finishes the transaction — the quickest way to end one
 - **completion** everywhere: ghost-text suggestion (`→` accepts) plus a
   `Tab` menu — as tall as the screen allows, scrolling beyond that — ranked
-  by frecency and conditioned on the description already entered. Account
+  by frecency and conditioned on the description already entered. On an
+  empty field that menu is the whole candidate list, which is how you
+  browse history. Account
   queries match by substring, or per-segment once the query contains a colon
   (`ex:gro` → `expenses:groceries`). In amounts, commodities complete both
   for the face amount and for the second commodity of an `@`/`@@` cost or
@@ -174,8 +176,9 @@ date, description, then account/amount pairs — with:
 
 Keys: `Enter` accepts a field (on an empty amount or an empty account line it
 finishes the transaction), `↑`/`↓` move between fields, `Tab`/`Shift-Tab`
-cycle the completion menu, `Tab`/`→` pick up the grey suggestion, `→` accepts
-the ghost suggestion, `Ctrl-W` deletes
+open the completion menu and then cycle it, `Tab`/`→` pick up the grey
+suggestion, `→` accepts the ghost suggestion, `Ctrl-U` clears the buffer,
+`Ctrl-W` deletes
 one word — on account fields one `:`-segment at a time — `Ctrl-E` opens the
 draft in `$EDITOR`, `Ctrl-C` aborts the current transaction. To leave, type
 `q` at the date prompt or press `Ctrl-D` anywhere; both write everything

@@ -22,15 +22,22 @@ src/
     mod.rs
     parser.rs      include walk, directive extraction, scope stack
     index.rs       frecency indices
-    ui.rs          reedline integration, field state machine, live preview
+    ui/            field state machine, completion, live preview
+      mod.rs       Draft/Session state machine, pre-fill, suggestions
+      complete.rs  the four matching strategies
+      dates.rs     smart date resolution
+      plain.rs     line-based frontend (stdin is not a tty)
+      term.rs      raw-mode crossterm frontend
     write.rs       insertion, write modes, recovery journal
   config.rs        (epic 2)
 tests/
   golden/          fixtures ported from hledger-fmt/test/testdata
 ```
 
-Dependencies: `clap` (CLI). Epic 2 adds `reedline`, `rust_decimal`, `glob`,
-`toml` + `serde`, `chrono`, `directories`.
+Everything under `ui/` except `term.rs` is terminal-free and unit-tested.
+
+Dependencies: `clap` (CLI), `color-eyre` (errors). Epic 2 adds `crossterm`,
+`rust_decimal`, `glob`, `toml` + `serde`, `chrono`.
 
 Distribution is GitHub releases; no crates.io publish, no CI yet.
 
@@ -38,9 +45,10 @@ Distribution is GitHub releases; no crates.io publish, no CI yet.
 
 # Epic 1 — `rledger fmt`
 
-Port of github.com/mikluko/hledger-fmt `src/Hledger/Fmt.hs`.
-Read it — it is 341 lines and the algorithm below is a transcription, not an
-adaptation. The goldens in its `test/testdata/` are the acceptance criteria.
+Port of [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)'s
+`src/Hledger/Fmt.hs`. Read it — it is 341 lines and the algorithm below is a
+transcription, not an adaptation. The goldens in its `test/testdata/` are the
+acceptance criteria; they are ported into `tests/golden/`.
 
 ## `lex.rs` — shared primitives
 
@@ -250,7 +258,7 @@ build order and the shapes.
    `add/`, later moved to the crate level so `fmt`'s restyling can use it
    without depending on `add`.)
 4. `add/write.rs` — write modes and insertion, driven by fixtures.
-5. `add/ui.rs` — last, because it is the only part that needs a terminal.
+5. `add/ui/` — last, because `term.rs` is the only part that needs a terminal.
 6. `config.rs` — alongside whatever first needs it.
 
 Keep 1–4 free of any terminal dependency so they stay unit-testable.
@@ -292,9 +300,9 @@ skipped (already excluded by `opens_txn` requiring a leading digit).
 - *Journal model* — semantics over the whole tree (declarations with stream
   positions, parse state per file, transactions).
 - *File map* — for the **write-target file only**: per-transaction line ranges
-  and dates, positions of directives and standalone comment blocks (the sort
-  barriers), whether it is already formatted, and its file-wide `acc_w`/`num_w`
-  from `fmt`.
+  and dates, whether it is already formatted, and its file-wide
+  `acc_w`/`num_w` from `fmt`. Sort barriers are not recorded: the write path
+  calls `fmt`'s own sort, which recomputes them.
 
 ## `index.rs`
 
@@ -335,11 +343,13 @@ candidate reachable). Do not unify them.
   kept). On any parse failure nothing is rewritten and the imbalance shows
   as unknown rather than wrong.
 
-## `ui.rs`
+## `ui/`
 
-`reedline`, inline raw mode — no alternate screen. Fall back to raw `crossterm`
-if reedline's prompt model fights the live block; that is a contained rewrite
-of this module only.
+Raw `crossterm`, inline — no alternate screen. (`reedline` was the plan; its
+line-editor repaint model fights the live preview block and the
+field-navigation keys, so the sanctioned fallback was taken. `term.rs` is the
+only module that touches a terminal; a second frontend, `plain.rs`, drives the
+same state machine over pipes so entry is testable and scriptable.)
 
 **Field state machine**: date → description → account 1 → amount 1 → account 2
 → … Each field owns its completer. Keep the state machine as the *only* thing

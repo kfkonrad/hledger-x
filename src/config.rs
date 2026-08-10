@@ -132,7 +132,7 @@ pub fn load(cwd: &Path) -> Result<Config, ConfigError> {
     Ok(cfg)
 }
 
-/// Load from explicit file contents (for tests and `--config`).
+/// Load from explicit file contents (for tests).
 ///
 /// # Errors
 ///
