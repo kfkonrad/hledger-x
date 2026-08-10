@@ -1,0 +1,261 @@
+//! Shared lexical layer.
+//!
+//! Every function here operates on a single line (or its tokens) and knows
+//! nothing about what a line *means*. `fmt` is built entirely out of these;
+//! `add`'s parser will reuse them so the two agree on where an account ends
+//! and an amount begins.
+
+/// All characters are whitespace (an empty line is blank).
+#[must_use]
+pub fn is_blank(s: &str) -> bool {
+    s.chars().all(char::is_whitespace)
+}
+
+/// A line-start comment (column 0, not indented): `;`, `#` or `*`.
+#[must_use]
+pub fn is_comment(s: &str) -> bool {
+    matches!(s.chars().next(), Some(';' | '#' | '*'))
+}
+
+/// Whether a line opens a transaction.
+///
+/// A leading ASCII digit is the *only* test, which is what excludes periodic
+/// (`~`) and auto (`=`) transactions.
+#[must_use]
+pub fn opens_txn(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// An indented, non-blank line: a posting or an in-transaction comment.
+#[must_use]
+pub fn is_indented_non_blank(s: &str) -> bool {
+    s.chars().next().is_some_and(char::is_whitespace) && !is_blank(s)
+}
+
+/// Drop trailing whitespace.
+#[must_use]
+pub fn rstrip(s: &str) -> &str {
+    s.trim_end_matches(char::is_whitespace)
+}
+
+/// Split off a trailing inline comment beginning at the first `;`.
+///
+/// Accounts and amounts never contain `;`, so the first one is the boundary.
+#[must_use]
+pub fn split_comment(s: &str) -> (&str, Option<&str>) {
+    s.find(';').map_or_else(
+        || (rstrip(s), None),
+        |i| (rstrip(s.get(..i).unwrap_or_default()), s.get(i..)),
+    )
+}
+
+/// Split a posting body into account and amount.
+///
+/// The separator is the first run of two or more whitespace characters. A
+/// *single* space or tab is not a separator — account names may contain single
+/// spaces. No separator means the whole body is the account.
+#[must_use]
+pub fn split_account_amount(s: &str) -> (&str, &str) {
+    let is_sep = |c: char| c == ' ' || c == '\t';
+    let mut prev: Option<(usize, char)> = None;
+    for (i, c) in s.char_indices() {
+        if let Some((pi, pc)) = prev {
+            if is_sep(pc) && is_sep(c) {
+                let account = s.get(..pi).unwrap_or_default();
+                let amount = s.get(pi..).unwrap_or_default().trim_start_matches(is_sep);
+                return (account, amount);
+            }
+        }
+        prev = Some((i, c));
+    }
+    (s, "")
+}
+
+/// A token that begins the cost (`@`, `@@`) or assertion (`=`, `==`) tail.
+#[must_use]
+pub fn is_rest_start(t: &str) -> bool {
+    t.starts_with('@') || t.starts_with('=')
+}
+
+/// Whether a token reads as a bare, right-alignable number.
+///
+/// Deliberately rejects commodity-on-left tokens like `$100` and bare
+/// commodities like `AMD`.
+#[must_use]
+pub fn is_number_like(t: &str) -> bool {
+    t.chars()
+        .next()
+        .is_some_and(|c| "+-.0123456789".contains(c))
+        && t.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Split amount tokens into (number field, commodity, remaining tokens).
+///
+/// The remainder is the cost/assertion tail, kept verbatim and never aligned.
+#[must_use]
+pub fn split_amount<'a>(toks: &[&'a str]) -> (String, String, Vec<&'a str>) {
+    let cut = toks
+        .iter()
+        .position(|t| is_rest_start(t))
+        .unwrap_or(toks.len());
+    let (amt, rest) = toks.split_at(cut);
+    match amt {
+        [] => (String::new(), String::new(), rest.to_vec()),
+        [t] => ((*t).to_string(), String::new(), rest.to_vec()),
+        [t0, t1, more @ ..] => {
+            if is_number_like(t0) {
+                let mut tail: Vec<&str> = more.to_vec();
+                tail.extend_from_slice(rest);
+                ((*t0).to_string(), (*t1).to_string(), tail)
+            } else if is_number_like(t1) && more.is_empty() {
+                (format!("{t0} {t1}"), String::new(), rest.to_vec())
+            } else {
+                (amt.join(" "), String::new(), rest.to_vec())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blankness() {
+        assert!(is_blank(""));
+        assert!(is_blank("   \t "));
+        assert!(!is_blank("  x"));
+    }
+
+    #[test]
+    fn comments_are_column_zero_only() {
+        assert!(is_comment("; hi"));
+        assert!(is_comment("# hi"));
+        assert!(is_comment("* hi"));
+        assert!(!is_comment("    ; indented"));
+        assert!(!is_comment(""));
+        assert!(!is_comment("account Assets:Bank"));
+    }
+
+    #[test]
+    fn only_a_leading_digit_opens_a_transaction() {
+        assert!(opens_txn("2025-01-01 payee"));
+        assert!(opens_txn("2025/01/01"));
+        assert!(!opens_txn(" 2025-01-01 indented"));
+        assert!(!opens_txn("~ monthly"));
+        assert!(!opens_txn("= expenses:food"));
+        assert!(!opens_txn("P 2025-01-01 USD 1 EUR"));
+        assert!(!opens_txn(""));
+    }
+
+    #[test]
+    fn indented_non_blank() {
+        assert!(is_indented_non_blank("    Assets:Bank"));
+        assert!(is_indented_non_blank("\tAssets:Bank"));
+        assert!(!is_indented_non_blank("Assets:Bank"));
+        assert!(!is_indented_non_blank("    "));
+        assert!(!is_indented_non_blank(""));
+    }
+
+    #[test]
+    fn rstrip_drops_only_trailing_whitespace() {
+        assert_eq!(rstrip("a b  \t "), "a b");
+        assert_eq!(rstrip("  a"), "  a");
+        assert_eq!(rstrip("   "), "");
+        assert_eq!(rstrip(""), "");
+    }
+
+    #[test]
+    fn comment_split_is_at_the_first_semicolon() {
+        assert_eq!(split_comment("a  ; one ; two"), ("a", Some("; one ; two")));
+        assert_eq!(split_comment("a b"), ("a b", None));
+        assert_eq!(split_comment("; whole line"), ("", Some("; whole line")));
+    }
+
+    #[test]
+    fn account_amount_separator_is_two_or_more_spaces() {
+        assert_eq!(
+            split_account_amount("Assets:Bank  100 USD"),
+            ("Assets:Bank", "100 USD")
+        );
+        assert_eq!(
+            split_account_amount("Assets:Bank Account   100.00 USD"),
+            ("Assets:Bank Account", "100.00 USD")
+        );
+        // A single space is not a separator.
+        assert_eq!(
+            split_account_amount("Assets:Bank Account"),
+            ("Assets:Bank Account", "")
+        );
+        // Tabs count, and mixed runs count.
+        assert_eq!(
+            split_account_amount("Assets:Checking\t\t100.00 USD"),
+            ("Assets:Checking", "100.00 USD")
+        );
+        assert_eq!(
+            split_account_amount("Assets:Checking \t100.00 USD"),
+            ("Assets:Checking", "100.00 USD")
+        );
+        // A single tab is not a separator either.
+        assert_eq!(
+            split_account_amount("Assets:Checking\t100.00 USD"),
+            ("Assets:Checking\t100.00 USD", "")
+        );
+    }
+
+    #[test]
+    fn rest_start_tokens() {
+        assert!(is_rest_start("@"));
+        assert!(is_rest_start("@@"));
+        assert!(is_rest_start("="));
+        assert!(is_rest_start("=="));
+        assert!(!is_rest_start("100"));
+        assert!(!is_rest_start(""));
+    }
+
+    #[test]
+    fn number_like_needs_a_leading_sign_or_digit_and_a_digit() {
+        assert!(is_number_like("100"));
+        assert!(is_number_like("-7485978.18"));
+        assert!(is_number_like("+1"));
+        assert!(is_number_like(".5"));
+        assert!(!is_number_like("$100"));
+        assert!(!is_number_like("AMD"));
+        assert!(!is_number_like("-"));
+        assert!(!is_number_like(""));
+    }
+
+    #[test]
+    fn amount_splitting() {
+        fn split(s: &str) -> (String, String, Vec<&str>) {
+            let toks: Vec<&str> = s.split_whitespace().collect();
+            split_amount(&toks)
+        }
+
+        // Empty.
+        assert_eq!(split(""), (String::new(), String::new(), vec![]));
+        // Bare number, no commodity.
+        assert_eq!(split("100"), ("100".into(), String::new(), vec![]));
+        // Number then commodity.
+        assert_eq!(split("100.00 USD"), ("100.00".into(), "USD".into(), vec![]));
+        // Number, commodity, cost tail.
+        assert_eq!(
+            split("100.00 EUR @ 1.20 USD"),
+            ("100.00".into(), "EUR".into(), vec!["@", "1.20", "USD"])
+        );
+        // Assertion tail with no amount at all.
+        assert_eq!(
+            split("= 0 RSD"),
+            (String::new(), String::new(), vec!["=", "0", "RSD"])
+        );
+        // Commodity on the left of the number: joined, no commodity column.
+        assert_eq!(split("USD 100"), ("USD 100".into(), String::new(), vec![]));
+        // Three non-number-leading tokens: all joined into the number field.
+        assert_eq!(split("a b c"), ("a b c".into(), String::new(), vec![]));
+        // Number first wins even with more tokens following.
+        assert_eq!(
+            split("100 USD extra"),
+            ("100".into(), "USD".into(), vec!["extra"])
+        );
+    }
+}

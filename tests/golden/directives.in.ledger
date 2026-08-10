@@ -1,0 +1,14 @@
+# journal-level comment
+account Assets:Bank
+    ; sub-directive comment
+    note Checking account
+
+commodity USD
+    format 1,000.00 USD
+
+include prices/2025.ledger
+P 2025-06-01 USD 0.93 EUR
+
+2025/03/03 payee
+    Assets:Bank  100 USD
+    Expenses:Misc

@@ -1,0 +1,13 @@
+; opening balances
+P 2025-01-01 USD 1.00 EUR
+
+2025/01/01 opening balances
+    Equity:Accumulated:2025:Earned   -552799.00 AMD @ 0.002622 USD
+      Equity:Accumulated:2025:Earned    -14228.87 EUR @ 1.174619 USD
+   Equity:Accumulated:2025:Earned  -7485978.18 RSD @ 0.010013 USD
+    Assets:Bank Account   100.00 USD = 100.00 USD  ; note here
+    Equity:X:Corrections
+
+2025-02-02 groceries  ; trailing header comment
+    Expenses:Food      12.50 USD
+    Assets:Cash   -12.50 USD

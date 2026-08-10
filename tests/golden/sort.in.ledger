@@ -1,0 +1,18 @@
+; header comment for the March txn
+2025-03-02 later
+    Expenses:X   3 USD
+    Assets:Bank
+
+2025-01-05 same-date A
+    Expenses:X   1 USD
+    Assets:Bank
+
+2025-01-05 same-date B
+    Expenses:X   2 USD
+    Assets:Bank
+
+P 2025-06-01 USD 1 EUR
+
+2025-02-01 after the price directive
+    Expenses:X   4 USD
+    Assets:Bank

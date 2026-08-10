@@ -5,8 +5,9 @@ A Rust CLI for plain text accounting (hledger) journals:
 - `rledger fmt` — a formatter, drop-in equivalent to `hledger-fmt`
 - `rledger add` — ergonomic interactive data entry, a better `hledger add`
 
-**Status: design complete, no code written yet.** Read `DESIGN.md` for what and
-why, `IMPLEMENTATION.md` for how and in what order. Both are current.
+**Status: epic 1 (`fmt`) is implemented and green. Epic 2 (`add`) is next** —
+`src/add/` does not exist yet and `rledger add` errors out. Read `DESIGN.md` for
+what and why, `IMPLEMENTATION.md` for how and in what order. Both are current.
 
 ## Start here
 
@@ -16,8 +17,36 @@ why, `IMPLEMENTATION.md` for how and in what order. Both are current.
 2. `IMPLEMENTATION.md` — module layout, data structures, ordered build plan,
    test strategy.
 
-Epic 1 (`fmt`) is fully specified with no open questions and no dependencies.
-It is the place to start.
+Epic 2's build order is `parser.rs` → `index.rs` → `amount.rs` → `write.rs` →
+`ui.rs`; keep the first four free of any terminal dependency.
+
+## How to work here
+
+- **TDD.** Write the failing test first, then the implementation. Every module
+  in epic 1 was built this way and the tests are the spec.
+- **Lints are strict and non-negotiable**, taken verbatim from
+  <https://www.namtao.com/rust/>: `clippy::pedantic` and `clippy::nursery` at
+  `deny`, plus the no-panic set (`unwrap_used`, `expect_used`,
+  `indexing_slicing`, `arithmetic_side_effects`, `panic`, `todo`,
+  `string_slice`, `as_conversions`, …). `cargo clippy --all-targets` must be
+  clean. Panicking constructs are allowed in tests only — via `clippy.toml` for
+  `#[cfg(test)]` modules and a crate-level `#![allow]` in each `tests/*.rs`.
+- **Prefer that page's dependencies** when a new one is needed: `clap`,
+  `chrono`, `color-eyre`, `criterion`, `itertools`, `rayon`, `serde`.
+- **This file is committed and public. Keep it free of anything local or
+  private.** No machine-specific paths, no details of the user's actual
+  journals — not their location, their accounts, their commodities, their
+  balances, nor anything derived from them. If a real journal is useful as a
+  regression corpus, use it read-only in the session and say nothing about it
+  here.
+- **Keep `README.md` current.** It follows the
+  [standard-readme](https://github.com/RichardLitt/standard-readme) spec, like
+  the user's other repos. Behaviour changes belong in it.
+
+```sh
+cargo test                  # unit + golden + CLI + semantic-equivalence tests
+cargo clippy --all-targets  # must be clean
+```
 
 ## Environment facts
 
@@ -25,15 +54,15 @@ It is the place to start.
   `git status` work and agree. **`jj` is authoritative — prefer it** (`jj st`,
   `jj diff`, `jj new`, `jj describe`). `git` is fine for reading; avoid
   committing through git, which desynchronizes the two.
-- `hledger 1.99` is installed at `~/.local/bin/hledger` and is the reference
-  implementation for behavioural questions. **Test against it rather than
-  guessing** — several design decisions came from doing exactly that, and two
-  assumptions turned out to be wrong.
-- The reference formatter is Haskell:
-  github.com/mikluko/hledger-fmt
-  - `src/Hledger/Fmt.hs` — 341 lines, `base` only, the whole formatter
-  - `test/testdata/*.golden` — the output fixtures to port
-- `hledger-fmt` itself is **not** installed as a binary.
+- `hledger` 1.99 is installed and is the reference implementation for
+  behavioural questions. **Test against it rather than guessing** — several
+  design decisions came from doing exactly that, and two assumptions turned out
+  to be wrong. Ask the user where it lives if it is not on `PATH`.
+- The reference formatter is [`hledger-fmt`](https://github.com/mikluko/hledger-fmt),
+  341 lines of `base`-only Haskell in `src/Hledger/Fmt.hs`. Its
+  `test/testdata/*.golden` fixtures are ported into `tests/golden/`. The
+  binary itself is not installed; ask the user for a checkout if the source is
+  needed again.
 - Platform: macOS (darwin). Shell is fish — `cd x && y` can trigger permission
   prompts, prefer absolute paths.
 
