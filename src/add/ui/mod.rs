@@ -740,27 +740,39 @@ impl Session {
                 commodity = symbol;
             }
         }
-        // Strict mode mirrors `hledger check commodities`. A unitless
-        // amount is always valid, even in strict mode.
-        if !confirmed && !commodity.is_empty() {
-            if self.ctx.strict
-                && !self.ctx.declared_commodities_visible.contains(&commodity)
-            {
-                let hint = closest(&commodity, self.ctx.declared_commodities_visible.iter())
-                    .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
-                return Submit::Confirm {
-                    question: format!(
-                        "{commodity} is not a declared commodity — use it anyway?{hint}"
-                    ),
-                };
+        // Strict mode mirrors `hledger check commodities`, covering the face
+        // commodity and any second commodity in a cost/assertion tail. A
+        // unitless amount is always valid, even in strict mode.
+        if !confirmed {
+            let mut names: Vec<String> = Vec::new();
+            if !commodity.is_empty() {
+                names.push(commodity);
             }
-            let brand_new = !self.ctx.declared_commodities_visible.contains(&commodity)
-                && !self.ctx.used_commodities.contains(&commodity);
-            if brand_new {
+            for c in crate::add::amount::tail_commodities(&text) {
+                if !names.contains(&c) {
+                    names.push(c);
+                }
+            }
+            if self.ctx.strict {
+                let undeclared = names
+                    .iter()
+                    .find(|c| !self.ctx.declared_commodities_visible.contains(*c));
+                if let Some(c) = undeclared {
+                    let hint = closest(c, self.ctx.declared_commodities_visible.iter())
+                        .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
+                    return Submit::Confirm {
+                        question: format!(
+                            "{c} is not a declared commodity — use it anyway?{hint}"
+                        ),
+                    };
+                }
+            } else if let Some(c) = names.iter().find(|c| {
+                !self.ctx.declared_commodities_visible.contains(*c)
+                    && !self.ctx.used_commodities.contains(*c)
+            }) {
+                let note = format!("{c} is a commodity new to this journal");
                 self.accept_amount(i, &text);
-                return Submit::AdvancedWithNote(format!(
-                    "{commodity} is a commodity new to this journal"
-                ));
+                return Submit::AdvancedWithNote(note);
             }
         }
         self.accept_amount(i, &text);
@@ -1378,6 +1390,34 @@ mod tests {
         type_in(&mut s, "c:d");
         s.submit();
         type_in(&mut s, "-5 EUR");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn strict_mode_checks_tail_commodities_too() {
+        let src = "account a:b\naccount c:d\ncommodity 1.00 EUR\n";
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(src, cfg);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit();
+        // Face commodity declared, price commodity not: the tail is
+        // questioned.
+        type_in(&mut s, "5 EUR @ 1.10 USD");
+        let r = s.submit();
+        let Submit::Confirm { question } = r else {
+            panic!("expected Confirm, got {r:?}");
+        };
+        assert!(question.contains("USD is not a declared commodity"), "{question}");
+        assert_eq!(s.submit_confirmed(), Submit::Advanced);
+        // A fully declared assertion tail passes silently.
+        s.draft.nav_up();
+        type_in(&mut s, "5 EUR = 5 EUR");
         assert_eq!(s.submit(), Submit::Advanced);
     }
 

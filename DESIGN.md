@@ -481,8 +481,9 @@ checks, wording fixed.)
 - **Strict** checks both accounts and commodities against the declarations
   visible at the insertion point (the position-filtered sets — exactly what
   `hledger check accounts` / `check commodities` would accept there), and
-  asks before using anything undeclared. A unitless amount is always valid,
-  even in strict mode.
+  asks before using anything undeclared. The commodity check covers the face
+  amount and any second commodity in an `@`/`@@` cost or assertion tail. A
+  unitless amount is always valid, even in strict mode.
 - **Not strict** (default): everything is accepted; a name that is neither
   declared nor used anywhere in the journal gets a passing, non-blocking
   note, so typos stay visible without a prompt.

@@ -383,6 +383,27 @@ fn cost_contribution(
     Some((contributed, price_commodity))
 }
 
+/// The commodity symbols appearing in an amount's cost/assertion tail
+/// (`5 USD @ 1.10 EUR = 5.50 EUR` → `["EUR"]`), attached symbols included
+/// (`@ $1.10` → `["$"]`). Deduplicated, in order of appearance.
+#[must_use]
+pub fn tail_commodities(text: &str) -> Vec<String> {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    let (_num, _commodity, rest) = split_amount(&toks);
+    let mut out: Vec<String> = Vec::new();
+    for t in rest {
+        if crate::lex::is_rest_start(t) || is_number_like(t) {
+            continue;
+        }
+        let (_n, sym) = detach_symbol(t);
+        let sym = if sym.is_empty() { t.to_owned() } else { sym };
+        if !sym.is_empty() && !out.contains(&sym) {
+            out.push(sym);
+        }
+    }
+    out
+}
+
 /// Per-commodity sums of the postings entered so far. `None` if any
 /// non-empty amount fails to parse — the imbalance is then unknown.
 #[must_use]
@@ -658,6 +679,18 @@ mod tests {
     }
 
     // ---- styles and rendering ----
+
+    #[test]
+    fn tail_commodities_are_extracted_from_costs_and_assertions() {
+        assert_eq!(tail_commodities("23.45 EUR"), Vec::<String>::new());
+        assert_eq!(tail_commodities("5 EUR @ 1.10 USD"), vec!["USD"]);
+        assert_eq!(tail_commodities("5 EUR @@ 6 USD = 5 EUR"), vec!["USD", "EUR"]);
+        assert_eq!(tail_commodities("5 EUR ==* 5 EUR"), vec!["EUR"]);
+        // Attached symbols count too.
+        assert_eq!(tail_commodities("5 EUR @ $1.10"), vec!["$"]);
+        // Unitless tails have none.
+        assert_eq!(tail_commodities("5 @ 1.10"), Vec::<String>::new());
+    }
 
     #[test]
     fn style_from_right_symbol_sample() {

@@ -208,7 +208,8 @@ With `strict = true`, accounts and commodities are checked against the
 declarations (`account` / `commodity` directives) visible at the insertion
 point — the same set `hledger check accounts` / `check commodities` would
 accept there — and anything undeclared asks for confirmation before being
-used. Unitless amounts are always valid. `format_file = false` writes only
+used. The commodity check covers both the face amount and any second
+commodity in a cost or assertion tail. Unitless amounts are always valid. `format_file = false` writes only
 the new lines (rendered at the would-be file-wide widths) and warns when the
 file's existing lines become stale; combining it with `sort = true` is
 rejected, since sorting rewrites the whole file anyway.
