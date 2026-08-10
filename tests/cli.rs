@@ -1,4 +1,4 @@
-//! End-to-end tests for `rledger fmt`, driving the built binary.
+//! End-to-end tests for `hledger-x fmt`, driving the built binary.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_rledger");
+const BIN: &str = env!("CARGO_BIN_EXE_hledger-x");
 
 struct Output {
     code: i32,
@@ -192,9 +192,9 @@ fn help_and_version_are_available() {
     assert!(version.stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
-// ---- rledger add (plain line mode: stdin is a pipe) ----
+// ---- hledger-x add (plain line mode: stdin is a pipe) ----
 
-/// Run `rledger add` with an isolated HOME/XDG so no user config or
+/// Run `hledger-x add` with an isolated HOME/XDG so no user config or
 /// recovery state leaks in or out.
 fn run_add(dir: &Path, args: &[&str], stdin: &str) -> Output {
     let mut child = Command::new(BIN)
@@ -317,7 +317,7 @@ fn add_with_no_input_writes_nothing() {
 #[test]
 fn add_respects_local_config() {
     let dir = scratch("add_local_config");
-    write(&dir, ".rledger.toml", "insertion = \"chronological\"\n");
+    write(&dir, ".hledger-x.toml", "insertion = \"chronological\"\n");
     let journal = write(
         &dir,
         "main.journal",

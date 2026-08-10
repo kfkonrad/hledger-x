@@ -1,9 +1,13 @@
-# rledger
+# hledger-x
 
 A Rust CLI for plain text accounting (hledger) journals:
 
-- `rledger fmt` — a formatter, drop-in equivalent to `hledger-fmt`
-- `rledger add` — ergonomic interactive data entry, a better `hledger add`
+- `hledger-x fmt` — a formatter, drop-in equivalent to `hledger-fmt`
+- `hledger-x add` — ergonomic interactive data entry, a better `hledger add`
+
+The name is load-bearing: `x` is not an hledger built-in, so with `hledger-x` on
+`PATH` hledger dispatches `hledger x add` / `hledger x fmt` to it (verified
+against hledger 1.99). Renaming the binary breaks that.
 
 **Status: epics 1 (`fmt`) and 2 (`add`) are implemented and green.** Epic 3
 (deferred directives: `payee`, `tag`, `Y`, `apply account`, `alias`) is next;

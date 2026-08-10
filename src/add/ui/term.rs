@@ -465,7 +465,7 @@ impl Ui {
     fn edit_in_editor(&mut self, session: &mut Session, out: &mut impl Write) -> io::Result<()> {
         let text = editor_text(session);
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("rledger-edit-{}.journal", std::process::id()));
+        let path = dir.join(format!("hledger-x-edit-{}.journal", std::process::id()));
         std::fs::write(&path, &text)?;
 
         terminal::disable_raw_mode()?;

@@ -1,5 +1,5 @@
 [package]
-name = "rledger"
+name = "hledger-x"
 version = "0.1.0"
 edition = "2021"
 description = "Plain text accounting tooling: a journal formatter and interactive data entry"
@@ -7,11 +7,11 @@ license = "MIT"
 publish = false
 
 [[bin]]
-name = "rledger"
+name = "hledger-x"
 path = "src/main.rs"
 
 [lib]
-name = "rledger"
+name = "hledger_x"
 path = "src/lib.rs"
 
 [dependencies]

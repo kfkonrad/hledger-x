@@ -679,7 +679,7 @@ impl Session {
             return self.finish(i);
         }
         // Strict mode mirrors `hledger check accounts`: only declarations
-        // visible at the insertion point count. rledger never declares
+        // visible at the insertion point count. hledger-x never declares
         // anything itself — the question is whether to *use* the name.
         if !confirmed && self.ctx.strict && !self.ctx.declared_accounts_visible.contains(&text)
         {
@@ -1394,7 +1394,7 @@ mod tests {
         let Submit::Confirm { question } = r else {
             panic!("expected Confirm, got {r:?}");
         };
-        // The wording is about *using* the account — rledger declares
+        // The wording is about *using* the account — hledger-x declares
         // nothing — and carries the near-miss.
         assert!(question.contains("not a declared account"), "{question}");
         assert!(question.contains("use it anyway"), "{question}");

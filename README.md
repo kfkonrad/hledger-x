@@ -1,14 +1,14 @@
-# rledger
+# hledger-x
 
 [![standard-readme compliant](https://img.shields.io/badge/standard--readme-OK-green.svg?style=flat-square)](https://github.com/RichardLitt/standard-readme)
 
 Format hledger journals and enter transactions ergonomically
 
-`rledger` is a CLI for plain text accounting journals with two subcommands:
+`hledger-x` is a CLI for plain text accounting journals with two subcommands:
 
-- `rledger fmt` — a format-preserving journal formatter, a drop-in equivalent to
+- `hledger-x fmt` — a format-preserving journal formatter, a drop-in equivalent to
   [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)
-- `rledger add` — ergonomic interactive data entry, a better `hledger add`
+- `hledger-x add` — ergonomic interactive data entry, a better `hledger add`
 
 The formatter is line-oriented. Directives, comments, `include` lines and `P`
 price lines pass through byte-for-byte, so price-only and include-only files
@@ -31,8 +31,8 @@ commodity with a declared display style are restyled to it, the way
 
 ## Status
 
-`rledger fmt` is complete and verified against the reference implementation's
-golden fixtures. `rledger add` is implemented; its key-navigation scheme is
+`hledger-x fmt` is complete and verified against the reference implementation's
+golden fixtures. `hledger-x add` is implemented; its key-navigation scheme is
 young and may still change with use. See `DESIGN.md` for the decisions behind
 both.
 
@@ -45,25 +45,37 @@ cargo install --path .
 ```
 
 Binaries are published in the [releases section of this
-repo](https://github.com/kfkonrad/rledger/releases).
+repo](https://github.com/kfkonrad/hledger-x/releases).
+
+Once `hledger-x` is on your `PATH`, hledger dispatches to it as well, because
+`x` is not one of its built-in subcommands. Every invocation below can be
+written either way:
+
+```sh
+hledger-x add     # or: hledger x add
+hledger-x fmt     # or: hledger x fmt
+```
+
+Arguments after the subcommand are passed through verbatim, and the exit status
+is the one `hledger-x` returns.
 
 ## Usage
 
 ```sh
-rledger fmt [--check] [--sort] [FILE|-]...
+hledger-x fmt [--check] [--sort] [FILE|-]...
 ```
 
 Format files in place:
 
 ```sh
-rledger fmt main.journal 2025.journal
+hledger-x fmt main.journal 2025.journal
 ```
 
 Format standard input to standard output — `-` and no arguments both mean
 stdin:
 
 ```sh
-rledger fmt < main.journal
+hledger-x fmt < main.journal
 ```
 
 Check without writing anything. Exits non-zero and lists the offending files on
@@ -71,7 +83,7 @@ stderr if any file is not already formatted, which makes it suitable for CI and
 pre-commit hooks:
 
 ```sh
-rledger fmt --check *.journal
+hledger-x fmt --check *.journal
 ```
 
 Also sort transactions by date. Sorting is stable (equal dates keep their source
@@ -81,7 +93,7 @@ positional directives keep their scope. A comment line directly above a
 transaction travels with it.
 
 ```sh
-rledger fmt --sort main.journal
+hledger-x fmt --sort main.journal
 ```
 
 Files are processed one at a time, like a linter: `include` directives are not
@@ -130,14 +142,14 @@ longer account name or number therefore reflows every posting line in the file.
 ## Interactive entry
 
 ```sh
-rledger add [-f FILE] [--to FILE]
+hledger-x add [-f FILE] [--to FILE]
 ```
 
 The journal is `-f FILE` or `$LEDGER_FILE`. `--to` writes new transactions
 into a different file, which must be reachable through the journal's `include`
 graph.
 
-`rledger add` walks the whole include tree (nested includes, globs), honours
+`hledger-x add` walks the whole include tree (nested includes, globs), honours
 `account`, `commodity`, `decimal-mark` and `D` directives, and builds a
 frecency index over every transaction it finds. Entry is field by field —
 date, description, then account/amount pairs — with:
@@ -165,7 +177,7 @@ date, description, then account/amount pairs — with:
 - an optional **strict mode** (`strict = true`): using an account or
   commodity that is not declared at the insertion point asks first — "…is
   not a declared account — use it anyway?" — surfacing near-misses ("did
-  you mean …?") instead of silently forking your account tree. rledger
+  you mean …?") instead of silently forking your account tree. hledger-x
   never declares anything itself; the question is only whether to use the
   name. Off by default: undeclared names are then accepted, with a passing
   note when they are new to the journal
@@ -188,11 +200,11 @@ remembering.
 
 Everything is buffered and written **once, on exit** — both `Ctrl-C` and
 `Ctrl-D` keep completed transactions. A recovery journal under
-`$XDG_STATE_HOME/rledger/` is maintained during the session and replayed on
+`$XDG_STATE_HOME/hledger-x/` is maintained during the session and replayed on
 the next launch if the process dies without writing; it is invisible when
 nothing goes wrong.
 
-When stdin is not a terminal, `rledger add` falls back to plain line-based
+When stdin is not a terminal, `hledger-x add` falls back to plain line-based
 prompts, so it can be scripted and tested through pipes.
 
 Amounts are handled exactly (never floating point), template pre-fills
@@ -209,8 +221,8 @@ transaction could never balance.
 
 ## Configuration
 
-`~/.config/rledger/config.toml`, overridden key-by-key by the nearest
-`.rledger.toml` found walking up from the current directory. All keys are
+`~/.config/hledger-x/config.toml`, overridden key-by-key by the nearest
+`.hledger-x.toml` found walking up from the current directory. All keys are
 optional; unknown keys are rejected so typos cannot silently disable anything.
 
 ```toml

@@ -1,4 +1,4 @@
-# rledger — design notes
+# hledger-x — design notes
 
 A Rust CLI for plain text accounting journals: ergonomic interactive data entry
 (a better `hledger add`) plus a formatter.
@@ -9,29 +9,50 @@ written here, the deviation is recorded inline.
 
 ## Name and CLI surface
 
-The tool is **`rledger`**, with two subcommands:
+The tool is **`hledger-x`**, with two subcommands:
 
 | Command | Purpose |
 | --- | --- |
-| `rledger fmt` | formatting, equivalent to `hledger-fmt` |
-| `rledger add` | interactive data entry |
+| `hledger-x fmt` | formatting, equivalent to `hledger-fmt` |
+| `hledger-x add` | interactive data entry |
 
 Formatting is exposed as a first-class subcommand because the write path
 implements it anyway; the marginal cost is a CLI surface, not an engine.
 
-**Deliberately not an hledger add-on.** hledger dispatches to `hledger-*`
-executables on `PATH` only for *unknown* subcommands — built-ins win. Verified
-against hledger 1.99 with a stub binary on `PATH`: `hledger add` ran the
-built-in and never reached the stub, while `hledger jot` reached
-`hledger-jot`. So `hledger-add` could never have been invoked as `hledger add`.
-We forgo dispatch entirely rather than pick a name around it, since any single
-name is ambiguous for a tool that both enters and formats data. A multi-call
-binary was considered and rejected as overkill.
+**The name is chosen so hledger dispatches to it.** hledger dispatches to
+`hledger-*` executables on `PATH` only for *unknown* subcommands — built-ins
+win. Verified against hledger 1.99 with a stub binary on `PATH`: `hledger add`
+ran the built-in and never reached the stub, while `hledger jot` reached
+`hledger-jot`. So the earlier candidate `hledger-add` could never have been
+invoked as `hledger add`, and a neutral name like `rledger` gave up dispatch
+altogether.
+
+`x` is not a built-in, so **`hledger x …` reaches `hledger-x`** and the tool is
+usable either way:
+
+| Direct | Via hledger |
+| --- | --- |
+| `hledger-x add` | `hledger x add` |
+| `hledger-x fmt` | `hledger x fmt` |
+
+Verified against hledger 1.99 with a stub on `PATH`: `hledger x add --to
+foo.journal` reached the stub with `add --to foo.journal` — arguments after the
+subcommand are passed through verbatim, hledger consumes none of them, and the
+stub's own exit status is propagated. Standard streams are inherited (checked
+with a pipe on stdin), so the raw-mode `add` UI works under dispatch as well.
+Bare `hledger x` reaches the stub with no arguments, so `hledger-x`'s own
+help/usage is what the user sees.
+
+The one-letter name is deliberately meaningless: any descriptive single name is
+ambiguous for a tool that both enters and formats data, and the subcommands
+carry the meaning. A multi-call binary was considered and rejected as overkill.
 
 **Distribution:** GitHub releases. Not published to crates.io for now, so the
-crate name is a non-issue. (For the record: `rledger` is taken on crates.io — a
-single abandoned 0.1.0 from 2024-12-11. If we publish later, use a different
-crate name with `[[bin]] name = "rledger"`.) CI config is deferred.
+crate name is a non-issue. (For the record: the earlier candidate name
+`rledger` is taken on crates.io — a single abandoned 0.1.0 from 2024-12-11.
+`hledger-x` has not been checked. If we publish later and the name is taken,
+use a different crate name with `[[bin]] name = "hledger-x"`.) CI config is
+deferred.
 
 ## Motivation — what's wrong with `hledger add`
 
@@ -104,7 +125,7 @@ keys fight reedline's line-editor repaint model.
 
 ---
 
-# Epic 1 — `rledger fmt`
+# Epic 1 — `hledger-x fmt`
 
 Self-contained and fully specified. Depends on nothing else here.
 
@@ -119,7 +140,7 @@ needed again.
 Matches hledger-fmt's surface so it is a drop-in substitute:
 
 ```
-rledger fmt [--check] [--sort] [FILE|-]...
+hledger-x fmt [--check] [--sort] [FILE|-]...
 ```
 
 - `FILE...` — format each file in place
@@ -225,7 +246,7 @@ scope.
 
 ---
 
-# Epic 2 — `rledger add`
+# Epic 2 — `hledger-x add`
 
 Requires a semantic parser; epic 1 does not.
 
@@ -550,7 +571,7 @@ Config `strict = true | false`, default `false`. (Supersedes the earlier
 `new_account = confirm | warn | allow | error` design: one switch, two
 checks, wording fixed.)
 
-- **Wording matters**: rledger never declares anything — the question is
+- **Wording matters**: hledger-x never declares anything — the question is
   whether to *use* an undeclared name. "`exp:trav` is not a declared account
   — use it anyway? (did you mean `expenses:travel:train`?)"
 - **Strict** checks both accounts and commodities against the declarations
@@ -600,7 +621,7 @@ Interactions:
 
 - **Buffer everything; write once on exit.** Both `Ctrl-C` and `Ctrl-D` save all
   completed transactions, like `hledger add` does.
-- A recovery journal is written to `$XDG_STATE_HOME/rledger/` as the session
+- A recovery journal is written to `$XDG_STATE_HOME/hledger-x/` as the session
   progresses, replayed on the next launch if the process dies without writing.
   Invisible when nothing goes wrong.
 - `insertion = chronological` inserts after the last transaction with date <=
@@ -623,8 +644,8 @@ Interactions:
 
 ## Configuration
 
-- `~/.config/rledger/config.toml`
-- overridden by a local `.rledger.toml`, discovered by **walking up from cwd**,
+- `~/.config/hledger-x/config.toml`
+- overridden by a local `.hledger-x.toml`, discovered by **walking up from cwd**,
   the same way hledger discovers its own config.
 
 ---

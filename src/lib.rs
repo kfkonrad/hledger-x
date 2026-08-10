@@ -1,4 +1,4 @@
-//! rledger — plain text accounting tooling.
+//! hledger-x — plain text accounting tooling.
 //!
 //! `fmt` is line-oriented and builds no semantic model; `add` (epic 2) will be
 //! built on top of it. The dependency direction is one-way: `fmt` must never

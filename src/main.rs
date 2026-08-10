@@ -1,4 +1,4 @@
-//! `rledger` — plain text accounting tooling.
+//! `hledger-x` — plain text accounting tooling.
 //!
 //! Two subcommands: `fmt` (a formatter, drop-in equivalent to `hledger-fmt`)
 //! and `add` (interactive data entry, epic 2).
@@ -11,17 +11,17 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{bail, eyre, Result};
 
-use rledger::add::parser::{parse_journal, FileMap};
-use rledger::add::ui::{plain, term, Session, SessionCtx};
-use rledger::add::write::{integrate_with, Recovery};
-use rledger::amount::AmountCtx;
-use rledger::fmt::{
+use hledger_x::add::parser::{parse_journal, FileMap};
+use hledger_x::add::ui::{plain, term, Session, SessionCtx};
+use hledger_x::add::write::{integrate_with, Recovery};
+use hledger_x::amount::AmountCtx;
+use hledger_x::fmt::{
     format, format_sorted, format_sorted_with, format_with, is_formatted, is_formatted_sorted,
     is_formatted_sorted_with, is_formatted_with,
 };
 
 #[derive(Parser)]
-#[command(name = "rledger", version, about = "Plain text accounting tooling")]
+#[command(name = "hledger-x", version, about = "Plain text accounting tooling")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -67,10 +67,10 @@ fn main() -> Result<ExitCode> {
     }
 }
 
-/// `rledger add`: parse the journal, run the entry session, write once.
+/// `hledger-x add`: parse the journal, run the entry session, write once.
 fn run_add(args: &AddArgs) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let config = rledger::config::load(&cwd).map_err(|e| eyre!("config: {e}"))?;
+    let config = hledger_x::config::load(&cwd).map_err(|e| eyre!("config: {e}"))?;
 
     let main_file = args
         .file
@@ -192,7 +192,7 @@ fn run_fmt(args: &FmtArgs) -> ExitCode {
 fn run_stdin(check: bool, sort: bool) -> bool {
     let mut src = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut src) {
-        eprintln!("rledger fmt: stdin: {e}");
+        eprintln!("hledger-x fmt: stdin: {e}");
         return false;
     }
     if check {
@@ -200,7 +200,7 @@ fn run_stdin(check: bool, sort: bool) -> bool {
     }
     let out = transform(sort, &src, None);
     if let Err(e) = io::stdout().write_all(out.as_bytes()) {
-        eprintln!("rledger fmt: stdout: {e}");
+        eprintln!("hledger-x fmt: stdout: {e}");
         return false;
     }
     true
@@ -215,7 +215,7 @@ fn run_files(args: &FmtArgs) -> bool {
         let src = match fs::read_to_string(path) {
             Ok(src) => src,
             Err(e) => {
-                eprintln!("rledger fmt: {}: {e}", path.display());
+                eprintln!("hledger-x fmt: {}: {e}", path.display());
                 ok = false;
                 continue;
             }
@@ -232,7 +232,7 @@ fn run_files(args: &FmtArgs) -> bool {
         // Leave an already-formatted file untouched on disk.
         if out != src {
             if let Err(e) = fs::write(path, &out) {
-                eprintln!("rledger fmt: {}: {e}", path.display());
+                eprintln!("hledger-x fmt: {}: {e}", path.display());
                 ok = false;
             }
         }

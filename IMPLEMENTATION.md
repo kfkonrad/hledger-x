@@ -1,4 +1,4 @@
-# rledger — implementation plan
+# hledger-x — implementation plan
 
 Companion to `DESIGN.md` (what and why). This file is how and in what order.
 
@@ -43,7 +43,7 @@ Distribution is GitHub releases; no crates.io publish, no CI yet.
 
 ---
 
-# Epic 1 — `rledger fmt`
+# Epic 1 — `hledger-x fmt`
 
 Port of [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)'s
 `src/Hledger/Fmt.hs`. Read it — it is 341 lines and the algorithm below is a
@@ -216,7 +216,7 @@ Unparseable dates sort first; the stable sort preserves their source order.
 ## CLI
 
 ```
-rledger fmt [--check] [--sort] [FILE|-]...
+hledger-x fmt [--check] [--sort] [FILE|-]...
 ```
 
 - `FILE...` → format each in place
@@ -245,7 +245,7 @@ rledger fmt [--check] [--sort] [FILE|-]...
 
 ---
 
-# Epic 2 — `rledger add`
+# Epic 2 — `hledger-x add`
 
 Depends on epic 1. See `DESIGN.md` for the full behavioural spec; this is the
 build order and the shapes.
@@ -366,7 +366,7 @@ Keys, no-confirmation save, and undo: see `DESIGN.md`.
 
 - Buffer everything, write once on exit. `Ctrl-C` and `Ctrl-D` both save all
   completed transactions.
-- Recovery journal under `$XDG_STATE_HOME/rledger/`, written as the session
+- Recovery journal under `$XDG_STATE_HOME/hledger-x/`, written as the session
   progresses, replayed on next launch if the process died without writing.
 - `format_file` (default true), `sort` (default false), `insertion`
   (default `append`). Reject `format_file = false` + `sort = true` at config

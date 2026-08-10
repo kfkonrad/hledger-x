@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use rledger::fmt::{format, format_sorted, is_formatted, is_formatted_sorted};
+use hledger_x::fmt::{format, format_sorted, is_formatted, is_formatted_sorted};
 
 const FIXTURES: [&str; 5] = ["postings", "directives", "trailing", "multi", "assertion"];
 const SORT_FIXTURES: [&str; 1] = ["sort"];

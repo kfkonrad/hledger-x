@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rledger::fmt::{format, format_sorted};
+use hledger_x::fmt::{format, format_sorted};
 
 fn hledger_print(path: &Path) -> Option<String> {
     let out = Command::new("hledger")

@@ -2,7 +2,7 @@
 //! the recovery journal.
 //!
 //! Everything is buffered during the session and written once on exit; the
-//! recovery journal under `$XDG_STATE_HOME/rledger/` is the crash net in
+//! recovery journal under `$XDG_STATE_HOME/hledger-x/` is the crash net in
 //! between.
 
 use std::fs;
@@ -376,7 +376,7 @@ pub fn parse_transactions(src: &str) -> Vec<NewTransaction> {
     out
 }
 
-/// `$XDG_STATE_HOME/rledger`, defaulting to `~/.local/state/rledger`.
+/// `$XDG_STATE_HOME/hledger-x`, defaulting to `~/.local/state/hledger-x`.
 fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME").map_or_else(
         || {
@@ -386,7 +386,7 @@ fn state_dir() -> PathBuf {
         },
         PathBuf::from,
     )
-    .join("rledger")
+    .join("hledger-x")
 }
 
 #[cfg(test)]

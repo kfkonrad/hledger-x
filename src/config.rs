@@ -1,5 +1,5 @@
-//! Configuration: `~/.config/rledger/config.toml`, overridden by a local
-//! `.rledger.toml` discovered by walking up from the current directory (the
+//! Configuration: `~/.config/hledger-x/config.toml`, overridden by a local
+//! `.hledger-x.toml` discovered by walking up from the current directory (the
 //! same way hledger discovers its own config).
 
 use std::fs;
@@ -143,7 +143,7 @@ pub fn load_str(user: Option<&str>, local: Option<&str>) -> Result<Config, Confi
         apply_str(&mut cfg, src, "config.toml")?;
     }
     if let Some(src) = local {
-        apply_str(&mut cfg, src, ".rledger.toml")?;
+        apply_str(&mut cfg, src, ".hledger-x.toml")?;
     }
     validate(&cfg)?;
     Ok(cfg)
@@ -204,22 +204,22 @@ fn apply_str(cfg: &mut Config, src: &str, origin: &str) -> Result<(), ConfigErro
     Ok(())
 }
 
-/// `~/.config/rledger/config.toml` (respecting `$XDG_CONFIG_HOME`), if it
+/// `~/.config/hledger-x/config.toml` (respecting `$XDG_CONFIG_HOME`), if it
 /// exists.
 fn user_config_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
         || Some(PathBuf::from(std::env::var_os("HOME")?).join(".config")),
         |x| Some(PathBuf::from(x)),
     )?;
-    let path = base.join("rledger").join("config.toml");
+    let path = base.join("hledger-x").join("config.toml");
     path.exists().then_some(path)
 }
 
-/// The nearest `.rledger.toml` walking up from `cwd`.
+/// The nearest `.hledger-x.toml` walking up from `cwd`.
 fn local_config_path(cwd: &Path) -> Option<PathBuf> {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
-        let candidate = d.join(".rledger.toml");
+        let candidate = d.join(".hledger-x.toml");
         if candidate.exists() {
             return Some(candidate);
         }
