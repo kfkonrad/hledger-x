@@ -663,14 +663,26 @@ impl Session {
     }
 
     fn submit_amount(&mut self, i: usize) -> Submit {
-        let text = self.draft.buffer.trim().to_owned();
-        if !text.is_empty() && parse_amount(&text, &self.ctx.amount_ctx).is_none() {
-            return Submit::Invalid(format!("cannot parse amount {text:?}"));
+        let mut text = self.draft.buffer.trim().to_owned();
+        if !text.is_empty() {
+            let Some(parsed) = parse_amount(&text, &self.ctx.amount_ctx) else {
+                return Submit::Invalid(format!("cannot parse amount {text:?}"));
+            };
+            // A bare number gets the default commodity written into the
+            // transaction being built — visibly, and still editable via ↑.
+            // Otherwise this posting and a balancing prefill carrying the
+            // default would read as two different commodities and the
+            // transaction could never balance.
+            if parsed.commodity.is_empty() && !text.contains(['@', '=']) {
+                if let Some(symbol) = self.ctx.default_commodity_symbol() {
+                    text = attach_commodity(&text, &symbol, &self.ctx.amount_ctx);
+                }
+            }
         }
+        // Put the (possibly commodity-completed) text back in the buffer:
+        // advancing stashes the buffer into this field's slot.
+        self.draft.set_buffer(&text);
         ensure_len(&mut self.draft.postings, i.saturating_add(1));
-        if let Some(p) = self.draft.postings.get_mut(i) {
-            p.1 = text;
-        }
         self.advance_to(Field::Account(i.saturating_add(1)));
         Submit::Advanced
     }
@@ -846,6 +858,21 @@ fn template_postings(t: &Transaction) -> Vec<(String, String)> {
         .iter()
         .map(|p| (p.account.clone(), p.amount.clone()))
         .collect()
+}
+
+/// Attach a commodity symbol to a bare typed number, following the
+/// commodity's declared style for side and spacing (right with a space when
+/// no style is declared). The typed number itself is never restyled.
+fn attach_commodity(number: &str, symbol: &str, ctx: &AmountCtx) -> String {
+    use crate::add::amount::Side;
+    let (side, spaced) = ctx.styles.get(symbol).map_or((Side::Right, true), |s| {
+        (s.symbol_side, s.symbol_space)
+    });
+    let space = if spaced { " " } else { "" };
+    match side {
+        Side::Left => format!("{symbol}{space}{number}"),
+        Side::Right => format!("{number}{space}{symbol}"),
+    }
 }
 
 /// Split an amount buffer into (numeric head, trailing partial commodity)
@@ -1242,6 +1269,74 @@ mod tests {
         s.submit();
         // Balancing prefill: unitless sum + D commodity, editable.
         assert_eq!(s.draft.buffer, "-12.50 EUR");
+    }
+
+    #[test]
+    fn default_commodity_is_written_into_bare_amounts() {
+        let src = "D 1000.00 EUR\n2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit();
+        type_in(&mut s, "12.50"); // bare number
+        s.submit();
+        // The commodity is materialized in the built transaction…
+        assert_eq!(s.draft.postings[0].1, "12.50 EUR");
+        type_in(&mut s, "c:d");
+        s.submit();
+        // …so the balancing prefill matches and the transaction finishes.
+        assert_eq!(s.draft.buffer, "-12.50 EUR");
+        s.submit();
+        type_in(&mut s, "");
+        let r = s.submit();
+        let Submit::Done(txn) = r else {
+            panic!("expected Done, got {r:?}");
+        };
+        assert_eq!(txn.postings[0].1, "12.50 EUR");
+        assert_eq!(txn.postings[1].1, "-12.50 EUR");
+    }
+
+    #[test]
+    fn without_a_default_commodity_bare_amounts_stay_unitless() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "12.50");
+        s.submit();
+        assert_eq!(s.draft.postings[0].1, "12.50");
+    }
+
+    #[test]
+    fn default_commodity_follows_the_declared_style_side() {
+        let src = "commodity $1000.00\nD $1000.00\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit_confirmed_account();
+        type_in(&mut s, "-12.50");
+        s.submit();
+        assert_eq!(s.draft.postings[0].1, "$-12.50");
+    }
+
+    #[test]
+    fn amounts_with_tails_are_not_touched_by_the_default_commodity() {
+        let src = "D 1000.00 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit_confirmed_account();
+        type_in(&mut s, "5 USD @ 1.10");
+        s.submit();
+        assert_eq!(s.draft.postings[0].1, "5 USD @ 1.10");
     }
 
     #[test]

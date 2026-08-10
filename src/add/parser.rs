@@ -406,25 +406,32 @@ fn directive_arg<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
     }
 }
 
-/// Parse a `commodity` directive argument: either a bare symbol (`USD`) or a
-/// sample amount carrying the display style (`1_000.00 EUR`).
+/// Parse a `commodity` directive argument: a bare symbol (`USD`), a sample
+/// amount with a separate symbol (`1_000.00 EUR`), or one with an attached
+/// symbol (`$1000.00`).
 fn parse_commodity(sample: &str, pos: usize) -> CommodityDecl {
     let toks: Vec<&str> = sample.split_whitespace().collect();
     let (num, commodity, _rest) = split_amount(&toks);
-    if commodity.is_empty() {
-        // Either a bare symbol or a left-symbol sample like `$1000.00`.
+    if !commodity.is_empty() {
+        return CommodityDecl {
+            name: commodity,
+            sample: Some(sample.to_owned()),
+            pos,
+        };
+    }
+    // An attached symbol still carries a style; a bare symbol does not.
+    crate::add::amount::style_from_sample(sample).map_or(
         CommodityDecl {
             name: num,
             sample: None,
             pos,
-        }
-    } else {
-        CommodityDecl {
-            name: commodity,
+        },
+        |(name, _style)| CommodityDecl {
+            name,
             sample: Some(sample.to_owned()),
             pos,
-        }
-    }
+        },
+    )
 }
 
 /// Parse a transaction header plus its indented run, lexically.
@@ -794,6 +801,14 @@ mod tests {
         let j = parse(&t, "main.journal");
         assert_eq!(j.commodities[0].name, "USD");
         assert_eq!(j.commodities[0].sample, None);
+    }
+
+    #[test]
+    fn attached_symbol_commodity_directives_keep_their_style() {
+        let t = tree(&[("main.journal", "commodity $1000.00\n")]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.commodities[0].name, "$");
+        assert_eq!(j.commodities[0].sample.as_deref(), Some("$1000.00"));
     }
 
     #[test]

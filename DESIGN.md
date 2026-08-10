@@ -439,9 +439,16 @@ obvious answer.
 
 - **Never infer a commodity.** A unitless amount is valid even in strict mode.
 - A configured default commodity, and the journal's own `D` directive, may
-  supply one — but always as **editable pre-filled text in the buffer**, never
-  applied silently at write time. The user sees `23.45 EUR` and can delete the
-  `EUR`.
+  supply one — but always as **visible, editable text**, never applied
+  silently at write time. The user sees `23.45 EUR` and can delete the `EUR`.
+  Concretely: submitting a bare number materializes the default commodity
+  into the amount (`12.50` becomes `12.50 EUR` in the built transaction and
+  the live preview, following the commodity's declared symbol side/spacing;
+  `↑` goes back to edit it). Without this the balancing pre-fill — which
+  carries the default commodity — and the bare amount would read as two
+  different commodities, and the transaction could never balance. Amounts
+  that already carry a commodity, or a cost/assertion tail, are never
+  touched.
 - No arithmetic, no percentage or split helpers. Would collide with a
   percentage commodity.
 - Balancing amounts are always written **explicitly**, never elided.

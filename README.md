@@ -165,9 +165,13 @@ prompts, so it can be scripted and tested through pipes.
 
 Amounts are handled exactly (never floating point), historical amounts are
 never reinterpreted — pre-fills reproduce them verbatim — and a commodity is
-never inferred: generated amounts follow the journal's `commodity` /
-`decimal-mark` display styles, and a default commodity (from `D` or the
-config) only ever appears as editable pre-filled text.
+never inferred invisibly: generated amounts follow the journal's `commodity` /
+`decimal-mark` display styles. A default commodity (from `D` or the config)
+is written into bare amounts as you accept them — visible in the preview and
+editable like any other text (`↑` to go back), never attached behind your
+back at write time. Without it, a bare `12.50` and the `-12.50 EUR`
+balancing pre-fill would read as two different commodities and the
+transaction could never balance.
 
 ## Configuration
 
@@ -183,7 +187,7 @@ new_account = "confirm"       # confirm | warn | allow | error
 half_life_days = 90           # frecency decay half-life
 account_matching = "substring"     # prefix | substring | segment | fuzzy
 description_matching = "substring"
-default_commodity = "EUR"     # offered as editable pre-fill, never applied silently
+default_commodity = "EUR"     # written into bare amounts as visible, editable text
 ```
 
 `new_account` defaults to `confirm` when the journal declares accounts via
