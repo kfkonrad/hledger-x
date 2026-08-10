@@ -378,6 +378,14 @@ Postings are pre-filled from the ranked match, so accepting is one keypress
 either way. The final posting's amount is pre-filled with the negated running
 sum.
 
+**The first posting must carry an amount.** Accepting an **empty amount** on
+any later posting means "this is the last posting": the balancing amount is
+written into it explicitly and the transaction finishes — the fastest way to
+end one. (Balancing amounts are never elided, so `add` cannot produce bare
+postings at all; an empty amount either balances-and-finishes or is
+rejected.) The empty-account finish remains for the case where every amount
+was typed explicitly.
+
 ## Dates
 
 - Default is **today**, for every transaction — not the previous entry's date
@@ -391,18 +399,22 @@ sum.
 
 | Key | Action |
 | --- | --- |
-| `Enter` | accept field, advance; on an empty posting line, finish the transaction |
+| `Enter` | accept field, advance; on an empty amount or an empty account line, finish the transaction |
 | `↑` / `↓` | move between fields, loading existing text for editing |
 | `Tab` / `Shift-Tab` | open completion menu / cycle candidates |
 | `→` | accept ghost-text autosuggestion |
 | `Ctrl-R` | history search (Up/Down are field navigation, not history) |
 | `Ctrl-E` | open the whole transaction in `$EDITOR`, reparse on close |
+| `Ctrl-W` | delete a word; on account fields, one `:`-segment at a time (stopping just short of the previous colon) |
 | `Ctrl-C` | abort the current transaction, not the program |
-| `Ctrl-D` | quit |
+| `Ctrl-D` | quit, saving everything completed |
+| `q` at the date prompt | same as `Ctrl-D` — the discoverable exit |
 
 No "save this transaction? [y]" confirmation — redundant when the transaction
 has been visible the whole time. `u` at the date prompt undoes the last
-completed transaction.
+completed transaction. The UI surfaces these affordances as inline hints
+(dimmed, under the prompt) when the relevant field comes up — how to finish a
+transaction and how to leave must be discoverable without documentation.
 
 **Unproven** — needs to be seen in practice before sign-off.
 
@@ -457,13 +469,23 @@ obvious answer.
   parse typed `23,45` with a comma decimal mark. Getting this wrong produces a
   file that reformats on the next `fmt` pass.
 
-## New-account and new-payee guard
+## Strict mode — the undeclared-name guard
 
-Config `new_account = confirm | warn | allow | error`. Defaults to `confirm`
-when the journal declares accounts via `account` directives, `warn` otherwise.
-Not a block — a prompt that surfaces near-misses: "`exp:trav` is new — create
-it? (did you mean `expenses:travel:train`?)". Same treatment for descriptions
-that near-miss an existing payee.
+Config `strict = true | false`, default `false`. (Supersedes the earlier
+`new_account = confirm | warn | allow | error` design: one switch, two
+checks, wording fixed.)
+
+- **Wording matters**: rledger never declares anything — the question is
+  whether to *use* an undeclared name. "`exp:trav` is not a declared account
+  — use it anyway? (did you mean `expenses:travel:train`?)"
+- **Strict** checks both accounts and commodities against the declarations
+  visible at the insertion point (the position-filtered sets — exactly what
+  `hledger check accounts` / `check commodities` would accept there), and
+  asks before using anything undeclared. A unitless amount is always valid,
+  even in strict mode.
+- **Not strict** (default): everything is accepted; a name that is neither
+  declared nor used anywhere in the journal gets a passing, non-blocking
+  note, so typos stay visible without a prompt.
 
 ## Write modes
 

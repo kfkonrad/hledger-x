@@ -21,7 +21,7 @@ use super::amount::{imbalance, parse_amount, render_amount, style_from_sample, A
 use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
 use super::write::NewTransaction;
-use crate::config::{Config, Matching, NewAccountPolicy};
+use crate::config::{Config, Matching};
 use crate::fmt::posting::{parse_posting, render};
 
 /// The field currently being edited.
@@ -86,18 +86,19 @@ pub enum Submit {
     Done(Box<NewTransaction>),
     /// Input rejected; message explains why. The field is unchanged.
     Invalid(String),
-    /// The account is new; ask the user. `suggestion` is a near-miss from
-    /// the known pool, if one is close.
-    ConfirmNewAccount {
-        /// The name the user typed.
-        name: String,
-        /// A close existing name, if any ("did you mean …?").
-        suggestion: Option<String>,
+    /// Strict mode: the entered name is not declared; ask before using it.
+    /// Answer yes by calling [`Session::submit_confirmed`]; anything else
+    /// leaves the field as it was.
+    Confirm {
+        /// The full question, including any "did you mean …?" near-miss.
+        question: String,
     },
-    /// Accepted, but with a note (e.g. `new_account = warn`).
+    /// Accepted, but with a note (e.g. an account new to the journal).
     AdvancedWithNote(String),
     /// `u` at the date prompt: undo the last completed transaction.
     Undo,
+    /// `q` at the date prompt: save everything completed and exit.
+    Quit,
 }
 
 /// Session-wide immutable context assembled at startup.
@@ -118,14 +119,23 @@ pub struct SessionCtx {
     pub acc_w: usize,
     /// See `acc_w`.
     pub num_w: usize,
-    /// Accounts known to the journal: declarations visible at the insertion
-    /// point plus every account used in a transaction.
-    pub known_accounts: HashSet<String>,
+    /// Account declarations visible at the insertion point — what `hledger
+    /// check accounts` would accept there. The strict check tests against
+    /// this set.
+    pub declared_accounts_visible: HashSet<String>,
+    /// Every account used in a transaction anywhere in the tree. An account
+    /// in here is not *new*, even if undeclared.
+    pub used_accounts: HashSet<String>,
+    /// Commodity declarations visible at the insertion point, for the strict
+    /// commodity check.
+    pub declared_commodities_visible: HashSet<String>,
+    /// Every commodity seen in a posting.
+    pub used_commodities: HashSet<String>,
     /// Declared accounts (full pool — offering a name is harmless even when
     /// it is declared below the insertion point).
     pub declared_accounts: Vec<String>,
-    /// The effective new-account policy.
-    pub new_account: NewAccountPolicy,
+    /// Strict mode: prompt before using undeclared accounts/commodities.
+    pub strict: bool,
     /// Default commodity sample: the target file's `D` directive, falling
     /// back to the configured default.
     pub default_commodity: Option<String>,
@@ -157,26 +167,30 @@ impl SessionCtx {
         });
         amount_ctx.decimal_mark = state.as_ref().and_then(|s| s.decimal_mark);
 
-        let mut known_accounts: HashSet<String> = journal
+        let declared_accounts_visible: HashSet<String> = journal
             .accounts_visible_at(insertion_pos)
             .into_iter()
             .map(ToOwned::to_owned)
             .collect();
+        let declared_commodities_visible: HashSet<String> = journal
+            .commodities
+            .iter()
+            .filter(|c| c.pos < insertion_pos)
+            .map(|c| c.name.clone())
+            .collect();
+        let mut used_accounts = HashSet::new();
+        let mut used_commodities = HashSet::new();
         for t in &journal.transactions {
             for p in &t.postings {
-                known_accounts.insert(p.account.clone());
+                used_accounts.insert(p.account.clone());
+                if let Some(c) = &p.commodity {
+                    used_commodities.insert(c.clone());
+                }
             }
         }
         let declared_accounts: Vec<String> =
             journal.accounts.iter().map(|d| d.name.clone()).collect();
-
-        let new_account = config.new_account.unwrap_or_else(|| {
-            if journal.declares_accounts() {
-                NewAccountPolicy::Confirm
-            } else {
-                NewAccountPolicy::Warn
-            }
-        });
+        let strict = config.strict;
 
         let default_commodity = state
             .and_then(|s| s.default_commodity)
@@ -191,9 +205,12 @@ impl SessionCtx {
             target,
             acc_w: target_map.acc_w,
             num_w: target_map.num_w,
-            known_accounts,
+            declared_accounts_visible,
+            used_accounts,
+            declared_commodities_visible,
+            used_commodities,
             declared_accounts,
-            new_account,
+            strict,
             default_commodity,
         }
     }
@@ -288,6 +305,41 @@ impl Draft {
         let byte = char_to_byte(&self.buffer, self.cursor);
         self.buffer.insert(byte, c);
         self.cursor = self.cursor.saturating_add(1);
+    }
+
+    /// Delete the word before the cursor. In account mode the boundary is
+    /// the colon: deletion stops just short of the previous `:`, so
+    /// `expenses:groceries` becomes `expenses:` — one segment at a time. A
+    /// cursor sitting right after a colon consumes that colon along with the
+    /// segment before it.
+    pub fn delete_word(&mut self, account_mode: bool) {
+        self.pristine = false;
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let mut i = self.cursor.min(chars.len());
+        let at = |j: usize| j.checked_sub(1).and_then(|k| chars.get(k)).copied();
+        if account_mode {
+            if at(i) == Some(':') {
+                i = i.saturating_sub(1);
+            }
+            while i > 0 && at(i).is_some_and(|c| c != ':') {
+                i = i.saturating_sub(1);
+            }
+        } else {
+            while i > 0 && at(i).is_some_and(char::is_whitespace) {
+                i = i.saturating_sub(1);
+            }
+            while i > 0 && at(i).is_some_and(|c| !c.is_whitespace()) {
+                i = i.saturating_sub(1);
+            }
+        }
+        let head: String = chars.get(..i).unwrap_or(&[]).iter().collect();
+        let tail: String = chars
+            .get(self.cursor.min(chars.len())..)
+            .unwrap_or(&[])
+            .iter()
+            .collect();
+        self.buffer = format!("{head}{tail}");
+        self.cursor = i;
     }
 
     /// Delete the char before the cursor.
@@ -577,16 +629,19 @@ impl Session {
             Field::Date => self.submit_date(),
             Field::Description => self.submit_description(),
             Field::Account(i) => self.submit_account(i, false),
-            Field::Amount(i) => self.submit_amount(i),
+            Field::Amount(i) => self.submit_amount(i, false),
         }
     }
 
-    /// Re-submit an account after the user confirmed creating it.
-    pub fn submit_confirmed_account(&mut self) -> Submit {
-        if let Field::Account(i) = self.draft.field {
-            self.submit_account(i, true)
-        } else {
-            Submit::Invalid("nothing to confirm".to_owned())
+    /// Re-submit the current field after the user answered a
+    /// [`Submit::Confirm`] question with yes.
+    pub fn submit_confirmed(&mut self) -> Submit {
+        match self.draft.field {
+            Field::Account(i) => self.submit_account(i, true),
+            Field::Amount(i) => self.submit_amount(i, true),
+            Field::Date | Field::Description => {
+                Submit::Invalid("nothing to confirm".to_owned())
+            }
         }
     }
 
@@ -598,6 +653,9 @@ impl Session {
             } else {
                 Submit::Undo
             };
+        }
+        if text == "q" {
+            return Submit::Quit;
         }
         let Some(date) = dates::resolve(&text, self.ctx.today) else {
             return Submit::Invalid(format!("cannot understand date {text:?}"));
@@ -627,30 +685,26 @@ impl Session {
         if text.is_empty() {
             return self.finish(i);
         }
-        if !confirmed && !self.ctx.known_accounts.contains(&text) {
-            match self.ctx.new_account {
-                NewAccountPolicy::Allow => {}
-                NewAccountPolicy::Warn => {
-                    self.commit_account(i, &text);
-                    return Submit::AdvancedWithNote(format!("{text} is a new account"));
-                }
-                NewAccountPolicy::Confirm => {
-                    return Submit::ConfirmNewAccount {
-                        suggestion: self.near_miss(&text),
-                        name: text,
-                    };
-                }
-                NewAccountPolicy::Error => {
-                    let hint = self
-                        .near_miss(&text)
-                        .map_or_else(String::new, |s| format!(" (did you mean {s}?)"));
-                    return Submit::Invalid(format!(
-                        "{text} is not a known account{hint}"
-                    ));
-                }
-            }
+        // Strict mode mirrors `hledger check accounts`: only declarations
+        // visible at the insertion point count. rledger never declares
+        // anything itself — the question is whether to *use* the name.
+        if !confirmed && self.ctx.strict && !self.ctx.declared_accounts_visible.contains(&text)
+        {
+            let hint = self
+                .near_miss(&text)
+                .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
+            return Submit::Confirm {
+                question: format!("{text} is not a declared account — use it anyway?{hint}"),
+            };
         }
+        // Not strict: accept, but surface names that are genuinely new to
+        // the journal (neither declared nor ever used).
+        let brand_new = !self.ctx.declared_accounts_visible.contains(&text)
+            && !self.ctx.used_accounts.contains(&text);
         self.commit_account(i, &text);
+        if brand_new && !confirmed {
+            return Submit::AdvancedWithNote(format!("{text} is new to this journal"));
+        }
         Submit::Advanced
     }
 
@@ -662,29 +716,96 @@ impl Session {
         self.advance_to(Field::Amount(i));
     }
 
-    fn submit_amount(&mut self, i: usize) -> Submit {
+    fn submit_amount(&mut self, i: usize, confirmed: bool) -> Submit {
         let mut text = self.draft.buffer.trim().to_owned();
-        if !text.is_empty() {
-            let Some(parsed) = parse_amount(&text, &self.ctx.amount_ctx) else {
-                return Submit::Invalid(format!("cannot parse amount {text:?}"));
-            };
-            // A bare number gets the default commodity written into the
-            // transaction being built — visibly, and still editable via ↑.
-            // Otherwise this posting and a balancing prefill carrying the
-            // default would read as two different commodities and the
-            // transaction could never balance.
-            if parsed.commodity.is_empty() && !text.contains(['@', '=']) {
-                if let Some(symbol) = self.ctx.default_commodity_symbol() {
-                    text = attach_commodity(&text, &symbol, &self.ctx.amount_ctx);
-                }
+        if text.is_empty() {
+            // An empty amount means: this is the last posting — fill it with
+            // the balancing amount, explicitly, and finish.
+            return self.finish_via_empty_amount(i);
+        }
+        let Some(parsed) = parse_amount(&text, &self.ctx.amount_ctx) else {
+            return Submit::Invalid(format!("cannot parse amount {text:?}"));
+        };
+        // A bare number gets the default commodity written into the
+        // transaction being built — visibly, and still editable via ↑.
+        // Otherwise this posting and a balancing prefill carrying the
+        // default would read as two different commodities and the
+        // transaction could never balance.
+        let mut commodity = parsed.commodity;
+        if commodity.is_empty() && !text.contains(['@', '=']) {
+            if let Some(symbol) = self.ctx.default_commodity_symbol() {
+                text = attach_commodity(&text, &symbol, &self.ctx.amount_ctx);
+                commodity = symbol;
             }
         }
+        // Strict mode mirrors `hledger check commodities`. A unitless
+        // amount is always valid, even in strict mode.
+        if !confirmed && !commodity.is_empty() {
+            if self.ctx.strict
+                && !self.ctx.declared_commodities_visible.contains(&commodity)
+            {
+                let hint = closest(&commodity, self.ctx.declared_commodities_visible.iter())
+                    .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
+                return Submit::Confirm {
+                    question: format!(
+                        "{commodity} is not a declared commodity — use it anyway?{hint}"
+                    ),
+                };
+            }
+            let brand_new = !self.ctx.declared_commodities_visible.contains(&commodity)
+                && !self.ctx.used_commodities.contains(&commodity);
+            if brand_new {
+                self.accept_amount(i, &text);
+                return Submit::AdvancedWithNote(format!(
+                    "{commodity} is a commodity new to this journal"
+                ));
+            }
+        }
+        self.accept_amount(i, &text);
+        Submit::Advanced
+    }
+
+    /// Commit an amount and advance to the next account prompt.
+    fn accept_amount(&mut self, i: usize, text: &str) {
         // Put the (possibly commodity-completed) text back in the buffer:
         // advancing stashes the buffer into this field's slot.
-        self.draft.set_buffer(&text);
+        self.draft.set_buffer(text);
         ensure_len(&mut self.draft.postings, i.saturating_add(1));
         self.advance_to(Field::Account(i.saturating_add(1)));
-        Submit::Advanced
+    }
+
+    /// An empty amount submits the balancing amount — written explicitly —
+    /// and ends the transaction. The first posting must carry an amount.
+    fn finish_via_empty_amount(&mut self, i: usize) -> Submit {
+        if i == 0 {
+            return Submit::Invalid("an amount is required on the first posting".to_owned());
+        }
+        let has_later = self
+            .draft
+            .postings
+            .get(i.saturating_add(1)..)
+            .is_some_and(|rest| {
+                rest.iter()
+                    .any(|(a, amt)| !a.trim().is_empty() || !amt.trim().is_empty())
+            });
+        if has_later {
+            return Submit::Invalid(
+                "an empty amount only finishes on the last posting — later postings exist"
+                    .to_owned(),
+            );
+        }
+        let Some(balancing) = self.balancing_prefill(i) else {
+            return Submit::Invalid(
+                "cannot compute the balancing amount here — enter it explicitly".to_owned(),
+            );
+        };
+        ensure_len(&mut self.draft.postings, i.saturating_add(1));
+        if let Some(p) = self.draft.postings.get_mut(i) {
+            p.1.clone_from(&balancing);
+        }
+        self.draft.set_buffer(&balancing);
+        self.draft.postings.truncate(i.saturating_add(1));
+        self.complete_draft()
     }
 
     /// Finish the transaction at an empty account prompt for posting `i`.
@@ -699,6 +820,11 @@ impl Session {
         {
             self.draft.postings.pop();
         }
+        self.complete_draft()
+    }
+
+    /// Validate the drafted postings and produce the finished transaction.
+    fn complete_draft(&self) -> Submit {
         if self.draft.postings.len() < 2 {
             return Submit::Invalid(
                 "a transaction needs at least two postings (Ctrl-C to abort)".to_owned(),
@@ -767,6 +893,25 @@ impl Session {
         let segmentish = complete::match_quality(Matching::Segment, name, candidate).is_some();
         let close_enough = d <= name.chars().count().saturating_div(2).max(2);
         (segmentish || close_enough).then(|| candidate.clone())
+    }
+
+    /// A discoverability hint for the current field, shown dimmed under the
+    /// prompt when nothing more urgent (menu, ghost, note) is on screen.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        let empty = self.draft.buffer.trim().is_empty();
+        match self.draft.field {
+            Field::Date => Some(
+                "Enter accepts · u undoes the last transaction · q saves and quits".to_owned(),
+            ),
+            Field::Account(i) if i >= 1 && empty => {
+                Some("Enter on the empty account finishes the transaction".to_owned())
+            }
+            Field::Amount(i) if i >= 1 && empty => Some(
+                "Enter on the empty amount writes the balancing amount and finishes".to_owned(),
+            ),
+            _ => None,
+        }
     }
 
     /// The running imbalance of the committed postings, for display.
@@ -858,6 +1003,16 @@ fn template_postings(t: &Transaction) -> Vec<(String, String)> {
         .iter()
         .map(|p| (p.account.clone(), p.amount.clone()))
         .collect()
+}
+
+/// The pool entry closest to `name` (case-insensitive edit distance ≤ 2),
+/// for "did you mean …?" hints.
+fn closest<'a, I: Iterator<Item = &'a String>>(name: &str, pool: I) -> Option<String> {
+    let lower = name.to_lowercase();
+    pool.map(|c| (levenshtein(&lower, &c.to_lowercase()), c))
+        .min_by(|(da, ca), (db, cb)| da.cmp(db).then_with(|| ca.cmp(cb)))
+        .filter(|(d, _)| *d <= 2)
+        .map(|(_, c)| c.clone())
 }
 
 /// Attach a commodity symbol to a bare typed number, following the
@@ -1028,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transaction_with_a_bare_posting_may_finish() {
+    fn an_empty_amount_writes_the_balancing_amount_and_finishes() {
         let (mut s, _t) = session(JOURNAL);
         s.submit();
         type_in(&mut s, "Test");
@@ -1039,10 +1194,83 @@ mod tests {
         s.submit();
         type_in(&mut s, "assets:bank:checking");
         s.submit();
-        type_in(&mut s, ""); // elided amount
+        type_in(&mut s, ""); // empty amount: balance explicitly and finish
+        let r = s.submit();
+        let Submit::Done(txn) = r else {
+            panic!("expected Done, got {r:?}");
+        };
+        // Never elided — the balancing amount is written out.
+        assert_eq!(txn.postings[1].1, "-10 EUR");
+        assert_eq!(txn.postings.len(), 2);
+    }
+
+    #[test]
+    fn the_first_posting_requires_an_amount() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Test");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
         s.submit();
         type_in(&mut s, "");
-        assert!(matches!(s.submit(), Submit::Done(_)));
+        let r = s.submit();
+        let Submit::Invalid(msg) = r else {
+            panic!("expected Invalid, got {r:?}");
+        };
+        assert!(msg.contains("first posting"), "{msg}");
+        assert_eq!(s.draft.field, Field::Amount(0));
+    }
+
+    #[test]
+    fn an_empty_amount_with_nothing_to_balance_is_rejected() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Test");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "10 EUR");
+        s.submit();
+        type_in(&mut s, "assets:bank:checking");
+        s.submit();
+        type_in(&mut s, "-10 EUR");
+        s.submit();
+        type_in(&mut s, "expenses:misc");
+        s.submit();
+        // Already balanced: nothing sensible to write here.
+        type_in(&mut s, "");
+        let r = s.submit();
+        assert!(matches!(r, Submit::Invalid(_)), "{r:?}");
+    }
+
+    #[test]
+    fn q_at_the_date_prompt_quits() {
+        let (mut s, _t) = session(JOURNAL);
+        type_in(&mut s, "q");
+        assert_eq!(s.submit(), Submit::Quit);
+        // Anywhere else `q` is just text.
+        type_in(&mut s, "today");
+        s.submit();
+        type_in(&mut s, "q");
+        assert_eq!(s.submit(), Submit::Advanced);
+        assert_eq!(s.draft.description, "q");
+    }
+
+    #[test]
+    fn ctrl_w_on_accounts_deletes_one_segment_keeping_the_colon() {
+        let mut d = Draft::new();
+        d.set_buffer("expenses:travel:train");
+        d.delete_word(true);
+        assert_eq!(d.buffer, "expenses:travel:");
+        // Right after a colon, the colon and its segment go together.
+        d.delete_word(true);
+        assert_eq!(d.buffer, "expenses:");
+        d.delete_word(true);
+        assert_eq!(d.buffer, "");
+        // Non-account fields keep whitespace-word deletion.
+        d.set_buffer("23.45 EUR");
+        d.delete_word(false);
+        assert_eq!(d.buffer, "23.45 ");
     }
 
     #[test]
@@ -1072,7 +1300,8 @@ mod tests {
 
     #[test]
     fn new_account_warn_policy_advances_with_note() {
-        // JOURNAL has no account directives → default policy is warn.
+        // Not strict (the default): the undeclared, never-used account is
+        // accepted, with a passing note.
         let (mut s, _t) = session(JOURNAL);
         s.submit();
         type_in(&mut s, "X");
@@ -1084,40 +1313,76 @@ mod tests {
     }
 
     #[test]
-    fn declared_journals_default_to_confirm_with_near_miss() {
+    fn strict_mode_asks_before_using_undeclared_accounts() {
         let src = "account expenses:travel:train\naccount expenses:groceries\n";
-        let (mut s, _t) = session(src);
-        s.submit();
-        type_in(&mut s, "X");
-        s.submit();
-        type_in(&mut s, "exp:trav");
-        let r = s.submit();
-        let Submit::ConfirmNewAccount { name, suggestion } = r else {
-            panic!("expected ConfirmNewAccount, got {r:?}");
-        };
-        assert_eq!(name, "exp:trav");
-        assert_eq!(suggestion.as_deref(), Some("expenses:travel:train"));
-        // Confirming proceeds.
-        assert_eq!(s.submit_confirmed_account(), Submit::Advanced);
-    }
-
-    #[test]
-    fn error_policy_blocks_new_accounts() {
-        let src = "account expenses:groceries\n";
         let cfg = Config {
-            new_account: Some(crate::config::NewAccountPolicy::Error),
+            strict: true,
             ..Config::default()
         };
         let (mut s, _t) = session_with(src, cfg);
         s.submit();
         type_in(&mut s, "X");
         s.submit();
-        type_in(&mut s, "expenses:grocery");
+        type_in(&mut s, "exp:trav");
         let r = s.submit();
-        let Submit::Invalid(msg) = r else {
-            panic!("expected Invalid, got {r:?}");
+        let Submit::Confirm { question } = r else {
+            panic!("expected Confirm, got {r:?}");
         };
-        assert!(msg.contains("did you mean expenses:groceries"), "{msg}");
+        // The wording is about *using* the account — rledger declares
+        // nothing — and carries the near-miss.
+        assert!(question.contains("not a declared account"), "{question}");
+        assert!(question.contains("use it anyway"), "{question}");
+        assert!(
+            question.contains("did you mean expenses:travel:train"),
+            "{question}"
+        );
+        // Confirming proceeds.
+        assert_eq!(s.submit_confirmed(), Submit::Advanced);
+    }
+
+    #[test]
+    fn strict_mode_asks_before_using_undeclared_commodities() {
+        let src = "account a:b\naccount c:d\ncommodity 1.00 EUR\n";
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(src, cfg);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit();
+        type_in(&mut s, "5 EUX");
+        let r = s.submit();
+        let Submit::Confirm { question } = r else {
+            panic!("expected Confirm, got {r:?}");
+        };
+        assert!(question.contains("EUX is not a declared commodity"), "{question}");
+        assert!(question.contains("did you mean EUR"), "{question}");
+        assert_eq!(s.submit_confirmed(), Submit::Advanced);
+        // A declared commodity passes without a question…
+        type_in(&mut s, "c:d");
+        s.submit();
+        type_in(&mut s, "-5 EUR");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn strict_mode_never_questions_unitless_amounts() {
+        let src = "account a:b\naccount c:d\ncommodity 1.00 EUR\n";
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(src, cfg);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit();
+        type_in(&mut s, "5");
+        assert_eq!(s.submit(), Submit::Advanced);
     }
 
     #[test]
@@ -1228,7 +1493,7 @@ mod tests {
         type_in(&mut s, "X");
         s.submit();
         type_in(&mut s, "a:b");
-        s.submit_confirmed_account();
+        s.submit_confirmed();
         type_in(&mut s, "10 EUR");
         s.submit();
         assert_eq!(
@@ -1319,7 +1584,7 @@ mod tests {
         type_in(&mut s, "X");
         s.submit();
         type_in(&mut s, "a:b");
-        s.submit_confirmed_account();
+        s.submit_confirmed();
         type_in(&mut s, "-12.50");
         s.submit();
         assert_eq!(s.draft.postings[0].1, "$-12.50");
@@ -1333,7 +1598,7 @@ mod tests {
         type_in(&mut s, "X");
         s.submit();
         type_in(&mut s, "a:b");
-        s.submit_confirmed_account();
+        s.submit_confirmed();
         type_in(&mut s, "5 USD @ 1.10");
         s.submit();
         assert_eq!(s.draft.postings[0].1, "5 USD @ 1.10");

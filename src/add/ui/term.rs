@@ -133,8 +133,8 @@ impl Ui {
             match key.code {
                 KeyCode::Char('y' | 'Y') => {
                     self.note = Note::None;
-                    let r = session.submit_confirmed_account();
-                    self.apply_submit(session, recovery, r, out)?;
+                    let r = session.submit_confirmed();
+                    return self.apply_submit(session, recovery, r, out);
                 }
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => self.note = Note::None,
                 _ => {}
@@ -222,7 +222,7 @@ impl Ui {
                     }
                 } else {
                     let r = session.submit();
-                    self.apply_submit(session, recovery, r, out)?;
+                    return self.apply_submit(session, recovery, r, out);
                 }
             }
             _ => {}
@@ -249,7 +249,8 @@ impl Ui {
                 self.menu = None;
             }
             KeyCode::Char('w') => {
-                delete_word(session);
+                let account_mode = matches!(session.draft.field, super::Field::Account(_));
+                session.draft.delete_word(account_mode);
                 self.menu = None;
             }
             KeyCode::Char('r') => {
@@ -275,16 +276,15 @@ impl Ui {
         recovery: &Recovery,
         result: Submit,
         out: &mut impl Write,
-    ) -> io::Result<()> {
+    ) -> io::Result<Flow> {
         match result {
             Submit::Advanced => self.note = Note::None,
             Submit::AdvancedWithNote(n) => self.note = Note::Info(n),
             Submit::Invalid(m) => self.note = Note::Error(m),
-            Submit::ConfirmNewAccount { name, suggestion } => {
-                let hint = suggestion
-                    .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
-                self.note = Note::Confirm(format!("{name} is new — create it? [y/n]{hint}"));
+            Submit::Confirm { question } => {
+                self.note = Note::Confirm(format!("{question} [y/n]"));
             }
+            Submit::Quit => return Ok(Flow::Quit),
             Submit::Undo => {
                 if let Some(t) = session.undo() {
                     rewrite_recovery(session, recovery);
@@ -311,7 +311,7 @@ impl Ui {
                 session.complete(txn);
             }
         }
-        Ok(())
+        Ok(Flow::Continue)
     }
 
     fn open_menu(&mut self, candidates: Vec<String>) {
@@ -399,6 +399,8 @@ impl Ui {
             (None, Note::None) => {
                 if let Some(g) = ghost(session) {
                     rows.push((format!("    {g}  ← → to accept"), true));
+                } else if let Some(h) = session.hint() {
+                    rows.push((format!("  {h}"), true));
                 }
             }
             (None, Note::Info(n) | Note::Confirm(n)) => rows.push((format!("  {n}"), true)),
@@ -541,19 +543,3 @@ fn ghost(session: &Session) -> Option<String> {
     (top != session.draft.buffer).then_some(top)
 }
 
-/// Delete the whitespace-delimited word before the cursor.
-fn delete_word(session: &mut Session) {
-    let draft = &mut session.draft;
-    let chars: Vec<char> = draft.buffer.chars().collect();
-    let mut i = draft.cursor.min(chars.len());
-    while i > 0 && chars.get(i.saturating_sub(1)).is_some_and(|c| c.is_whitespace()) {
-        i = i.saturating_sub(1);
-    }
-    while i > 0 && chars.get(i.saturating_sub(1)).is_some_and(|c| !c.is_whitespace()) {
-        i = i.saturating_sub(1);
-    }
-    let head: String = chars.get(..i).unwrap_or(&[]).iter().collect();
-    let tail: String = chars.get(draft.cursor.min(chars.len())..).unwrap_or(&[]).iter().collect();
-    draft.buffer = format!("{head}{tail}");
-    draft.cursor = i;
-}

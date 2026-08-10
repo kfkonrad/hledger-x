@@ -27,10 +27,13 @@ pub fn run<R: BufRead, W: Write>(
     loop {
         let field = session.draft.field;
         let prefill = session.draft.buffer.clone();
+        let hint = session
+            .hint()
+            .map_or_else(String::new, |h| format!(" ({h})"));
         if prefill.is_empty() {
-            write!(out, "{}: ", field.label())?;
+            write!(out, "{}{hint}: ", field.label())?;
         } else {
-            write!(out, "{} [{prefill}]: ", field.label())?;
+            write!(out, "{} [{prefill}]{hint}: ", field.label())?;
         }
         out.flush()?;
         let mut line = String::new();
@@ -47,21 +50,24 @@ pub fn run<R: BufRead, W: Write>(
             Submit::Advanced => {}
             Submit::AdvancedWithNote(note) => writeln!(out, "note: {note}")?,
             Submit::Invalid(msg) => writeln!(out, "error: {msg}")?,
-            Submit::ConfirmNewAccount { name, suggestion } => {
-                let hint = suggestion
-                    .map_or_else(String::new, |s| format!(" (did you mean {s}?)"));
-                write!(out, "{name} is a new account — create it{hint}? [y/N]: ")?;
+            Submit::Quit => break,
+            Submit::Confirm { question } => {
+                write!(out, "{question} [y/N]: ")?;
                 out.flush()?;
                 let mut answer = String::new();
                 if input.read_line(&mut answer)? == 0 {
                     break;
                 }
                 if answer.trim().eq_ignore_ascii_case("y") {
-                    if let Submit::Invalid(msg) = session.submit_confirmed_account() {
-                        writeln!(out, "error: {msg}")?;
+                    match session.submit_confirmed() {
+                        Submit::Invalid(msg) => writeln!(out, "error: {msg}")?,
+                        Submit::Done(txn) => {
+                            finish_txn(session, recovery, *txn, out)?;
+                        }
+                        _ => {}
                     }
                 } else {
-                    writeln!(out, "not created")?;
+                    writeln!(out, "kept the field for editing")?;
                 }
             }
             Submit::Undo => {
@@ -70,19 +76,27 @@ pub fn run<R: BufRead, W: Write>(
                     writeln!(out, "undid: {} {}", t.date.format("%Y-%m-%d"), t.description)?;
                 }
             }
-            Submit::Done(txn) => {
-                let txn = *txn;
-                if let Err(e) = recovery.record(&txn) {
-                    writeln!(out, "warning: could not write recovery journal: {e}")?;
-                }
-                for l in render_done(session, &txn) {
-                    writeln!(out, "{l}")?;
-                }
-                session.complete(txn);
-            }
+            Submit::Done(txn) => finish_txn(session, recovery, *txn, out)?,
         }
     }
     Ok(session.completed.clone())
+}
+
+/// Record, echo and bank one finished transaction.
+fn finish_txn<W: Write>(
+    session: &mut Session,
+    recovery: &Recovery,
+    txn: NewTransaction,
+    out: &mut W,
+) -> std::io::Result<()> {
+    if let Err(e) = recovery.record(&txn) {
+        writeln!(out, "warning: could not write recovery journal: {e}")?;
+    }
+    for l in render_done(session, &txn) {
+        writeln!(out, "{l}")?;
+    }
+    session.complete(txn);
+    Ok(())
 }
 
 /// Replay transactions a dead session left in the recovery journal.
@@ -155,12 +169,20 @@ mod tests {
     }
 
     fn run_session(journal_src: &str, input: &str) -> (Vec<NewTransaction>, String, TempDir) {
+        run_session_with(journal_src, Config::default(), input)
+    }
+
+    fn run_session_with(
+        journal_src: &str,
+        config: Config,
+        input: &str,
+    ) -> (Vec<NewTransaction>, String, TempDir) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("main.journal");
         fs::write(&path, journal_src).unwrap();
         let journal = parse_journal(&path).unwrap();
         let map = FileMap::build(journal_src);
-        let ctx = SessionCtx::new(journal, Config::default(), today(), path, &map);
+        let ctx = SessionCtx::new(journal, config, today(), path, &map);
         let mut session = Session::new(ctx);
         let recovery = Recovery::at(dir.path().join("recovery.journal"));
         let mut out = Vec::new();
@@ -216,23 +238,38 @@ mod tests {
     }
 
     #[test]
-    fn new_account_confirmation_via_pipe() {
-        let src = "account expenses:groceries\naccount assets:cash\n";
-        // date, desc, new account → y, amount, second account (known), amount, finish
-        let input = "\nX\nexpenses:grocerys\ny\n5 EUR\nassets:cash\n\n.\n";
-        let (done, out, _t) = run_session(src, input);
+    fn strict_confirmation_via_pipe() {
+        let src =
+            "account expenses:groceries\naccount assets:cash\ncommodity 1.00 EUR\n";
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        // date, desc, undeclared account → y, amount, second account
+        // (declared), `.` clears the pre-fill: the empty amount balances
+        // and finishes.
+        let input = "\nX\nexpenses:grocerys\ny\n5 EUR\nassets:cash\n.\n";
+        let (done, out, _t) = run_session_with(src, cfg, input);
         assert_eq!(done.len(), 1, "{out}");
+        assert!(out.contains("not a declared account"), "{out}");
+        assert!(out.contains("use it anyway"), "{out}");
         assert!(out.contains("did you mean expenses:groceries"), "{out}");
         assert_eq!(done[0].postings[0].0, "expenses:grocerys");
+        // The empty amount was written out explicitly, in the declared style.
+        assert_eq!(done[0].postings[1].1, "-5.00 EUR");
     }
 
     #[test]
-    fn declining_a_new_account_stays_on_the_field() {
+    fn declining_an_undeclared_account_stays_on_the_field() {
         let src = "account expenses:groceries\n";
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
         let input = "\nX\nexpenses:zzz\nn\n";
-        let (done, out, _t) = run_session(src, input);
+        let (done, out, _t) = run_session_with(src, cfg, input);
         assert!(done.is_empty());
-        assert!(out.contains("not created"), "{out}");
+        assert!(out.contains("kept the field"), "{out}");
     }
 
     #[test]

@@ -9,20 +9,6 @@ use serde::Deserialize;
 
 use crate::add::write::{Insertion, WriteOptions};
 
-/// What to do when an entered account (or payee) is new to the journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NewAccountPolicy {
-    /// Prompt, surfacing near-misses ("did you mean …?").
-    Confirm,
-    /// Warn but accept.
-    Warn,
-    /// Accept silently.
-    Allow,
-    /// Refuse the field until it matches something known.
-    Error,
-}
-
 /// A completion matching strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,9 +33,12 @@ pub struct Config {
     pub sort: bool,
     /// Where new transactions are inserted.
     pub insertion: Insertion,
-    /// New-account guard. `None` means: decide from the journal — `confirm`
-    /// when it declares accounts, `warn` otherwise.
-    pub new_account: Option<NewAccountPolicy>,
+    /// Strict mode: entering an account or commodity that is not declared
+    /// (via `account` / `commodity` directives visible at the insertion
+    /// point) asks for confirmation first. Off by default — then undeclared
+    /// names are accepted, with a passing note when they are new to the
+    /// journal.
+    pub strict: bool,
     /// Frecency half-life in days.
     pub half_life_days: f64,
     /// Matching for the account field. Substring by default, switching to
@@ -69,7 +58,7 @@ impl Default for Config {
             format_file: true,
             sort: false,
             insertion: Insertion::Append,
-            new_account: None,
+            strict: false,
             half_life_days: crate::add::index::DEFAULT_HALF_LIFE_DAYS,
             account_matching: Matching::Substring,
             description_matching: Matching::Substring,
@@ -98,7 +87,7 @@ struct Raw {
     format_file: Option<bool>,
     sort: Option<bool>,
     insertion: Option<RawInsertion>,
-    new_account: Option<NewAccountPolicy>,
+    strict: Option<bool>,
     half_life_days: Option<f64>,
     account_matching: Option<Matching>,
     description_matching: Option<Matching>,
@@ -197,8 +186,8 @@ fn apply_str(cfg: &mut Config, src: &str, origin: &str) -> Result<(), ConfigErro
             RawInsertion::Chronological => Insertion::Chronological,
         };
     }
-    if let Some(v) = raw.new_account {
-        cfg.new_account = Some(v);
+    if let Some(v) = raw.strict {
+        cfg.strict = v;
     }
     if let Some(v) = raw.half_life_days {
         cfg.half_life_days = v;
@@ -249,7 +238,7 @@ mod tests {
         assert!(cfg.format_file);
         assert!(!cfg.sort);
         assert_eq!(cfg.insertion, Insertion::Append);
-        assert_eq!(cfg.new_account, None);
+        assert!(!cfg.strict);
         assert!((cfg.half_life_days - 90.0).abs() < f64::EPSILON);
         assert_eq!(cfg.account_matching, Matching::Substring);
         assert_eq!(cfg.description_matching, Matching::Substring);
@@ -268,11 +257,11 @@ mod tests {
     #[test]
     fn enums_parse_from_lowercase() {
         let cfg = load_str(
-            Some("new_account = \"error\"\ninsertion = \"chronological\"\naccount_matching = \"fuzzy\"\n"),
+            Some("strict = true\ninsertion = \"chronological\"\naccount_matching = \"fuzzy\"\n"),
             None,
         )
         .unwrap();
-        assert_eq!(cfg.new_account, Some(NewAccountPolicy::Error));
+        assert!(cfg.strict);
         assert_eq!(cfg.insertion, Insertion::Chronological);
         assert_eq!(cfg.account_matching, Matching::Fuzzy);
     }

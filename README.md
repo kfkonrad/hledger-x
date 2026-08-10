@@ -136,23 +136,35 @@ date, description, then account/amount pairs — with:
   written, at the file's own alignment widths
 - **pre-filled postings** from the most recent transaction with the same
   description; the final amount is pre-filled with the balancing amount.
-  Typing over a pre-fill replaces it; Enter accepts it as-is
+  Typing over a pre-fill replaces it; Enter accepts it as-is. The first
+  posting must carry an amount; accepting an **empty amount** on any later
+  posting writes the balancing amount explicitly and finishes the
+  transaction — the quickest way to end one
 - **completion** everywhere: ghost-text suggestion (`→` accepts) plus a
   `Tab` menu, ranked by frecency and conditioned on the description already
   entered. Account queries match by substring, or per-segment once the query
   contains a colon (`ex:gro` → `expenses:groceries`)
-- a **new-account guard** that surfaces near-misses ("did you mean …?")
-  instead of silently forking your account tree
+- an optional **strict mode** (`strict = true`): using an account or
+  commodity that is not declared at the insertion point asks first — "…is
+  not a declared account — use it anyway?" — surfacing near-misses ("did
+  you mean …?") instead of silently forking your account tree. rledger
+  never declares anything itself; the question is only whether to use the
+  name. Off by default: undeclared names are then accepted, with a passing
+  note when they are new to the journal
 - **smart dates**: `30`, `8/30`, `yesterday`, resolved against today and
   shown resolved in the preview before you commit
 - a running per-commodity imbalance in the separator line; a transaction that
   provably does not balance cannot be finished
 
-Keys: `Enter` accepts a field (on an empty account line it finishes the
-transaction), `↑`/`↓` move between fields, `Tab`/`Shift-Tab` cycle the
-completion menu, `→` accepts the ghost suggestion, `Ctrl-E` opens the draft in
-`$EDITOR`, `Ctrl-C` aborts the current transaction, `Ctrl-D` quits. `u` at the
-date prompt undoes the last completed transaction.
+Keys: `Enter` accepts a field (on an empty amount or an empty account line it
+finishes the transaction), `↑`/`↓` move between fields, `Tab`/`Shift-Tab`
+cycle the completion menu, `→` accepts the ghost suggestion, `Ctrl-W` deletes
+one word — on account fields one `:`-segment at a time — `Ctrl-E` opens the
+draft in `$EDITOR`, `Ctrl-C` aborts the current transaction. To leave, type
+`q` at the date prompt or press `Ctrl-D` anywhere; both write everything
+completed. `u` at the date prompt undoes the last completed transaction. The
+UI shows these hints inline as the fields come up, so none of this needs
+remembering.
 
 Everything is buffered and written **once, on exit** — both `Ctrl-C` and
 `Ctrl-D` keep completed transactions. A recovery journal under
@@ -183,15 +195,18 @@ optional; unknown keys are rejected so typos cannot silently disable anything.
 format_file = true            # rewrite the whole file, formatted, on write
 sort = false                  # also sort transactions by date on write
 insertion = "append"          # or "chronological"
-new_account = "confirm"       # confirm | warn | allow | error
+strict = false                # ask before using undeclared accounts/commodities
 half_life_days = 90           # frecency decay half-life
 account_matching = "substring"     # prefix | substring | segment | fuzzy
 description_matching = "substring"
 default_commodity = "EUR"     # written into bare amounts as visible, editable text
 ```
 
-`new_account` defaults to `confirm` when the journal declares accounts via
-`account` directives and `warn` otherwise. `format_file = false` writes only
+With `strict = true`, accounts and commodities are checked against the
+declarations (`account` / `commodity` directives) visible at the insertion
+point — the same set `hledger check accounts` / `check commodities` would
+accept there — and anything undeclared asks for confirmation before being
+used. Unitless amounts are always valid. `format_file = false` writes only
 the new lines (rendered at the would-be file-wide widths) and warns when the
 file's existing lines become stale; combining it with `sort = true` is
 rejected, since sorting rewrites the whole file anyway.
