@@ -374,9 +374,12 @@ unproven and harder to complete against. **Start with two fields; uniting them
 later is a change to the field state machine only**, since both designs share
 the same completers and the same pre-fill logic. Keep that seam clean.
 
-Postings are pre-filled from the ranked match, so accepting is one keypress
-either way. The final posting's amount is pre-filled with the negated running
-sum.
+Accounts are pre-filled from the template, so accepting is one keypress.
+Amounts are **never pre-filled into the buffer**: the template amount (or,
+on the final posting, the negated running sum) appears as a grey inline
+suggestion instead — `Tab`/`→` copies it into the buffer for editing, Enter
+submits the field as entered. This keeps the empty buffer's meaning ("balance
+and finish") one keypress away without a Ctrl-U first.
 
 **The first posting must carry an amount.** Accepting an **empty amount** on
 any later posting means "this is the last posting": the balancing amount is
@@ -389,7 +392,9 @@ was typed explicitly.
 ## Dates
 
 - Default is **today**, for every transaction — not the previous entry's date
-  (which is what `hledger add` does).
+  (which is what `hledger add` does). It is a grey inline suggestion, not a
+  pre-fill: the field starts empty so a smart date can be typed directly,
+  Enter accepts the suggestion, `Tab`/`→` copies it in for editing.
 - Partial and smart dates accepted (`30`, `8/30`, `yesterday`), resolved against
   today.
 - The fully resolved date is rendered in the live block as you type, so an
@@ -401,8 +406,8 @@ was typed explicitly.
 | --- | --- |
 | `Enter` | accept field, advance; on an empty amount or an empty account line, finish the transaction |
 | `↑` / `↓` | move between fields, loading existing text for editing |
-| `Tab` / `Shift-Tab` | open completion menu / cycle candidates |
-| `→` | accept ghost-text autosuggestion |
+| `Tab` / `Shift-Tab` | pick up the grey suggestion, else open completion menu / cycle candidates |
+| `→` | pick up the grey suggestion / accept ghost-text autosuggestion |
 | `Ctrl-R` | history search (Up/Down are field navigation, not history) |
 | `Ctrl-E` | open the whole transaction in `$EDITOR`, reparse on close |
 | `Ctrl-W` | delete a word; on account fields, one `:`-segment at a time (stopping just short of the previous colon) |
@@ -444,8 +449,9 @@ obvious answer.
 **Presentation** — both at once, fish-style:
 - ghost text of the top candidate, `→` accepts (zero extra keystrokes in the
   common case)
-- `Tab` opens the menu, `Tab`/`Shift-Tab` cycle, arrows navigate; each entry
-  carries a hint (last-used date, amount from the matching transaction)
+- `Tab` opens the menu, `Tab`/`Shift-Tab` cycle, arrows navigate. Entries are
+  bare names — no hint columns — and the menu is as tall as the screen
+  allows, scrolling beyond that
 
 ## Amounts and commodities
 
@@ -456,7 +462,7 @@ obvious answer.
   Concretely: submitting a bare number materializes the default commodity
   into the amount (`12.50` becomes `12.50 EUR` in the built transaction and
   the live preview, following the commodity's declared symbol side/spacing;
-  `↑` goes back to edit it). Without this the balancing pre-fill — which
+  `↑` goes back to edit it). Without this the balancing amount — which
   carries the default commodity — and the bare amount would read as two
   different commodities, and the transaction could never balance. Amounts
   that already carry a commodity, or a cost/assertion tail, are never

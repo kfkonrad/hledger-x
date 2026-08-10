@@ -19,9 +19,6 @@ use super::{Session, Submit};
 use crate::add::amount::render_amount;
 use crate::add::write::{NewTransaction, Recovery};
 
-/// Maximum completion-menu entries shown at once.
-const MENU_ROWS: usize = 8;
-
 /// Open completion menu state.
 struct Menu {
     candidates: Vec<String>,
@@ -69,6 +66,7 @@ pub fn run(session: &mut Session, recovery: &Recovery) -> io::Result<Vec<NewTran
         note: Note::None,
         drawn: 0,
         cursor_row: 0,
+        menu_rows: 8,
     };
     loop {
         ui.draw(session, &mut out)?;
@@ -116,6 +114,9 @@ struct Ui {
     drawn: usize,
     /// Row (within the frame) the terminal cursor was left on.
     cursor_row: usize,
+    /// Menu entries that fit below the prompt, recomputed each draw from
+    /// the terminal height.
+    menu_rows: usize,
 }
 
 impl Ui {
@@ -162,54 +163,18 @@ impl Ui {
                 let len = session.draft.buffer.chars().count();
                 if session.draft.cursor < len {
                     session.draft.cursor = session.draft.cursor.saturating_add(1);
+                } else if let Some(s) = session.suggestion() {
+                    // → on the empty field picks up the grey suggestion.
+                    session.draft.set_buffer(&s);
+                    self.menu = None;
                 } else if let Some(g) = ghost(session) {
                     // → at end of line accepts the ghost suggestion.
                     session.draft.set_buffer(&g);
                     self.menu = None;
                 }
             }
-            KeyCode::Up => {
-                if let Some(m) = &mut self.menu {
-                    m.selected = m.selected.saturating_sub(1);
-                    m.scroll();
-                } else {
-                    session.draft.nav_up();
-                    self.note = Note::None;
-                }
-            }
-            KeyCode::Down => {
-                if let Some(m) = &mut self.menu {
-                    m.selected = m
-                        .selected
-                        .saturating_add(1)
-                        .min(m.candidates.len().saturating_sub(1));
-                    m.scroll();
-                } else {
-                    session.draft.nav_down();
-                    self.note = Note::None;
-                }
-            }
-            KeyCode::Tab => {
-                if let Some(m) = &mut self.menu {
-                    m.selected = m
-                        .selected
-                        .saturating_add(1)
-                        .checked_rem(m.candidates.len())
-                        .unwrap_or(0);
-                    m.scroll();
-                } else {
-                    let candidates = session.candidates();
-                    self.open_menu(candidates);
-                }
-            }
-            KeyCode::BackTab => {
-                if let Some(m) = &mut self.menu {
-                    m.selected = m
-                        .selected
-                        .checked_sub(1)
-                        .unwrap_or_else(|| m.candidates.len().saturating_sub(1));
-                    m.scroll();
-                }
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                self.navigate(session, key.code);
             }
             KeyCode::Esc => {
                 self.menu = None;
@@ -228,6 +193,47 @@ impl Ui {
             _ => {}
         }
         Ok(Flow::Continue)
+    }
+
+    /// The navigation keys: within an open menu they move the selection,
+    /// otherwise ↑/↓ move between fields and Tab picks up the grey
+    /// suggestion or opens the menu.
+    fn navigate(&mut self, session: &mut Session, code: KeyCode) {
+        let rows = self.menu_rows;
+        if let Some(m) = &mut self.menu {
+            let last = m.candidates.len().saturating_sub(1);
+            m.selected = match code {
+                KeyCode::Up => m.selected.saturating_sub(1),
+                KeyCode::Down => m.selected.saturating_add(1).min(last),
+                KeyCode::Tab => m
+                    .selected
+                    .saturating_add(1)
+                    .checked_rem(m.candidates.len())
+                    .unwrap_or(0),
+                _ => m.selected.checked_sub(1).unwrap_or(last),
+            };
+            m.scroll(rows);
+            return;
+        }
+        match code {
+            KeyCode::Up => {
+                session.draft.nav_up();
+                self.note = Note::None;
+            }
+            KeyCode::Down => {
+                session.draft.nav_down();
+                self.note = Note::None;
+            }
+            KeyCode::Tab => {
+                if let Some(s) = session.suggestion() {
+                    session.draft.set_buffer(&s);
+                } else {
+                    let candidates = session.candidates();
+                    self.open_menu(candidates);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Control-key chords.
@@ -349,26 +355,43 @@ impl Ui {
 
     /// Redraw the whole live frame.
     fn draw(&mut self, session: &Session, out: &mut impl Write) -> io::Result<()> {
-        let width = terminal::size().map_or(80, |(w, _)| usize::from(w)).max(20);
-        let mut rows: Vec<(String, bool)> = Vec::new(); // (text, dim)
+        let (width, height) =
+            terminal::size().map_or((80, 24), |(w, h)| (usize::from(w), usize::from(h)));
+        let width = width.max(20);
+        // A row is one or more (text, dim) spans.
+        let mut rows: Vec<Vec<(String, bool)>> = Vec::new();
 
         for l in session.preview_lines() {
-            rows.push((format!("  {l}"), false));
+            rows.push(vec![(format!("  {l}"), false)]);
         }
-        rows.push((separator(session, width), true));
+        rows.push(vec![(separator(session, width), true)]);
 
         let label = session.draft.field.label();
-        let prompt = format!("  {label} › {}", session.draft.buffer);
         let prompt_row = rows.len();
         let prompt_col = format!("  {label} › ")
             .chars()
             .count()
             .saturating_add(session.draft.cursor);
-        rows.push((prompt, false));
+        let mut prompt = vec![(format!("  {label} › {}", session.draft.buffer), false)];
+        if self.menu.is_none() {
+            // The grey inline suggestion sits after the (empty) buffer.
+            if let Some(s) = session.suggestion() {
+                prompt.push((s, true));
+            }
+        }
+        rows.push(prompt);
+
+        // The menu gets whatever fits below the prompt, scrolling beyond
+        // that; a footer row and one spare line stay reserved.
+        let menu_rows = height
+            .saturating_sub(rows.len())
+            .saturating_sub(2)
+            .max(1);
+        self.menu_rows = menu_rows;
 
         match (&self.menu, &self.note) {
             (Some(m), _) => {
-                let end = m.offset.saturating_add(MENU_ROWS).min(m.candidates.len());
+                let end = m.offset.saturating_add(menu_rows).min(m.candidates.len());
                 for (i, c) in m
                     .candidates
                     .get(m.offset..end)
@@ -378,33 +401,31 @@ impl Ui {
                 {
                     let idx = m.offset.saturating_add(i);
                     let marker = if idx == m.selected { "▸" } else { " " };
-                    let hint = session.candidate_hint(c);
-                    let hint = if hint.is_empty() {
-                        String::new()
-                    } else {
-                        format!("    {hint}")
-                    };
-                    rows.push((format!("  {marker} {c}{hint}"), idx != m.selected));
+                    rows.push(vec![(format!("  {marker} {c}"), idx != m.selected)]);
                 }
-                if m.candidates.len() > MENU_ROWS {
-                    rows.push((
+                if m.candidates.len() > menu_rows {
+                    rows.push(vec![(
                         format!(
-                            "    … {} more (Tab to cycle)",
-                            m.candidates.len().saturating_sub(MENU_ROWS)
+                            "    {}–{} of {}",
+                            m.offset.saturating_add(1),
+                            end,
+                            m.candidates.len()
                         ),
                         true,
-                    ));
+                    )]);
                 }
             }
             (None, Note::None) => {
                 if let Some(g) = ghost(session) {
-                    rows.push((format!("    {g}  ← → to accept"), true));
+                    rows.push(vec![(format!("    {g}  ← → to accept"), true)]);
                 } else if let Some(h) = session.hint() {
-                    rows.push((format!("  {h}"), true));
+                    rows.push(vec![(format!("  {h}"), true)]);
                 }
             }
-            (None, Note::Info(n) | Note::Confirm(n)) => rows.push((format!("  {n}"), true)),
-            (None, Note::Error(e)) => rows.push((format!("  ✗ {e}"), false)),
+            (None, Note::Info(n) | Note::Confirm(n)) => {
+                rows.push(vec![(format!("  {n}"), true)]);
+            }
+            (None, Note::Error(e)) => rows.push(vec![(format!("  ✗ {e}"), false)]),
         }
 
         // Paint: move to the frame top, clear down, print every row.
@@ -416,14 +437,18 @@ impl Ui {
         }
         out.queue(MoveToColumn(0))?
             .queue(Clear(ClearType::FromCursorDown))?;
-        for (i, (text, dim)) in rows.iter().enumerate() {
-            let clipped: String = text.chars().take(width).collect();
-            if *dim {
-                out.queue(SetAttribute(Attribute::Dim))?;
-            }
-            out.queue(Print(&clipped))?;
-            if *dim {
-                out.queue(SetAttribute(Attribute::Reset))?;
+        for (i, spans) in rows.iter().enumerate() {
+            let mut remaining = width;
+            for (text, dim) in spans {
+                let clipped: String = text.chars().take(remaining).collect();
+                remaining = remaining.saturating_sub(clipped.chars().count());
+                if *dim {
+                    out.queue(SetAttribute(Attribute::Dim))?;
+                }
+                out.queue(Print(&clipped))?;
+                if *dim {
+                    out.queue(SetAttribute(Attribute::Reset))?;
+                }
             }
             if i.saturating_add(1) < rows.len() {
                 out.queue(Print("\r\n"))?;
@@ -479,14 +504,15 @@ impl Ui {
 }
 
 impl Menu {
-    /// Keep the selection within the visible window.
-    const fn scroll(&mut self) {
+    /// Keep the selection within a `rows`-tall visible window.
+    const fn scroll(&mut self, rows: usize) {
+        let rows = if rows == 0 { 1 } else { rows };
         if self.selected < self.offset {
             self.offset = self.selected;
         }
-        let bottom = self.offset.saturating_add(MENU_ROWS);
+        let bottom = self.offset.saturating_add(rows);
         if self.selected >= bottom {
-            self.offset = self.selected.saturating_sub(MENU_ROWS).saturating_add(1);
+            self.offset = self.selected.saturating_sub(rows).saturating_add(1);
         }
     }
 }

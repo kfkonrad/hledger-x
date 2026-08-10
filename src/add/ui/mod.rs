@@ -461,27 +461,51 @@ impl Session {
         s
     }
 
-    /// Reset to a fresh draft at the date prompt (today pre-filled).
+    /// Reset to a fresh draft at the date prompt (today ghost-suggested).
     pub fn reset_draft(&mut self) {
         self.draft = Draft::new();
-        let today = self.ctx.today.format("%Y-%m-%d").to_string();
-        self.draft.set_buffer(&today);
     }
 
     /// The pre-fill for the current field, used when its stored text is
-    /// empty. (Loading an already-stored field on navigation wins.)
+    /// empty. (Loading an already-stored field on navigation wins.) Only
+    /// accounts pre-fill; dates and amounts are ghost-suggested instead —
+    /// see [`Self::suggestion`].
     #[must_use]
     pub fn prefill(&self) -> String {
         match self.draft.field {
-            Field::Date => self.ctx.today.format("%Y-%m-%d").to_string(),
-            Field::Description => String::new(),
+            Field::Date | Field::Description | Field::Amount(_) => String::new(),
             Field::Account(i) => self
                 .draft
                 .template
                 .get(i)
                 .map(|(a, _)| a.clone())
                 .unwrap_or_default(),
-            Field::Amount(i) => self.amount_prefill(i),
+        }
+    }
+
+    /// The ghost suggestion for the current (empty) field, shown dimmed
+    /// after the cursor. Tab or `→` copies it into the buffer for editing;
+    /// Enter submits the empty buffer instead — which itself means the
+    /// suggested date at the date prompt, and the explicit balancing amount
+    /// at a final amount prompt.
+    #[must_use]
+    pub fn suggestion(&self) -> Option<String> {
+        if !self.draft.buffer.is_empty() {
+            return None;
+        }
+        match self.draft.field {
+            Field::Date => Some(
+                self.draft
+                    .date
+                    .unwrap_or(self.ctx.today)
+                    .format("%Y-%m-%d")
+                    .to_string(),
+            ),
+            Field::Amount(i) => {
+                let s = self.amount_prefill(i);
+                (!s.is_empty()).then_some(s)
+            }
+            Field::Description | Field::Account(_) => None,
         }
     }
 
@@ -592,39 +616,6 @@ impl Session {
         }
     }
 
-    /// The hint shown next to a candidate in the menu: last-used date, and
-    /// for accounts the amount from the most recent matching transaction.
-    #[must_use]
-    pub fn candidate_hint(&self, candidate: &str) -> String {
-        match self.draft.field {
-            Field::Description => self.ctx.index.descriptions.get(candidate).map_or_else(
-                String::new,
-                |e| {
-                    let tpl = self
-                        .ctx
-                        .index
-                        .template(&self.ctx.journal, candidate)
-                        .and_then(|t| t.postings.first())
-                        .map(|p| p.amount.clone())
-                        .unwrap_or_default();
-                    format!("{} · {}", e.last_date.format("%Y-%m-%d"), tpl)
-                        .trim_end_matches(" · ")
-                        .to_owned()
-                },
-            ),
-            Field::Account(_) => {
-                let key = (self.draft.description.clone(), candidate.to_owned());
-                self.ctx
-                    .index
-                    .by_description
-                    .get(&key)
-                    .or_else(|| self.ctx.index.accounts.get(candidate))
-                    .map_or_else(String::new, |e| e.last_date.format("%Y-%m-%d").to_string())
-            }
-            Field::Date | Field::Amount(_) => String::new(),
-        }
-    }
-
     /// Submit the current buffer for the current field.
     pub fn submit(&mut self) -> Submit {
         match self.draft.field {
@@ -659,7 +650,14 @@ impl Session {
         if text == "q" {
             return Submit::Quit;
         }
-        let Some(date) = dates::resolve(&text, self.ctx.today) else {
+        // Empty accepts the ghost suggestion: the already-accepted date
+        // when navigating back, today otherwise.
+        let resolved = if text.is_empty() {
+            Some(self.draft.date.unwrap_or(self.ctx.today))
+        } else {
+            dates::resolve(&text, self.ctx.today)
+        };
+        let Some(date) = resolved else {
             return Submit::Invalid(format!("cannot understand date {text:?}"));
         };
         self.draft.date = Some(date);
@@ -924,6 +922,9 @@ impl Session {
             Field::Amount(i) if i >= 1 && empty => Some(
                 "Enter on the empty amount writes the balancing amount and finishes".to_owned(),
             ),
+            Field::Amount(0) if empty && self.suggestion().is_some() => {
+                Some("Tab or → picks up the suggestion".to_owned())
+            }
             _ => None,
         }
     }
@@ -1145,8 +1146,9 @@ mod tests {
     #[test]
     fn the_happy_path_enters_a_balanced_transaction() {
         let (mut s, _t) = session(JOURNAL);
-        // Date pre-filled with today; accept it.
-        assert_eq!(s.draft.buffer, "2026-08-10");
+        // Date empty, today ghost-suggested; Enter accepts it.
+        assert_eq!(s.draft.buffer, "");
+        assert_eq!(s.suggestion().as_deref(), Some("2026-08-10"));
         assert_eq!(s.submit(), Submit::Advanced);
         assert_eq!(s.draft.field, Field::Description);
 
@@ -1156,20 +1158,19 @@ mod tests {
         assert_eq!(s.draft.field, Field::Account(0));
         assert_eq!(s.draft.buffer, "expenses:groceries");
         assert_eq!(s.submit(), Submit::Advanced);
-        // Template amount pre-filled verbatim.
+        // Template amount ghost-suggested, never pre-filled.
         assert_eq!(s.draft.field, Field::Amount(0));
-        assert_eq!(s.draft.buffer, "12.00 EUR");
+        assert_eq!(s.draft.buffer, "");
+        assert_eq!(s.suggestion().as_deref(), Some("12.00 EUR"));
         type_in(&mut s, "18.20 EUR");
         assert_eq!(s.submit(), Submit::Advanced);
         // Account 2 from template.
         assert_eq!(s.draft.buffer, "assets:bank:checking");
         assert_eq!(s.submit(), Submit::Advanced);
-        // Balancing amount pre-filled: negated running sum, not the template.
-        assert_eq!(s.draft.buffer, "-18.20 EUR");
-        assert_eq!(s.submit(), Submit::Advanced);
-        // Empty account prompt finishes.
-        assert_eq!(s.draft.field, Field::Account(2));
+        // Balancing amount suggested: negated running sum, not the template.
+        // Enter on the empty amount writes it explicitly and finishes.
         assert_eq!(s.draft.buffer, "");
+        assert_eq!(s.suggestion().as_deref(), Some("-18.20 EUR"));
         let Submit::Done(txn) = s.submit() else {
             panic!("expected Done, got {:?}", s.submit());
         };
@@ -1320,6 +1321,28 @@ mod tests {
         let (mut s, _t) = session(JOURNAL);
         type_in(&mut s, "5");
         s.submit();
+        assert_eq!(s.draft.date, Some(d(2026, 8, 5)));
+    }
+
+    #[test]
+    fn suggestions_vanish_once_the_user_types() {
+        let (mut s, _t) = session(JOURNAL);
+        assert_eq!(s.suggestion().as_deref(), Some("2026-08-10"));
+        s.draft.insert('5');
+        assert_eq!(s.suggestion(), None);
+    }
+
+    #[test]
+    fn an_empty_date_re_accepts_the_date_shown_as_suggestion() {
+        let (mut s, _t) = session(JOURNAL);
+        type_in(&mut s, "5");
+        s.submit();
+        // Back at the date field, the accepted date is the suggestion, and
+        // an empty Enter keeps it rather than resetting to today.
+        s.draft.nav_up();
+        s.draft.set_buffer("");
+        assert_eq!(s.suggestion().as_deref(), Some("2026-08-05"));
+        assert_eq!(s.submit(), Submit::Advanced);
         assert_eq!(s.draft.date, Some(d(2026, 8, 5)));
     }
 
@@ -1617,8 +1640,8 @@ mod tests {
         s.submit();
         type_in(&mut s, "c:d");
         s.submit();
-        // Balancing prefill: unitless sum + D commodity, editable.
-        assert_eq!(s.draft.buffer, "-12.50 EUR");
+        // Balancing suggestion: unitless sum + D commodity.
+        assert_eq!(s.suggestion().as_deref(), Some("-12.50 EUR"));
     }
 
     #[test]
@@ -1636,10 +1659,9 @@ mod tests {
         assert_eq!(s.draft.postings[0].1, "12.50 EUR");
         type_in(&mut s, "c:d");
         s.submit();
-        // …so the balancing prefill matches and the transaction finishes.
-        assert_eq!(s.draft.buffer, "-12.50 EUR");
-        s.submit();
-        type_in(&mut s, "");
+        // …so the balancing suggestion matches and the empty amount
+        // finishes the transaction.
+        assert_eq!(s.suggestion().as_deref(), Some("-12.50 EUR"));
         let r = s.submit();
         let Submit::Done(txn) = r else {
             panic!("expected Done, got {r:?}");

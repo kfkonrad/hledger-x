@@ -134,18 +134,22 @@ date, description, then account/amount pairs — with:
 
 - a **live preview** above the prompt, formatted exactly as it will be
   written, at the file's own alignment widths
-- **pre-filled postings** from the most recent transaction with the same
-  description; the final amount is pre-filled with the balancing amount.
-  Typing over a pre-fill replaces it; Enter accepts it as-is. The first
-  posting must carry an amount; accepting an **empty amount** on any later
-  posting writes the balancing amount explicitly and finishes the
-  transaction — the quickest way to end one
+- **pre-filled accounts** from the most recent transaction with the same
+  description. Typing over a pre-fill replaces it; Enter accepts it as-is
+- **grey inline suggestions** for dates and amounts, never pre-filled into
+  the buffer: the date field suggests today (type a smart date to override),
+  amount fields suggest the template or balancing amount. `Tab` or `→`
+  copies the suggestion into the buffer for editing; Enter submits the
+  field as entered. The first posting must carry an amount; Enter on an
+  **empty amount** on any later posting writes the balancing amount
+  explicitly and finishes the transaction — the quickest way to end one
 - **completion** everywhere: ghost-text suggestion (`→` accepts) plus a
-  `Tab` menu, ranked by frecency and conditioned on the description already
-  entered. Account queries match by substring, or per-segment once the query
-  contains a colon (`ex:gro` → `expenses:groceries`). In amounts, commodities
-  complete both for the face amount and for the second commodity of an
-  `@`/`@@` cost or `=`/`==`/`=*`/`==*` assertion tail
+  `Tab` menu — as tall as the screen allows, scrolling beyond that — ranked
+  by frecency and conditioned on the description already entered. Account
+  queries match by substring, or per-segment once the query contains a colon
+  (`ex:gro` → `expenses:groceries`). In amounts, commodities complete both
+  for the face amount and for the second commodity of an `@`/`@@` cost or
+  `=`/`==`/`=*`/`==*` assertion tail
 - an optional **strict mode** (`strict = true`): using an account or
   commodity that is not declared at the insertion point asks first — "…is
   not a declared account — use it anyway?" — surfacing near-misses ("did
@@ -160,7 +164,8 @@ date, description, then account/amount pairs — with:
 
 Keys: `Enter` accepts a field (on an empty amount or an empty account line it
 finishes the transaction), `↑`/`↓` move between fields, `Tab`/`Shift-Tab`
-cycle the completion menu, `→` accepts the ghost suggestion, `Ctrl-W` deletes
+cycle the completion menu, `Tab`/`→` pick up the grey suggestion, `→` accepts
+the ghost suggestion, `Ctrl-W` deletes
 one word — on account fields one `:`-segment at a time — `Ctrl-E` opens the
 draft in `$EDITOR`, `Ctrl-C` aborts the current transaction. To leave, type
 `q` at the date prompt or press `Ctrl-D` anywhere; both write everything
@@ -184,7 +189,7 @@ never inferred invisibly: generated amounts follow the journal's `commodity` /
 is written into bare amounts as you accept them — visible in the preview and
 editable like any other text (`↑` to go back), never attached behind your
 back at write time. Without it, a bare `12.50` and the `-12.50 EUR`
-balancing pre-fill would read as two different commodities and the
+balancing amount would read as two different commodities and the
 transaction could never balance.
 
 ## Configuration
