@@ -11,8 +11,8 @@ The tool is **`rledger`**, with two subcommands:
 
 | Command | Purpose |
 | --- | --- |
-| `rledger add` | interactive data entry |
 | `rledger fmt` | formatting, equivalent to `hledger-fmt` |
+| `rledger add` | interactive data entry |
 
 Formatting is exposed as a first-class subcommand because the write path
 implements it anyway; the marginal cost is a CLI surface, not an engine.
@@ -26,25 +26,10 @@ We forgo dispatch entirely rather than pick a name around it, since any single
 name is ambiguous for a tool that both enters and formats data. A multi-call
 binary was considered and rejected as overkill.
 
-**crates.io note:** `rledger` is taken — a single 0.1.0 published 2024-12-11
-("Accounting platform", `github.com/mmkaram/hledger`), untouched since, 919
-downloads. Abandoned but claimed. The *binary* can still be `rledger`; publish
-the crate under a different name with `[[bin]] name = "rledger"`.
-
-### `rledger fmt`
-
-Matches hledger-fmt's surface so it is a drop-in substitute:
-
-```
-rledger fmt [--check] [--sort] [FILE|-]...
-```
-
-- `FILE...` — format each file in place
-- `--check` — write nothing, exit non-zero if any file is not already
-  formatted, listing offenders (CI and pre-commit)
-- `--sort` — also sort transactions by date
-- `-` or no arguments — stdin to stdout
-- no `include` following: one file at a time, like a linter
+**Distribution:** GitHub releases. Not published to crates.io for now, so the
+crate name is a non-issue. (For the record: `rledger` is taken on crates.io — a
+single abandoned 0.1.0 from 2024-12-11. If we publish later, use a different
+crate name with `[[bin]] name = "rledger"`.) CI config is deferred.
 
 ## Motivation — what's wrong with `hledger add`
 
@@ -64,7 +49,38 @@ Observed by driving `hledger 1.99` with piped input:
    running imbalance.
 6. **Weak completion.** Prefix-only, no visible candidate list, no ranking.
 
-## Scope
+## Architecture — two engines, one dependency direction
+
+`fmt` is line-oriented and builds **no semantic model**. That is not a
+limitation, it is where its safety comes from: because directives pass through
+byte-for-byte, price-only and include-only files are correct by construction.
+
+`add` needs a full semantic model. It is built **on top of** `fmt`, never the
+other way around. `fmt` must never learn what a directive means.
+
+```
+        ┌─────────────────────────────────────┐
+        │ lexical layer (shared)              │
+        │  classify_line, split_account_amount│
+        │  split_comment, split_amount, …     │
+        └─────────────────────────────────────┘
+              ▲                        ▲
+              │                        │
+      ┌───────┴────────┐      ┌────────┴─────────┐
+      │ fmt            │◀─────│ add              │
+      │ line-oriented  │ uses │ semantic parser  │
+      │ width + render │      │ + entry UI       │
+      └────────────────┘      └──────────────────┘
+```
+
+The shared lexical layer is the part that is genuinely identical: the 2+
+whitespace account/amount separator rule, comment splitting, the
+number/commodity/cost-tail split, "does this line open a transaction".
+
+`add` also calls `fmt`'s width computation directly — it needs the file-wide
+`accW`/`numW` for both the live preview and the write path.
+
+### Interface style (`add`)
 
 CLI first — an inline raw-mode interface, not a full-screen TUI. Normal
 scrollback, no alternate screen; the program controls a few lines around the
@@ -76,9 +92,257 @@ Likely library: **reedline** (custom completers, columnar/list menus,
 ghost-text autosuggestion, rebindable keys, multi-line prompts). Falling back
 to raw `crossterm` is a contained rewrite of one module.
 
-## Epic 1 — core
+---
 
-### Interface
+# Epic 1 — `rledger fmt`
+
+Self-contained and fully specified. Depends on nothing else here.
+
+Reference: github.com/mikluko/hledger-fmt
+(`src/Hledger/Fmt.hs`, 341 lines of Haskell, `base`-only; goldens in
+`test/testdata`). To be reimplemented in Rust — roughly 120 lines of real
+logic.
+
+## CLI
+
+Matches hledger-fmt's surface so it is a drop-in substitute:
+
+```
+rledger fmt [--check] [--sort] [FILE|-]...
+```
+
+- `FILE...` — format each file in place
+- `--check` — write nothing, exit non-zero if any file is not already
+  formatted, listing offenders (CI and pre-commit)
+- `--sort` — also sort transactions by date
+- `-` or no arguments — stdin to stdout
+- no `include` following: one file at a time, like a linter
+
+## Layout rules
+
+1. Posting indent is exactly 4 spaces.
+2. Account and amount are separated by a run of 2+ whitespace characters
+   (hledger's rule — account names may contain single spaces).
+3. Account field padded right to `accW`, then **2 spaces**, then the number
+   right-aligned in `numW`, then **1 space**, then the commodity.
+4. `@`/`@@` cost and `=`/`==` assertion tails follow with single-space
+   separators and are **never** column-aligned.
+5. Amount-less postings: account only, trailing whitespace trimmed. If such a
+   posting carries only an assertion or cost, the number and commodity columns
+   are reserved with blanks so the tail lines up as if a zero amount stood in
+   front of it.
+6. Inline posting comments normalized to **2 spaces** before `;`.
+7. Numbers are never restyled — digit grouping, decimal places and sign spacing
+   copied through unchanged. (This is the rule for *existing* text. Amounts
+   `add` generates must still respect `commodity` / `decimal-mark` directives.)
+8. Blank lines collapse to empty. Transaction headers get trailing whitespace
+   trimmed, nothing more. Directives, top-level comments, `include`, `P` lines
+   and indented sub-directives pass through verbatim.
+9. Output always ends in a newline. `format(format(x)) == format(x)`.
+
+An indented run is treated as postings only when it follows a transaction
+header (a line starting at column 0 with a digit), which is what keeps
+`account` / `commodity` sub-directives untouched.
+
+## Alignment is file-wide — and it forces whole-file rewrites
+
+`accW` and `numW` are computed over **every posting in the file**, not per
+transaction. Verified in `postings.golden`: the `12.50` in the second
+transaction is aligned to a column set by `-7485978.18` in the first.
+
+Therefore adding one transaction whose account or number is longer than the
+current maximum **reflows every posting line in the file**. This is the single
+most consequential fact about the formatter, and it drives the write modes in
+epic 2.
+
+## Sorting (`--sort`)
+
+Stable (equal dates keep source order) and **directive-bounded**: directives
+and standalone comment blocks are barriers, transactions reorder only within
+the runs between them, and a comment line directly above a transaction (no
+blank line between) travels with it. This keeps positional directives in
+scope.
+
+---
+
+# Epic 2 — `rledger add`
+
+Requires a semantic parser; epic 1 does not.
+
+## Parser
+
+### Include graph walk
+
+All behaviour below verified against hledger 1.99.
+
+- Start at the main file: `-f` or `$LEDGER_FILE`.
+- **Include paths resolve relative to the *including* file's directory**, not
+  cwd. Verified: `include deep/d.journal` inside `g/sub/mid.journal` resolved to
+  `g/sub/deep/d.journal`.
+- **Globs are supported** and expanded in sorted order. Verified:
+  `include sub/g*.journal` pulled in `g1` and `g2`.
+- **Cycles are detected and error.** Verified: mutually including files produce
+  an error, not a hang. We do the same — track canonicalized absolute paths,
+  error on revisit.
+- Depth-first, in file order: directives take effect in encounter order.
+
+### Directive scope model — there are TWO, not one
+
+All verified empirically against hledger 1.99. This was initially assumed to be
+a single model; it is not.
+
+#### Model 1 — parse state (`decimal-mark`, `D`)
+
+In effect from its line to the end of its file, **propagates into files that
+file includes**, but does **not** escape back to the parent after the include
+returns.
+
+Proven with `decimal-mark` and an ambiguous `1.234` amount, in a deliberately
+unbalanced transaction so that balancing succeeds iff the directive applied:
+
+| Test | Layout | Result |
+| --- | --- | --- |
+| A | `decimal-mark` in included file, amount later in parent | **did not apply** — identical to no-directive baseline |
+| B | `decimal-mark` and amount in same file | applied |
+| C | `decimal-mark` in parent, amount in included file | applied |
+
+Implementation: a scope stack. On entering an included file, push a *copy* of
+the current scope. On exit, pop and discard. A directive mutates only the top.
+
+Epic 3 adds `Y`, `apply account`, `alias` to this model.
+
+#### Model 2 — declarations (`account`, `commodity`)
+
+Accumulate into one journal-wide set that is **not** discarded on include
+return — but a declaration is only visible **from its position forward** in the
+flattened stream. Declarations are *not* collected in a pre-pass.
+
+Verified with `hledger check accounts` / `check commodities`:
+
+| Test | Layout | Result |
+| --- | --- | --- |
+| A | `account` in included file, used later in parent | **pass** — escapes to parent |
+| B | `account` in parent, used in included file | pass |
+| C | control, genuinely undeclared | fail |
+| D | `account` declared **after** its use, same file | **fail** — order matters |
+| E | `include` carrying declarations placed **after** the use | **fail** |
+| F | `commodity` in included file, used later in parent | pass |
+| G | `commodity` in parent, used in included file | pass |
+| H | control, undeclared commodity | fail |
+
+A and D together are the whole story: same-file backward reference fails, but a
+declaration inside an include *does* survive into the parent's later content.
+
+Note the direct contradiction with model 1 — round-1 test A and round-2 test A
+have identical layout (include at top, use later in parent) and opposite
+results. That is what proves the two models are distinct.
+
+Epic 3 adds `payee`, `tag` to this model.
+
+#### Consequence for the new-account guard
+
+Because declarations are position-sensitive, the guard must consider only the
+declarations visible **at our insertion point** in the flattened stream — not
+every declaration in the tree. Otherwise we can tell the user an account is
+declared, write it, and have `hledger check accounts` fail afterwards.
+
+This is not hypothetical: appending to the end of the main file puts our text
+after the whole tree only when every `include` sits above the insertion point,
+which is conventional but not guaranteed.
+
+Cheap to implement — we already walk the stream in order, so record a stream
+position alongside each declaration. The *completion pool* can still use every
+declaration in the tree (offering a name is harmless); only the guard needs the
+position filter.
+
+### What the parse produces
+
+Two products with different requirements, which lets us parse cheaply where we
+can and thoroughly only where we must.
+
+**(1) Journal model** — semantics only, over the whole include tree:
+- declared accounts (`account`), each with its **stream position** (needed by
+  the new-account guard, see scope model)
+- declared commodities and their display styles (`commodity`), likewise
+- default commodity (`D`)
+- decimal mark in effect per file
+- transactions: date, description, postings as (account, raw amount text,
+  commodity)
+
+**(2) File map** — for the **write-target file only**, needs raw text and
+positions:
+- line range and date of each transaction (for chronological insertion)
+- positions of directives and standalone comment blocks (sort barriers)
+- whether the file is already formatted
+- file-wide `accW` / `numW`
+
+### Amounts: parse only what we are about to write
+
+Historical amounts are carried as **raw text** and pre-filled verbatim. This
+means we never need to correctly parse the numeric value of an existing
+posting, which removes a whole class of failure: a journal using digit grouping
+or an unusual decimal mark cannot cause us to pre-fill a wrong number.
+
+We parse numbers in exactly one place: the transaction currently being entered,
+to compute the running imbalance and the balancing amount. Those are amounts we
+are about to write, so parsing them is unavoidable — and if parsing fails we
+show "imbalance unknown" rather than writing something wrong.
+
+Representation: exact decimal, never floating point. `rust_decimal` is
+sufficient; `bigdecimal` if we later need unbounded precision.
+
+Number parsing needs the decimal mark in effect. hledger auto-detects when no
+directive says otherwise (verified: `1.234,56` is read as comma-decimal
+unprompted; a lone `1.234` is read as dot-decimal). `decimal-mark` and
+`commodity` directives override the guess.
+
+### Leniency
+
+`add` is an entry tool, not a validator. It must never refuse to run because
+the journal contains something it does not understand.
+
+| Situation | Response |
+| --- | --- |
+| unknown directive | ignore silently |
+| unparseable transaction | skip for indexing, warn once |
+| unbalanced existing transaction | ignore — not our concern |
+| missing `include` target | **warn loudly**, continue (weakens the account pool, so the user must know) |
+| periodic (`~`) / auto (`=`) transactions | skip for indexing; they start at column 0 with a non-digit so they are already excluded by the transaction-header rule |
+
+### Frecency index
+
+Built in one pass over the transactions in the include tree.
+
+| Index | Key | Used for |
+| --- | --- | --- |
+| descriptions | description | description completion |
+| accounts | account | account completion, unconditioned |
+| by-description | (description, account) | account completion **conditioned on the description already entered** |
+| templates | description → most recent transaction | posting pre-fill |
+
+Each entry carries `{ count, last_date, score }`.
+
+Score is a proper frecency — a sum over occurrences rather than a count times a
+single decay:
+
+```
+score = Σ over occurrences of  0.5 ^ (age_days / half_life)
+```
+
+`half_life` configurable, default 90 days, evaluated relative to today at parse
+time.
+
+**Pre-fill and ranking deliberately use different rules.** Pre-fill takes the
+*most recent* matching transaction, because predictability matters more than
+cleverness when text is being put in front of you. The completion menu orders by
+*score*, because there ranking is what makes the second-best candidate reachable.
+
+### Performance
+
+Single pass, O(lines). No caching in epic 2 — measure first. If a large journal
+turns out to be slow, cache keyed on (path, mtime, size).
+
+## Interface
 
 The live transaction is rendered above the input line and redrawn on every
 keystroke, formatted exactly as it will be written to disk:
@@ -88,27 +352,33 @@ keystroke, formatted exactly as it will be written to disk:
       expenses:groceries                23.45 EUR
       liabilities:creditcard           -23.45 EUR
   ───────────────────────────────────────────────
-  posting 3 › ass:ba:che
-                assets:bank:checking          ← ghost text, → to accept
+  account 3 › ass:ba:che
+              assets:bank:checking      ← ghost text, → to accept
 ```
 
 Running imbalance (per commodity) is displayed while nonzero.
 
-### Posting entry
+The preview **renders against the file's widths**, not the transaction's own.
+When typing pushes a width past the current maximum the preview visibly shifts
+— a free signal that this entry will reflow the file.
 
-One line per posting in journal syntax — `account<2+ spaces>amount COMMODITY` —
-rather than separate account and amount prompts. The completer switches mode on
-cursor position: before the whitespace gap it completes accounts, after it
-completes commodities.
+## Posting entry
 
-Rationale: halves the prompt count and uses syntax the user already knows.
-**Unproven** — the user is willing to try it but not sold. Evaluate against the
-two-prompt alternative once it can be felt in practice.
+**Two prompts per posting** — account, then amount — each its own field with its
+own completer. This is the starting point.
+
+A single-line alternative (`account<2+ spaces>amount COMMODITY` in journal
+syntax, with the completer switching mode on cursor position) was considered.
+It halves the prompt count and uses syntax the user already knows, but it is
+unproven and harder to complete against. **Start with two fields; uniting them
+later is a change to the field state machine only**, since both designs share
+the same completers and the same pre-fill logic. Keep that seam clean.
 
 Postings are pre-filled from the ranked match, so accepting is one keypress
-either way. The final posting is pre-filled with the negated running sum.
+either way. The final posting's amount is pre-filled with the negated running
+sum.
 
-### Dates
+## Dates
 
 - Default is **today**, for every transaction — not the previous entry's date
   (which is what `hledger add` does).
@@ -117,7 +387,7 @@ either way. The final posting is pre-filled with the negated running sum.
 - The fully resolved date is rendered in the live block as you type, so an
   invalid or misunderstood date is visible before it is committed.
 
-### Navigation
+## Navigation
 
 | Key | Action |
 | --- | --- |
@@ -134,9 +404,9 @@ No "save this transaction? [y]" confirmation — redundant when the transaction
 has been visible the whole time. `u` at the date prompt undoes the last
 completed transaction.
 
-**Unproven** — the user wants to see this in practice before signing off.
+**Unproven** — needs to be seen in practice before sign-off.
 
-### Completion
+## Completion
 
 **Matching**, configurable per field, all four available:
 
@@ -150,11 +420,14 @@ completed transaction.
 Default for **accounts**: `substring`, switching to `segment` as soon as the
 query contains a colon. Default for **descriptions**: `substring`.
 
-**Ranking** — frecency (usage count x recency decay) *conditioned on the
-description already entered*. This is the answer to "how do I reach the second
-similar transaction" without a separate template-selection step: at Rewe, both
-real grocery patterns are the top two candidates, one `Tab` apart. No cost when
-there is only one obvious answer.
+Fields and their completers: date (none), description (descriptions index),
+account (accounts index, conditioned on description), amount (commodities).
+
+**Ranking** — frecency conditioned on the description already entered (see
+parser). This is the answer to "how do I reach the second similar transaction"
+without a separate template-selection step: at Rewe, both real grocery patterns
+are the top two candidates, one `Tab` apart. No cost when there is only one
+obvious answer.
 
 **Presentation** — both at once, fish-style:
 - ghost text of the top candidate, `→` accepts (zero extra keystrokes in the
@@ -162,7 +435,7 @@ there is only one obvious answer.
 - `Tab` opens the menu, `Tab`/`Shift-Tab` cycle, arrows navigate; each entry
   carries a hint (last-used date, amount from the matching transaction)
 
-### Amounts and commodities
+## Amounts and commodities
 
 - **Never infer a commodity.** A unitless amount is valid even in strict mode.
 - A configured default commodity, and the journal's own `D` directive, may
@@ -172,8 +445,12 @@ there is only one obvious answer.
 - No arithmetic, no percentage or split helpers. Would collide with a
   percentage commodity.
 - Balancing amounts are always written **explicitly**, never elided.
+- Amounts we generate respect the `commodity` / `decimal-mark` display style:
+  if the journal declares `commodity 1.000,00 EUR` we write `23,45 EUR` and
+  parse typed `23,45` with a comma decimal mark. Getting this wrong produces a
+  file that reformats on the next `fmt` pass.
 
-### New-account and new-payee guard
+## New-account and new-payee guard
 
 Config `new_account = confirm | warn | allow | error`. Defaults to `confirm`
 when the journal declares accounts via `account` directives, `warn` otherwise.
@@ -181,195 +458,122 @@ Not a block — a prompt that surfaces near-misses: "`exp:trav` is new — creat
 it? (did you mean `expenses:travel:train`?)". Same treatment for descriptions
 that near-miss an existing payee.
 
-### Output formatting
-
-Follows **hledger-fmt** conventions. The live preview and the writer share one
-formatter — the block on screen is the bytes that will be written.
-
-Reference: github.com/mikluko/hledger-fmt
-(`src/Hledger/Fmt.hs`, 341 lines of Haskell, `base`-only; goldens in
-`test/testdata`). To be reimplemented in Rust — roughly 120 lines of real
-logic. It is line-oriented and builds **no semantic model**, so it specifies
-our formatter and contributes nothing to our parser; the semantic parser
-(accounts, commodities, decimal marks, include graph) is independent work.
-
-#### Layout rules
-
-1. Posting indent is exactly 4 spaces.
-2. Account and amount are separated by a run of 2+ whitespace characters
-   (hledger's rule — account names may contain single spaces).
-3. Account field padded right to `accW`, then **2 spaces**, then the number
-   right-aligned in `numW`, then **1 space**, then the commodity.
-4. `@`/`@@` cost and `=`/`==` assertion tails follow with single-space
-   separators and are **never** column-aligned.
-5. Amount-less postings: account only, trailing whitespace trimmed. If such a
-   posting carries only an assertion or cost, the number and commodity columns
-   are reserved with blanks so the tail lines up as if a zero amount stood in
-   front of it.
-6. Inline posting comments normalized to **2 spaces** before `;`.
-7. Numbers are never restyled — digit grouping, decimal places and sign spacing
-   copied through unchanged. (Note: this is hledger-fmt's rule for *existing*
-   text. Amounts *we* generate must still respect `commodity` /
-   `decimal-mark` directives.)
-8. Blank lines collapse to empty. Transaction headers get trailing whitespace
-   trimmed, nothing more. Directives, top-level comments, `include`, `P` lines
-   and indented sub-directives pass through verbatim.
-9. Output always ends in a newline. `format (format x) == format x`.
-
-An indented run is treated as postings only when it follows a transaction
-header (a line starting at column 0 with a digit), which is what keeps
-`account` / `commodity` sub-directives untouched.
-
-#### Alignment is file-wide — and it forces whole-file rewrites
-
-`accW` and `numW` are computed over **every posting in the file**, not per
-transaction. Verified in `postings.golden`: the `12.50` in the second
-transaction is aligned to a column set by `-7485978.18` in the first.
-
-Therefore adding one transaction whose account or number is longer than the
-current maximum **reflows every posting line in the file**.
-
-**Default: always emit a fully formatted file.** Run the formatter over the
-whole result on write. When the file is already formatted and widths do not
-grow, this is byte-identical to a pure append (zero diff). When widths grow, it
-produces exactly the reflow `hledger-fmt` would produce anyway. One code path,
-always idempotent.
-
-Consequences:
-- Warn on first write if the file was not already formatted, since the tool
-  will reformat it.
-- The **live preview must render against the file's widths**, not the
-  transaction's own. When typing pushes a width past the current maximum the
-  preview visibly shifts — a free signal that this entry will reflow the file.
-
-#### Write modes (configurable)
+## Write modes
 
 | Setting | Default | Behaviour |
 | --- | --- | --- |
 | `format_file` | `true` | reformat the whole file on write |
 | `sort` | `false` | also sort transactions by date, `--sort` semantics |
+| `insertion` | `append` | or `chronological` |
 
-With `format_file = false`, only the lines we add are written, but they are
-rendered **as if the whole file were correctly formatted**: `accW` / `numW` are
-still computed over the entire file *including* the new transactions, so our
-lines match what `hledger-fmt` would emit.
+**Default — always emit a fully formatted file.** When the file is already
+formatted and widths do not grow, this is byte-identical to a pure append (zero
+diff). When widths grow, it produces exactly the reflow `fmt` would produce
+anyway. One code path, always idempotent. Warn on first write if the file was
+not already formatted, since the tool will reformat it.
 
-The exact guarantee this gives, stated precisely because it is narrower than it
-sounds:
+**With `format_file = false`**, only the lines we add are written, but they are
+rendered *as if the whole file were correctly formatted*: `accW`/`numW` are
+still computed over the entire file including the new transactions.
+
+The guarantee this gives is narrower than it sounds:
 - widths unchanged and file already formatted → the file is a fixed point; a
-  later `hledger-fmt` run is a no-op.
-- widths grew → **our** lines are already correct and a later `hledger-fmt` run
-  will not touch them, but the pre-existing lines are now stale at the old
-  widths and *will* be reflowed. Warn when this happens; we cannot avoid it
-  without rewriting the file, which is precisely what this mode forbids.
+  later `fmt` run is a no-op.
+- widths grew → **our** lines are correct and a later `fmt` run will not touch
+  them, but the pre-existing lines are now stale at the old widths and *will* be
+  reflowed. Warn when this happens; we cannot avoid it without rewriting the
+  file, which is precisely what this mode forbids.
 
 Interactions:
 - `sort = true` inherently rewrites the whole file, so it is only coherent with
-  `format_file = true`. Reject the combination `format_file = false` +
-  `sort = true` at config load rather than silently picking one.
+  `format_file = true`. Reject `format_file = false` + `sort = true` at config
+  load rather than silently picking one.
 - `sort = true` makes `insertion = chronological` redundant — sorting subsumes
   it. Not an error, just noise; prefer one or the other.
 
-#### Chronological insertion follows `--sort` semantics
-
-hledger-fmt's `formatSorted` already defines where a date belongs: stable
-(equal dates keep source order) and **directive-bounded** — directives and
-standalone comment blocks are barriers, transactions reorder only within the
-runs between them, and a comment line directly above a transaction (no blank
-line between) travels with it. Our `chronological` mode matches this rather
-than inventing a second notion of ordering.
-
-### Writing
+## Writing
 
 - **Buffer everything; write once on exit.** Both `Ctrl-C` and `Ctrl-D` save all
   completed transactions, like `hledger add` does.
 - A recovery journal is written to `$XDG_STATE_HOME/rledger/` as the session
   progresses, replayed on the next launch if the process dies without writing.
   Invisible when nothing goes wrong.
-- Insertion position: `append` (default) or `chronological`.
-  - `chronological` inserts after the last transaction with date <= the new one.
-  - If the file is not sorted, **warn and proceed anyway**. Tell the user the
-    file is unsorted.
+- `insertion = chronological` inserts after the last transaction with date <=
+  the new one, following `fmt --sort` semantics rather than inventing a second
+  notion of ordering. If the file is not sorted, **warn and proceed anyway**,
+  telling the user the file is unsorted.
 - Write target: the main file from `-f` or `$LEDGER_FILE`. Overridable per
   invocation; **error** if the override file is not reachable through the
   include graph. Nested includes must resolve.
 
-### Journal directives honoured (epic 1)
+## Journal directives honoured
 
-Parsed by rledger itself. No shelling out to `hledger` — the write path
-needs file positions and raw text, which resolved `hledger` output does not
-carry. `hledger` may later serve as an optional cross-check.
+| Directive | Use | Scope |
+| --- | --- | --- |
+| `account` | completion pool (incl. accounts never used in a transaction); triggers `new_account = confirm` | declaration — journal-wide, position-sensitive |
+| `commodity` | valid commodities; display style — decimal mark, digit grouping, decimal places, symbol placement and spacing | declaration — journal-wide, position-sensitive |
+| `decimal-mark` | parsing and rendering of typed input | parse state — file-scoped, inherited by includes |
+| `D` | default commodity, surfaced as editable pre-filled text | parse state — file-scoped, inherited by includes |
+| `include` | file graph, nested, globs | — |
 
-| Directive | Use |
-| --- | --- |
-| `account` | completion pool (incl. accounts never used in a transaction); triggers `new_account = confirm` |
-| `commodity` | valid commodities; **display style** — decimal mark, digit grouping, decimal places, symbol placement and spacing |
-| `decimal-mark` | file-scoped parsing and rendering of typed input |
-| `D` | default commodity, surfaced as editable pre-filled text |
-| `include` | file graph, nested |
-
-Commodity display style is not optional: if the journal declares
-`commodity 1.000,00 EUR`, we must write `23,45 EUR` and parse the user's typed
-`23,45` with a comma decimal mark. Getting it wrong produces a file that
-reformats on the next hledger-fmt pass.
-
-### Configuration
+## Configuration
 
 - `~/.config/rledger/config.toml`
-- overridden by a local `.rledger.toml`, discovered by **walking up from
-  cwd**, the same way hledger discovers its own config.
+- overridden by a local `.rledger.toml`, discovered by **walking up from cwd**,
+  the same way hledger discovers its own config.
 
-## Epic 2 — deferred
+---
 
-Deliberately out of scope until the core is right. Recorded here so they are not
+# Epic 3 — deferred directives
+
+Deliberately out of scope until the core is right. Recorded so they are not
 lost.
 
-### `payee` directive
+## `payee` directive
 
 Declared payees join the description completion pool and make the near-miss
 warning trustworthy (a payee can then be known-good even if it appears in no
 transaction yet). Until then, description candidates come only from
 transactions actually present in the journal.
 
-### `tag` directive
+## `tag` directive
 
 Declared tags drive completion inside `; comments`. Requires comment entry to
-be a first-class field with its own completer, which epic 1 does not have.
+be a first-class field with its own completer, which epic 2 does not have.
 
-### `Y` / `year` directive
+## `Y` / `year` directive
 
 Sets the default year for dates in a file. Affects both parsing (a `01-15` date
 in that file means the declared year) and writing (dates we emit into such a
-file may legally omit the year, and hledger-fmt's convention for that must be
-matched). Epic 1 assumes full `YYYY-MM-DD` dates throughout.
+file may legally omit the year, and the `fmt` convention for that must be
+matched). Epic 2 assumes full `YYYY-MM-DD` dates throughout.
 
-### `apply account` and `alias`
+## `apply account` and `alias`
 
-The user does not use these, so they are not required for core functionality.
-Epic 1 ignores them entirely — no parsing, no detection.
+Not used by the user, so not required for core functionality. Epics 1 and 2
+ignore them entirely — no parsing, no detection.
 
 The trap they represent: inside an `apply account assets:bank` block, the text
 written to the file is the *remainder* of the account name, not the full name.
 Writing the fully-qualified name there silently produces
 `assets:bank:assets:bank:checking`. `alias` has the same shape of problem in the
-opposite direction. The first step of epic 2 is therefore detection — refuse to
-insert into a region where either is active, with a clear error — followed by
-full support.
+opposite direction.
 
-Full support means resolving both directions — display the resolved account name
-in completion and the live preview, write the unresolved remainder to the file —
-and tracking the lexical scope of each directive across the include graph
-(`apply account` is scoped to the rest of the file or until `end apply account`;
-`alias` until `end aliases`, and both propagate into included files).
+The first step of this epic is therefore **detection** — refuse to insert into a
+region where either is active, with a clear error — followed by full support.
+Full support means resolving both directions (display the resolved account name
+in completion and the live preview, write the unresolved remainder to the file)
+and tracking lexical scope across the include graph: `apply account` is scoped
+to the rest of the file or until `end apply account`, `alias` until
+`end aliases`, and both propagate into included files under the scope-stack
+model above.
 
-## Open questions
+---
 
-- Is the one-line posting entry actually better than two prompts? Decide by
-  feel, once it exists.
+# Open questions
+
+Neither blocks epic 1.
+
+- Should account and amount be united into one journal-syntax line? Deferred —
+  build two fields first, decide by feel.
 - Does the navigation scheme hold up in practice?
-- Should the `D` directive be honoured at all, or ignored in favour of config
-  only? Currently: honoured, but only as visible pre-filled text.
-- Confirm the whole-file-rewrite decision above. The alternative — append at
-  current widths and accept that the file may stop being a fixed point of
-  `hledger-fmt` — avoids ever touching lines the user did not add, at the cost
-  of `hledger-fmt --check` failing afterwards.
