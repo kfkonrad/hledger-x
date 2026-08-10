@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{bail, eyre, Result};
 
+use rledger::add::parser::{parse_journal, FileMap};
+use rledger::add::ui::{plain, term, Session, SessionCtx};
+use rledger::add::write::{integrate, Recovery};
 use rledger::fmt::{format, format_sorted, is_formatted, is_formatted_sorted};
 
 #[derive(Parser)]
@@ -24,8 +27,19 @@ struct Cli {
 enum Command {
     /// Format hledger journal files.
     Fmt(FmtArgs),
-    /// Enter transactions interactively (not implemented yet).
-    Add,
+    /// Enter transactions interactively.
+    Add(AddArgs),
+}
+
+#[derive(clap::Args)]
+struct AddArgs {
+    /// The journal file. Defaults to `$LEDGER_FILE`.
+    #[arg(short = 'f', long = "file")]
+    file: Option<PathBuf>,
+    /// Write new transactions into this file instead of the main file. Must
+    /// be reachable through the journal's include graph.
+    #[arg(long)]
+    to: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -45,11 +59,83 @@ fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
         Command::Fmt(args) => Ok(run_fmt(&args)),
-        Command::Add => {
-            eprintln!("rledger add: not implemented yet");
-            Ok(ExitCode::FAILURE)
-        }
+        Command::Add(args) => run_add(&args),
     }
+}
+
+/// `rledger add`: parse the journal, run the entry session, write once.
+fn run_add(args: &AddArgs) -> Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let config = rledger::config::load(&cwd).map_err(|e| eyre!("config: {e}"))?;
+
+    let main_file = args
+        .file
+        .clone()
+        .or_else(|| std::env::var_os("LEDGER_FILE").map(PathBuf::from))
+        .ok_or_else(|| eyre!("no journal file: pass -f FILE or set $LEDGER_FILE"))?;
+
+    let journal = parse_journal(&main_file)?;
+    for w in &journal.warnings {
+        eprintln!("warning: {w}");
+    }
+
+    // The write target: the main file, or a --to override that must be
+    // reachable through the include graph.
+    let target = if let Some(to) = &args.to {
+        let Some(f) = journal.file(to) else {
+            bail!(
+                "{} is not reachable through the include graph of {}",
+                to.display(),
+                main_file.display()
+            );
+        };
+        f.path.clone()
+    } else {
+        main_file
+    };
+    let target_src = fs::read_to_string(&target)?;
+    let map = FileMap::build(&target_src);
+
+    let today = chrono::Local::now().date_naive();
+    let ctx = SessionCtx::new(journal, config.clone(), today, target.clone(), &map);
+    let mut session = Session::new(ctx);
+    let recovery = Recovery::for_target(&target);
+
+    let interactive = crossterm_is_tty();
+    let completed = if interactive {
+        term::run(&mut session, &recovery)?
+    } else {
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        let mut out = io::stdout();
+        plain::run(&mut session, &recovery, &mut input, &mut out)?
+    };
+
+    if completed.is_empty() {
+        eprintln!("no transactions entered");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Re-read the target in case something else wrote to it mid-session.
+    let src = fs::read_to_string(&target)?;
+    let result = integrate(&src, &completed, &config.write_options());
+    for w in &result.warnings {
+        eprintln!("warning: {w}");
+    }
+    fs::write(&target, &result.contents)?;
+    recovery.clear();
+    eprintln!(
+        "wrote {} transaction(s) to {}",
+        completed.len(),
+        target.display()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Whether stdin is a terminal (raw-mode UI) or a pipe (plain line mode).
+fn crossterm_is_tty() -> bool {
+    use crossterm::tty::IsTty;
+    io::stdin().is_tty()
 }
 
 /// The transform applied to a file's contents, per `--sort`.

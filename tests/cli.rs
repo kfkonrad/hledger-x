@@ -192,13 +192,144 @@ fn help_and_version_are_available() {
     assert!(version.stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
+// ---- rledger add (plain line mode: stdin is a pipe) ----
+
+/// Run `rledger add` with an isolated HOME/XDG so no user config or
+/// recovery state leaks in or out.
+fn run_add(dir: &Path, args: &[&str], stdin: &str) -> Output {
+    let mut child = Command::new(BIN)
+        .arg("add")
+        .args(args)
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env_remove("LEDGER_FILE")
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    Output {
+        code: out.status.code().unwrap(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+    }
+}
+
+const ADD_JOURNAL: &str = "\
+2026-08-05 Rewe
+    expenses:groceries        12.00 EUR
+    assets:bank:checking     -12.00 EUR
+";
+
 #[test]
-fn add_is_not_implemented_yet_and_says_so() {
-    let out = run(&["add"], "");
-    assert_ne!(out.code, 0);
+fn add_appends_a_formatted_transaction() {
+    let dir = scratch("add_appends");
+    let journal = write(&dir, "main.journal", ADD_JOURNAL);
+    // date (accept today), description, account (accept template), amount,
+    // account 2 (accept), amount (accept balancing), empty account finishes,
+    // EOF quits.
+    let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    let written = fs::read_to_string(&journal).unwrap();
     assert!(
-        out.stderr.to_lowercase().contains("not implemented"),
-        "stderr: {}",
-        out.stderr
+        written.contains("Rewe\n    expenses:groceries     18.20 EUR\n"),
+        "file was:\n{written}"
     );
+    assert!(written.contains("assets:bank:checking  -18.20 EUR\n"));
+    assert!(out.stderr.contains("wrote 1 transaction(s)"), "{}", out.stderr);
+}
+
+#[test]
+fn add_without_a_journal_errors() {
+    let dir = scratch("add_nofile");
+    let out = run_add(&dir, &[], "");
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("LEDGER_FILE"), "{}", out.stderr);
+}
+
+#[test]
+fn add_to_an_unreachable_target_errors() {
+    let dir = scratch("add_unreachable");
+    let journal = write(&dir, "main.journal", ADD_JOURNAL);
+    let stray = write(&dir, "stray.journal", "");
+    let out = run_add(
+        &dir,
+        &[
+            "-f",
+            journal.to_str().unwrap(),
+            "--to",
+            stray.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("include graph"), "{}", out.stderr);
+}
+
+#[test]
+fn add_to_an_included_file_writes_there() {
+    let dir = scratch("add_to_include");
+    let main = write(
+        &dir,
+        "main.journal",
+        "include sub.journal\n\n2026-08-05 Rewe\n    expenses:groceries  12.00 EUR\n    assets:cash        -12.00 EUR\n",
+    );
+    let sub = write(&dir, "sub.journal", "");
+    let input = "\nRewe\n\n5.00 EUR\nassets:cash\n\n.\n";
+    let out = run_add(
+        &dir,
+        &[
+            "-f",
+            main.to_str().unwrap(),
+            "--to",
+            sub.to_str().unwrap(),
+        ],
+        input,
+    );
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    let sub_text = fs::read_to_string(&sub).unwrap();
+    assert!(sub_text.contains("Rewe"), "sub was:\n{sub_text}");
+    // The main file is untouched.
+    assert!(!fs::read_to_string(&main).unwrap().contains("5.00 EUR"));
+}
+
+#[test]
+fn add_with_no_input_writes_nothing() {
+    let dir = scratch("add_noinput");
+    let journal = write(&dir, "main.journal", ADD_JOURNAL);
+    let before = fs::read_to_string(&journal).unwrap();
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("no transactions"), "{}", out.stderr);
+    assert_eq!(fs::read_to_string(&journal).unwrap(), before);
+}
+
+#[test]
+fn add_respects_local_config() {
+    let dir = scratch("add_local_config");
+    write(&dir, ".rledger.toml", "insertion = \"chronological\"\n");
+    let journal = write(
+        &dir,
+        "main.journal",
+        "2026-01-01 early\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n\n2026-12-31 late\n    a:b   2.00 EUR\n    c:d  -2.00 EUR\n",
+    );
+    // Dated between the two: must land between them, not at the end.
+    let input = "2026-06-15\nMiddle\na:b\n3.00 EUR\nc:d\n\n.\n";
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    let text = fs::read_to_string(&journal).unwrap();
+    let early = text.find("early").unwrap();
+    let middle = text.find("Middle").unwrap();
+    let late = text.find("late").unwrap();
+    assert!(early < middle && middle < late, "file was:\n{text}");
 }

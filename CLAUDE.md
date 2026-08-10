@@ -5,9 +5,16 @@ A Rust CLI for plain text accounting (hledger) journals:
 - `rledger fmt` — a formatter, drop-in equivalent to `hledger-fmt`
 - `rledger add` — ergonomic interactive data entry, a better `hledger add`
 
-**Status: epic 1 (`fmt`) is implemented and green. Epic 2 (`add`) is next** —
-`src/add/` does not exist yet and `rledger add` errors out. Read `DESIGN.md` for
-what and why, `IMPLEMENTATION.md` for how and in what order. Both are current.
+**Status: epics 1 (`fmt`) and 2 (`add`) are implemented and green.** Epic 3
+(deferred directives: `payee`, `tag`, `Y`, `apply account`, `alias`) is next;
+see the epic 3 sections of `DESIGN.md` and `IMPLEMENTATION.md`. Read
+`DESIGN.md` for what and why, `IMPLEMENTATION.md` for how. One deliberate
+deviation from the plan: `ui` is built directly on `crossterm`, not
+`reedline` — the design sanctioned this fallback, and the live preview block
+plus field-navigation keys fight reedline's line-editor repaint model. `ui`
+splits into submodules (`dates`, `complete`, `plain`, `term`); everything
+except `term` is terminal-free and unit-tested. The `add` navigation scheme is
+flagged "unproven" in the design — expect user feedback to reshape it.
 
 ## Start here
 

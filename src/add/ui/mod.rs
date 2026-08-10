@@ -1,0 +1,1283 @@
+//! Interactive entry: the field state machine, completion, live preview,
+//! and the two frontends (raw-mode terminal, plain line mode for pipes).
+//!
+//! Everything in this module except `term` is pure and testable headlessly.
+//! The state machine is the *only* place that knows a posting is two fields —
+//! uniting account and amount into one journal-syntax line later must not
+//! touch the completers or the pre-fill logic.
+
+pub mod complete;
+pub mod dates;
+pub mod plain;
+pub mod term;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
+
+use super::amount::{imbalance, parse_amount, render_amount, style_from_sample, AmountCtx};
+use super::index::Index;
+use super::parser::{FileMap, Journal, Transaction};
+use super::write::NewTransaction;
+use crate::config::{Config, Matching, NewAccountPolicy};
+use crate::fmt::posting::{parse_posting, render};
+
+/// The field currently being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Field {
+    /// The transaction date.
+    #[default]
+    Date,
+    /// The description / payee.
+    Description,
+    /// Account of posting `i` (0-based).
+    Account(usize),
+    /// Amount of posting `i`.
+    Amount(usize),
+}
+
+impl Field {
+    /// Linear position, for navigation order.
+    const fn ordinal(self) -> usize {
+        match self {
+            Self::Date => 0,
+            Self::Description => 1,
+            Self::Account(i) => i.saturating_mul(2).saturating_add(2),
+            Self::Amount(i) => i.saturating_mul(2).saturating_add(3),
+        }
+    }
+
+    fn from_ordinal(n: usize) -> Self {
+        match n {
+            0 => Self::Date,
+            1 => Self::Description,
+            _ => {
+                let i = n.saturating_sub(2).saturating_div(2);
+                if n.checked_rem(2) == Some(0) {
+                    Self::Account(i)
+                } else {
+                    Self::Amount(i)
+                }
+            }
+        }
+    }
+
+    /// The prompt label shown to the user.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Date => "date".to_owned(),
+            Self::Description => "description".to_owned(),
+            Self::Account(i) => format!("account {}", i.saturating_add(1)),
+            Self::Amount(i) => format!("amount {}", i.saturating_add(1)),
+        }
+    }
+}
+
+/// What submitting a field produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Submit {
+    /// Field accepted; the draft has advanced (or moved) and the buffer is
+    /// loaded for the new current field.
+    Advanced,
+    /// The transaction is complete.
+    Done(Box<NewTransaction>),
+    /// Input rejected; message explains why. The field is unchanged.
+    Invalid(String),
+    /// The account is new; ask the user. `suggestion` is a near-miss from
+    /// the known pool, if one is close.
+    ConfirmNewAccount {
+        /// The name the user typed.
+        name: String,
+        /// A close existing name, if any ("did you mean …?").
+        suggestion: Option<String>,
+    },
+    /// Accepted, but with a note (e.g. `new_account = warn`).
+    AdvancedWithNote(String),
+    /// `u` at the date prompt: undo the last completed transaction.
+    Undo,
+}
+
+/// Session-wide immutable context assembled at startup.
+pub struct SessionCtx {
+    /// The parsed journal.
+    pub journal: Journal,
+    /// Frecency indices.
+    pub index: Index,
+    /// Resolved configuration.
+    pub config: Config,
+    /// Amount parsing context at the insertion point.
+    pub amount_ctx: AmountCtx,
+    /// Today, fixed at startup.
+    pub today: NaiveDate,
+    /// The write-target file.
+    pub target: PathBuf,
+    /// File-wide widths of the target, for the live preview.
+    pub acc_w: usize,
+    /// See `acc_w`.
+    pub num_w: usize,
+    /// Accounts known to the journal: declarations visible at the insertion
+    /// point plus every account used in a transaction.
+    pub known_accounts: HashSet<String>,
+    /// Declared accounts (full pool — offering a name is harmless even when
+    /// it is declared below the insertion point).
+    pub declared_accounts: Vec<String>,
+    /// The effective new-account policy.
+    pub new_account: NewAccountPolicy,
+    /// Default commodity sample: the target file's `D` directive, falling
+    /// back to the configured default.
+    pub default_commodity: Option<String>,
+}
+
+impl SessionCtx {
+    /// Assemble the context for a target file within a parsed journal.
+    #[must_use]
+    pub fn new(
+        journal: Journal,
+        config: Config,
+        today: NaiveDate,
+        target: PathBuf,
+        target_map: &FileMap,
+    ) -> Self {
+        let index = Index::build(&journal, today, config.half_life_days);
+
+        let mut amount_ctx = AmountCtx::default();
+        for c in &journal.commodities {
+            if let Some(sample) = &c.sample {
+                if let Some((name, style)) = style_from_sample(sample) {
+                    amount_ctx.styles.insert(name, style);
+                }
+            }
+        }
+        let target_file = journal.file(&target).cloned();
+        let (insertion_pos, state) = target_file.map_or((usize::MAX, None), |f| {
+            (f.eof_pos, Some(f.state_at_eof))
+        });
+        amount_ctx.decimal_mark = state.as_ref().and_then(|s| s.decimal_mark);
+
+        let mut known_accounts: HashSet<String> = journal
+            .accounts_visible_at(insertion_pos)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        for t in &journal.transactions {
+            for p in &t.postings {
+                known_accounts.insert(p.account.clone());
+            }
+        }
+        let declared_accounts: Vec<String> =
+            journal.accounts.iter().map(|d| d.name.clone()).collect();
+
+        let new_account = config.new_account.unwrap_or_else(|| {
+            if journal.declares_accounts() {
+                NewAccountPolicy::Confirm
+            } else {
+                NewAccountPolicy::Warn
+            }
+        });
+
+        let default_commodity = state
+            .and_then(|s| s.default_commodity)
+            .or_else(|| config.default_commodity.clone());
+
+        Self {
+            journal,
+            index,
+            config,
+            amount_ctx,
+            today,
+            target,
+            acc_w: target_map.acc_w,
+            num_w: target_map.num_w,
+            known_accounts,
+            declared_accounts,
+            new_account,
+            default_commodity,
+        }
+    }
+
+    /// Ranked account candidates, conditioned on a description, with
+    /// declared-but-unused accounts appended.
+    #[must_use]
+    pub fn account_pool(&self, description: Option<&str>) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .index
+            .ranked_accounts(description)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        for a in &self.declared_accounts {
+            if !out.iter().any(|x| x == a) {
+                out.push(a.clone());
+            }
+        }
+        out
+    }
+
+    /// The commodity of the journal's `D` sample (or configured default):
+    /// what gets attached to generated unitless balancing amounts as
+    /// editable pre-fill.
+    #[must_use]
+    pub fn default_commodity_symbol(&self) -> Option<String> {
+        let sample = self.default_commodity.as_deref()?;
+        parse_amount(sample, &self.amount_ctx)
+            .map(|p| p.commodity)
+            .filter(|c| !c.is_empty())
+            .or_else(|| {
+                // The sample may be a bare symbol.
+                let t = sample.trim();
+                (!t.is_empty() && !t.chars().any(|c| c.is_ascii_digit()))
+                    .then(|| t.to_owned())
+            })
+    }
+}
+
+/// The transaction being entered.
+#[derive(Debug, Clone, Default)]
+pub struct Draft {
+    /// Raw date input and its resolution.
+    pub date_input: String,
+    /// Resolved date once the date field was accepted.
+    pub date: Option<NaiveDate>,
+    /// Accepted description.
+    pub description: String,
+    /// Committed postings: (account, raw amount text).
+    pub postings: Vec<(String, String)>,
+    /// The current field.
+    pub field: Field,
+    /// The current field's edit buffer.
+    pub buffer: String,
+    /// Cursor position in `buffer`, in chars.
+    pub cursor: usize,
+    /// Whether the buffer still holds untouched pre-filled text. A printable
+    /// keystroke then replaces it wholesale (Enter still accepts it, and
+    /// editing keys keep it for editing).
+    pub pristine: bool,
+    /// Template postings pre-filling this draft, from the description's most
+    /// recent transaction.
+    template: Vec<(String, String)>,
+    /// Highest field reached, as an ordinal — the navigation frontier.
+    frontier: usize,
+}
+
+impl Draft {
+    /// A fresh draft at the date prompt, pre-filled with today.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the buffer (accepting a candidate, or a test typing a whole
+    /// value). The result counts as the user's own text.
+    pub fn set_buffer(&mut self, text: &str) {
+        text.clone_into(&mut self.buffer);
+        self.cursor = text.chars().count();
+        self.pristine = false;
+    }
+
+    /// Insert a char at the cursor. On a pristine pre-fill this replaces the
+    /// whole buffer — typing over a suggestion starts fresh.
+    pub fn insert(&mut self, c: char) {
+        if self.pristine {
+            self.buffer.clear();
+            self.cursor = 0;
+            self.pristine = false;
+        }
+        let byte = char_to_byte(&self.buffer, self.cursor);
+        self.buffer.insert(byte, c);
+        self.cursor = self.cursor.saturating_add(1);
+    }
+
+    /// Delete the char before the cursor.
+    pub fn backspace(&mut self) {
+        self.pristine = false;
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = self.cursor.saturating_sub(1);
+        let byte = char_to_byte(&self.buffer, self.cursor);
+        self.buffer.remove(byte);
+    }
+
+    /// Number of postings committed so far.
+    #[must_use]
+    pub const fn committed_postings(&self) -> usize {
+        self.postings.len()
+    }
+
+    /// Save the buffer into the current field's slot without validation
+    /// (used when navigating away).
+    fn stash(&mut self) {
+        let text = self.buffer.trim().to_owned();
+        match self.field {
+            Field::Date => self.date_input = text,
+            Field::Description => self.description = text,
+            Field::Account(i) => {
+                ensure_len(&mut self.postings, i.saturating_add(1));
+                if let Some(p) = self.postings.get_mut(i) {
+                    p.0 = text;
+                }
+            }
+            Field::Amount(i) => {
+                ensure_len(&mut self.postings, i.saturating_add(1));
+                if let Some(p) = self.postings.get_mut(i) {
+                    p.1 = text;
+                }
+            }
+        }
+    }
+
+    /// The stored text of a field (for loading on navigation).
+    fn stored(&self, field: Field) -> String {
+        match field {
+            Field::Date => self.date_input.clone(),
+            Field::Description => self.description.clone(),
+            Field::Account(i) => self.postings.get(i).map(|p| p.0.clone()).unwrap_or_default(),
+            Field::Amount(i) => self.postings.get(i).map(|p| p.1.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Move to a field, stashing the buffer and loading the target's text.
+    /// The loaded text is pristine: typing replaces it.
+    fn goto(&mut self, field: Field) {
+        self.stash();
+        self.field = field;
+        self.frontier = self.frontier.max(field.ordinal());
+        let text = self.stored(field);
+        self.set_buffer(&text);
+        self.pristine = !text.is_empty();
+    }
+
+    /// Navigate up (earlier field). Returns whether anything moved.
+    pub fn nav_up(&mut self) -> bool {
+        let ord = self.field.ordinal();
+        if ord == 0 {
+            return false;
+        }
+        self.goto(Field::from_ordinal(ord.saturating_sub(1)));
+        true
+    }
+
+    /// Navigate down (later field), bounded by the frontier.
+    pub fn nav_down(&mut self) -> bool {
+        let ord = self.field.ordinal();
+        if ord >= self.frontier {
+            return false;
+        }
+        self.goto(Field::from_ordinal(ord.saturating_add(1)));
+        true
+    }
+
+    /// The amounts committed so far, as raw strings.
+    fn committed_amounts(&self) -> Vec<&str> {
+        self.postings.iter().map(|(_, a)| a.as_str()).collect()
+    }
+}
+
+fn ensure_len(v: &mut Vec<(String, String)>, n: usize) {
+    while v.len() < n {
+        v.push((String::new(), String::new()));
+    }
+}
+
+fn char_to_byte(s: &str, chars: usize) -> usize {
+    s.char_indices().nth(chars).map_or(s.len(), |(b, _)| b)
+}
+
+/// The running session: completed transactions plus the current draft.
+pub struct Session {
+    /// Immutable context.
+    pub ctx: SessionCtx,
+    /// Completed, not-yet-written transactions.
+    pub completed: Vec<NewTransaction>,
+    /// The draft being edited.
+    pub draft: Draft,
+}
+
+impl Session {
+    /// Start a session.
+    #[must_use]
+    pub fn new(ctx: SessionCtx) -> Self {
+        let mut s = Self {
+            ctx,
+            completed: Vec::new(),
+            draft: Draft::new(),
+        };
+        s.reset_draft();
+        s
+    }
+
+    /// Reset to a fresh draft at the date prompt (today pre-filled).
+    pub fn reset_draft(&mut self) {
+        self.draft = Draft::new();
+        let today = self.ctx.today.format("%Y-%m-%d").to_string();
+        self.draft.set_buffer(&today);
+    }
+
+    /// The pre-fill for the current field, used when its stored text is
+    /// empty. (Loading an already-stored field on navigation wins.)
+    #[must_use]
+    pub fn prefill(&self) -> String {
+        match self.draft.field {
+            Field::Date => self.ctx.today.format("%Y-%m-%d").to_string(),
+            Field::Description => String::new(),
+            Field::Account(i) => self
+                .draft
+                .template
+                .get(i)
+                .map(|(a, _)| a.clone())
+                .unwrap_or_default(),
+            Field::Amount(i) => self.amount_prefill(i),
+        }
+    }
+
+    /// Template amount when the account matches; otherwise the negated
+    /// running sum (the balancing amount), when it is known and nonzero.
+    fn amount_prefill(&self, i: usize) -> String {
+        let account = self
+            .draft
+            .postings
+            .get(i)
+            .map(|(a, _)| a.as_str())
+            .unwrap_or_default();
+        let template_match = self.draft.template.get(i).and_then(|(a, amt)| {
+            (a == account && !amt.is_empty()).then(|| amt.clone())
+        });
+        let balancing = self.balancing_prefill(i);
+        // On the template's *last* posting the balancing sum is the better
+        // prediction ("the final posting's amount is pre-filled with the
+        // negated running sum"); earlier template postings keep their
+        // amounts verbatim.
+        let last_template_slot = i.saturating_add(1) >= self.draft.template.len();
+        if last_template_slot {
+            balancing.or(template_match).unwrap_or_default()
+        } else {
+            template_match.or(balancing).unwrap_or_default()
+        }
+    }
+
+    /// The negated sum over the *other* postings, rendered — the balancing
+    /// amount. `None` when it is unknown, zero, or spans commodities.
+    fn balancing_prefill(&self, i: usize) -> Option<String> {
+        let amounts: Vec<&str> = self
+            .draft
+            .postings
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, (_, a))| a.as_str())
+            .collect();
+        let sums = imbalance(&amounts, &self.ctx.amount_ctx)?;
+        let [(commodity, value)] = sums.as_slice() else {
+            return None;
+        };
+        let negated = Decimal::ZERO.checked_sub(*value)?;
+        let commodity = if commodity.is_empty() {
+            self.ctx.default_commodity_symbol().unwrap_or_default()
+        } else {
+            commodity.clone()
+        };
+        Some(render_amount(negated, &commodity, &self.ctx.amount_ctx))
+    }
+
+    /// Ranked completion candidates for the current field and buffer.
+    #[must_use]
+    pub fn candidates(&self) -> Vec<String> {
+        let query = self.draft.buffer.trim();
+        match self.draft.field {
+            Field::Date => Vec::new(),
+            Field::Description => {
+                let ranked = self.ctx.index.ranked_descriptions();
+                complete::filter_ranked(self.ctx.config.description_matching, query, &ranked)
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            }
+            Field::Account(_) => {
+                let desc = (!self.draft.description.is_empty())
+                    .then_some(self.draft.description.as_str());
+                let pool = self.ctx.account_pool(desc);
+                let refs: Vec<&str> = pool.iter().map(String::as_str).collect();
+                let strategy =
+                    complete::account_strategy(self.ctx.config.account_matching, query);
+                complete::filter_ranked(strategy, query, &refs)
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            }
+            Field::Amount(_) => {
+                // Commodities, completed against the trailing non-numeric
+                // token of the buffer.
+                let (head, tail) = split_commodity_query(query);
+                let mut pool: Vec<String> = self
+                    .ctx
+                    .index
+                    .ranked_commodities()
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect();
+                for c in &self.ctx.journal.commodities {
+                    if !pool.iter().any(|x| x == &c.name) {
+                        pool.push(c.name.clone());
+                    }
+                }
+                let refs: Vec<&str> = pool.iter().map(String::as_str).collect();
+                complete::filter_ranked(Matching::Prefix, tail, &refs)
+                    .into_iter()
+                    .map(|c| {
+                        if head.is_empty() {
+                            c.to_owned()
+                        } else {
+                            format!("{head} {c}")
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// The hint shown next to a candidate in the menu: last-used date, and
+    /// for accounts the amount from the most recent matching transaction.
+    #[must_use]
+    pub fn candidate_hint(&self, candidate: &str) -> String {
+        match self.draft.field {
+            Field::Description => self.ctx.index.descriptions.get(candidate).map_or_else(
+                String::new,
+                |e| {
+                    let tpl = self
+                        .ctx
+                        .index
+                        .template(&self.ctx.journal, candidate)
+                        .and_then(|t| t.postings.first())
+                        .map(|p| p.amount.clone())
+                        .unwrap_or_default();
+                    format!("{} · {}", e.last_date.format("%Y-%m-%d"), tpl)
+                        .trim_end_matches(" · ")
+                        .to_owned()
+                },
+            ),
+            Field::Account(_) => {
+                let key = (self.draft.description.clone(), candidate.to_owned());
+                self.ctx
+                    .index
+                    .by_description
+                    .get(&key)
+                    .or_else(|| self.ctx.index.accounts.get(candidate))
+                    .map_or_else(String::new, |e| e.last_date.format("%Y-%m-%d").to_string())
+            }
+            Field::Date | Field::Amount(_) => String::new(),
+        }
+    }
+
+    /// Submit the current buffer for the current field.
+    pub fn submit(&mut self) -> Submit {
+        match self.draft.field {
+            Field::Date => self.submit_date(),
+            Field::Description => self.submit_description(),
+            Field::Account(i) => self.submit_account(i, false),
+            Field::Amount(i) => self.submit_amount(i),
+        }
+    }
+
+    /// Re-submit an account after the user confirmed creating it.
+    pub fn submit_confirmed_account(&mut self) -> Submit {
+        if let Field::Account(i) = self.draft.field {
+            self.submit_account(i, true)
+        } else {
+            Submit::Invalid("nothing to confirm".to_owned())
+        }
+    }
+
+    fn submit_date(&mut self) -> Submit {
+        let text = self.draft.buffer.trim().to_owned();
+        if text == "u" {
+            return if self.completed.is_empty() {
+                Submit::Invalid("nothing to undo".to_owned())
+            } else {
+                Submit::Undo
+            };
+        }
+        let Some(date) = dates::resolve(&text, self.ctx.today) else {
+            return Submit::Invalid(format!("cannot understand date {text:?}"));
+        };
+        self.draft.date = Some(date);
+        self.draft.date_input = text;
+        self.advance_to(Field::Description);
+        Submit::Advanced
+    }
+
+    fn submit_description(&mut self) -> Submit {
+        let text = self.draft.buffer.trim().to_owned();
+        self.draft.description.clone_from(&text);
+        // Load the template once, from the description's most recent
+        // transaction. Predictability: most recent, not highest scoring.
+        if self.draft.postings.is_empty() && self.draft.template.is_empty() {
+            if let Some(tpl) = self.ctx.index.template(&self.ctx.journal, &text) {
+                self.draft.template = template_postings(tpl);
+            }
+        }
+        self.advance_to(Field::Account(0));
+        Submit::Advanced
+    }
+
+    fn submit_account(&mut self, i: usize, confirmed: bool) -> Submit {
+        let text = self.draft.buffer.trim().to_owned();
+        if text.is_empty() {
+            return self.finish(i);
+        }
+        if !confirmed && !self.ctx.known_accounts.contains(&text) {
+            match self.ctx.new_account {
+                NewAccountPolicy::Allow => {}
+                NewAccountPolicy::Warn => {
+                    self.commit_account(i, &text);
+                    return Submit::AdvancedWithNote(format!("{text} is a new account"));
+                }
+                NewAccountPolicy::Confirm => {
+                    return Submit::ConfirmNewAccount {
+                        suggestion: self.near_miss(&text),
+                        name: text,
+                    };
+                }
+                NewAccountPolicy::Error => {
+                    let hint = self
+                        .near_miss(&text)
+                        .map_or_else(String::new, |s| format!(" (did you mean {s}?)"));
+                    return Submit::Invalid(format!(
+                        "{text} is not a known account{hint}"
+                    ));
+                }
+            }
+        }
+        self.commit_account(i, &text);
+        Submit::Advanced
+    }
+
+    fn commit_account(&mut self, i: usize, text: &str) {
+        ensure_len(&mut self.draft.postings, i.saturating_add(1));
+        if let Some(p) = self.draft.postings.get_mut(i) {
+            text.clone_into(&mut p.0);
+        }
+        self.advance_to(Field::Amount(i));
+    }
+
+    fn submit_amount(&mut self, i: usize) -> Submit {
+        let text = self.draft.buffer.trim().to_owned();
+        if !text.is_empty() && parse_amount(&text, &self.ctx.amount_ctx).is_none() {
+            return Submit::Invalid(format!("cannot parse amount {text:?}"));
+        }
+        ensure_len(&mut self.draft.postings, i.saturating_add(1));
+        if let Some(p) = self.draft.postings.get_mut(i) {
+            p.1 = text;
+        }
+        self.advance_to(Field::Account(i.saturating_add(1)));
+        Submit::Advanced
+    }
+
+    /// Finish the transaction at an empty account prompt for posting `i`.
+    fn finish(&mut self, i: usize) -> Submit {
+        // Drop any trailing empty posting slots.
+        self.draft.postings.truncate(i);
+        while self
+            .draft
+            .postings
+            .last()
+            .is_some_and(|(a, _)| a.trim().is_empty())
+        {
+            self.draft.postings.pop();
+        }
+        if self.draft.postings.len() < 2 {
+            return Submit::Invalid(
+                "a transaction needs at least two postings (Ctrl-C to abort)".to_owned(),
+            );
+        }
+        // Refuse to write a transaction that provably does not balance.
+        // Unknown imbalance (unparseable or elided amounts) passes — entry
+        // tool, not validator.
+        let has_bare = self
+            .draft
+            .postings
+            .iter()
+            .any(|(_, a)| a.trim().is_empty());
+        if !has_bare {
+            let amounts = self.draft.committed_amounts();
+            if let Some(sums) = imbalance(&amounts, &self.ctx.amount_ctx) {
+                if !sums.is_empty() {
+                    let detail: Vec<String> = sums
+                        .iter()
+                        .map(|(c, v)| render_amount(*v, c, &self.ctx.amount_ctx))
+                        .collect();
+                    return Submit::Invalid(format!(
+                        "transaction does not balance (off by {})",
+                        detail.join(", ")
+                    ));
+                }
+            }
+        }
+        let Some(date) = self.draft.date else {
+            return Submit::Invalid("no date".to_owned());
+        };
+        let txn = NewTransaction {
+            date,
+            description: self.draft.description.clone(),
+            postings: self.draft.postings.clone(),
+        };
+        Submit::Done(Box::new(txn))
+    }
+
+    /// Move to `field`, loading its stored text or, when empty, its
+    /// pre-fill.
+    fn advance_to(&mut self, field: Field) {
+        self.draft.goto(field);
+        if self.draft.buffer.is_empty() {
+            let fill = self.prefill();
+            self.draft.set_buffer(&fill);
+            self.draft.pristine = !fill.is_empty();
+        }
+    }
+
+    /// A close existing account name, for "did you mean".
+    #[must_use]
+    pub fn near_miss(&self, name: &str) -> Option<String> {
+        let pool = self.ctx.account_pool(None);
+        let lower = name.to_lowercase();
+        let mut best: Option<(usize, &String)> = None;
+        for candidate in &pool {
+            let d = levenshtein(&lower, &candidate.to_lowercase());
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, candidate));
+            }
+        }
+        let (d, candidate) = best?;
+        // Also accept segment near-misses like `exp:trav` for
+        // `expenses:travel:train`, which levenshtein alone would miss.
+        let segmentish = complete::match_quality(Matching::Segment, name, candidate).is_some();
+        let close_enough = d <= name.chars().count().saturating_div(2).max(2);
+        (segmentish || close_enough).then(|| candidate.clone())
+    }
+
+    /// The running imbalance of the committed postings, for display.
+    /// `None` when some amount is unparseable ("imbalance unknown").
+    #[must_use]
+    pub fn running_imbalance(&self) -> Option<Vec<(String, Decimal)>> {
+        imbalance(&self.draft.committed_amounts(), &self.ctx.amount_ctx)
+    }
+
+    /// The live preview block, formatted exactly as it will be written:
+    /// rendered against the file's widths so an entry that will reflow the
+    /// file visibly shifts the preview.
+    #[must_use]
+    pub fn preview_lines(&self) -> Vec<String> {
+        let mut draft = self.draft.clone();
+        draft.stash(); // include the in-progress buffer
+        let date_text = draft.date.map_or_else(
+            || {
+                dates::resolve(&draft.date_input, self.ctx.today).map_or_else(
+                    || format!("{}?", draft.date_input),
+                    |d| d.format("%Y-%m-%d").to_string(),
+                )
+            },
+            |d| d.format("%Y-%m-%d").to_string(),
+        );
+        let mut acc_w = self.ctx.acc_w;
+        let mut num_w = self.ctx.num_w;
+        let rendered_postings: Vec<String> = draft
+            .postings
+            .iter()
+            .filter(|(a, _)| !a.trim().is_empty())
+            .map(|(a, amt)| {
+                if amt.trim().is_empty() {
+                    format!("    {a}")
+                } else {
+                    format!("    {a}  {}", amt.trim())
+                }
+            })
+            .collect();
+        for line in &rendered_postings {
+            let p = parse_posting(line);
+            if let Some(a) = crate::fmt::posting::account_of(&p) {
+                acc_w = acc_w.max(a.chars().count());
+            }
+            if let crate::fmt::posting::Posting::Amount { num, .. } = &p {
+                num_w = num_w.max(num.chars().count());
+            }
+        }
+        let mut out = vec![format!("{date_text} {}", draft.description)
+            .trim_end()
+            .to_owned()];
+        for line in &rendered_postings {
+            out.push(render(acc_w, num_w, &parse_posting(line)));
+        }
+        out
+    }
+
+    /// Replace the draft's content from an edited transaction (the Ctrl-E
+    /// editor round-trip), leaving the user at a fresh account prompt.
+    pub fn load_draft_from(&mut self, txn: &NewTransaction) {
+        self.draft = Draft::new();
+        self.draft.date = Some(txn.date);
+        self.draft.date_input = txn.date.format("%Y-%m-%d").to_string();
+        self.draft.description.clone_from(&txn.description);
+        self.draft.postings.clone_from(&txn.postings);
+        let next = Field::Account(txn.postings.len());
+        self.draft.frontier = next.ordinal();
+        self.draft.field = next;
+        self.draft.set_buffer("");
+    }
+
+    /// Record a finished transaction and reset for the next one.
+    pub fn complete(&mut self, txn: NewTransaction) {
+        self.completed.push(txn);
+        self.reset_draft();
+    }
+
+    /// Undo the last completed transaction. Returns it, if any.
+    pub fn undo(&mut self) -> Option<NewTransaction> {
+        let t = self.completed.pop();
+        self.reset_draft();
+        t
+    }
+}
+
+/// The template postings of a historical transaction: (account, raw amount).
+fn template_postings(t: &Transaction) -> Vec<(String, String)> {
+    t.postings
+        .iter()
+        .map(|p| (p.account.clone(), p.amount.clone()))
+        .collect()
+}
+
+/// Split an amount buffer into (numeric head, trailing partial commodity)
+/// for commodity completion: `23.45 EU` → (`23.45`, `EU`).
+fn split_commodity_query(buffer: &str) -> (&str, &str) {
+    buffer.rfind(char::is_whitespace).map_or_else(
+        || {
+            if buffer.chars().all(|c| !c.is_alphabetic()) {
+                (buffer, "")
+            } else {
+                ("", buffer)
+            }
+        },
+        |i| {
+            let head = buffer.get(..i).unwrap_or_default();
+            let tail = buffer.get(i.saturating_add(1)..).unwrap_or_default();
+            (head, tail)
+        },
+    )
+}
+
+/// Levenshtein distance over chars (two-row DP, no indexing).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let bv: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=bv.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur: Vec<usize> = Vec::with_capacity(bv.len().saturating_add(1));
+        cur.push(i.saturating_add(1));
+        for (j, cb) in bv.iter().enumerate() {
+            let del = prev.get(j.saturating_add(1)).copied().unwrap_or(usize::MAX).saturating_add(1);
+            let ins = cur.last().copied().unwrap_or(usize::MAX).saturating_add(1);
+            let sub = prev
+                .get(j)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .saturating_add(usize::from(ca != *cb));
+            cur.push(del.min(ins).min(sub));
+        }
+        prev = cur;
+    }
+    prev.last().copied().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::add::parser::parse_journal;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    const TODAY: fn() -> NaiveDate = || d(2026, 8, 10);
+
+    /// A session over a small journal on disk.
+    fn session(journal_src: &str) -> (Session, TempDir) {
+        session_with(journal_src, Config::default())
+    }
+
+    fn session_with(journal_src: &str, config: Config) -> (Session, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("main.journal");
+        fs::write(&path, journal_src).unwrap();
+        let journal = parse_journal(&path).unwrap();
+        let map = FileMap::build(journal_src);
+        let ctx = SessionCtx::new(journal, config, TODAY(), path, &map);
+        (Session::new(ctx), dir)
+    }
+
+    const JOURNAL: &str = "\
+2026-08-01 Rewe
+    expenses:groceries        23.45 EUR
+    liabilities:creditcard   -23.45 EUR
+
+2026-08-05 Rewe
+    expenses:groceries        12.00 EUR
+    assets:bank:checking     -12.00 EUR
+
+2026-08-06 Deutsche Bahn
+    expenses:travel:train     49.00 EUR
+    assets:bank:checking     -49.00 EUR
+";
+
+    fn type_in(s: &mut Session, text: &str) {
+        s.draft.set_buffer(text);
+    }
+
+    #[test]
+    fn the_happy_path_enters_a_balanced_transaction() {
+        let (mut s, _t) = session(JOURNAL);
+        // Date pre-filled with today; accept it.
+        assert_eq!(s.draft.buffer, "2026-08-10");
+        assert_eq!(s.submit(), Submit::Advanced);
+        assert_eq!(s.draft.field, Field::Description);
+
+        type_in(&mut s, "Rewe");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Template from the most recent Rewe: account 1 pre-filled.
+        assert_eq!(s.draft.field, Field::Account(0));
+        assert_eq!(s.draft.buffer, "expenses:groceries");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Template amount pre-filled verbatim.
+        assert_eq!(s.draft.field, Field::Amount(0));
+        assert_eq!(s.draft.buffer, "12.00 EUR");
+        type_in(&mut s, "18.20 EUR");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Account 2 from template.
+        assert_eq!(s.draft.buffer, "assets:bank:checking");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Balancing amount pre-filled: negated running sum, not the template.
+        assert_eq!(s.draft.buffer, "-18.20 EUR");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Empty account prompt finishes.
+        assert_eq!(s.draft.field, Field::Account(2));
+        assert_eq!(s.draft.buffer, "");
+        let Submit::Done(txn) = s.submit() else {
+            panic!("expected Done, got {:?}", s.submit());
+        };
+        assert_eq!(txn.date, d(2026, 8, 10));
+        assert_eq!(txn.description, "Rewe");
+        assert_eq!(
+            txn.postings,
+            vec![
+                ("expenses:groceries".to_owned(), "18.20 EUR".to_owned()),
+                ("assets:bank:checking".to_owned(), "-18.20 EUR".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_transaction_cannot_finish() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Test");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "10 EUR");
+        s.submit();
+        type_in(&mut s, "assets:bank:checking");
+        s.submit();
+        type_in(&mut s, "-9 EUR");
+        s.submit();
+        type_in(&mut s, "");
+        let r = s.submit();
+        let Submit::Invalid(msg) = r else {
+            panic!("expected Invalid, got {r:?}");
+        };
+        assert!(msg.contains("balance"), "{msg}");
+        assert!(msg.contains('1'), "{msg}");
+    }
+
+    #[test]
+    fn a_transaction_with_a_bare_posting_may_finish() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Test");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "10 EUR");
+        s.submit();
+        type_in(&mut s, "assets:bank:checking");
+        s.submit();
+        type_in(&mut s, ""); // elided amount
+        s.submit();
+        type_in(&mut s, "");
+        assert!(matches!(s.submit(), Submit::Done(_)));
+    }
+
+    #[test]
+    fn bad_dates_and_bad_amounts_are_rejected_in_place() {
+        let (mut s, _t) = session(JOURNAL);
+        type_in(&mut s, "not a date");
+        assert!(matches!(s.submit(), Submit::Invalid(_)));
+        assert_eq!(s.draft.field, Field::Date);
+        type_in(&mut s, "yesterday");
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "one hundred");
+        assert!(matches!(s.submit(), Submit::Invalid(_)));
+        assert_eq!(s.draft.field, Field::Amount(0));
+    }
+
+    #[test]
+    fn date_resolution_uses_smart_dates() {
+        let (mut s, _t) = session(JOURNAL);
+        type_in(&mut s, "5");
+        s.submit();
+        assert_eq!(s.draft.date, Some(d(2026, 8, 5)));
+    }
+
+    #[test]
+    fn new_account_warn_policy_advances_with_note() {
+        // JOURNAL has no account directives → default policy is warn.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:brandnew");
+        let r = s.submit();
+        assert!(matches!(r, Submit::AdvancedWithNote(_)), "{r:?}");
+        assert_eq!(s.draft.field, Field::Amount(0));
+    }
+
+    #[test]
+    fn declared_journals_default_to_confirm_with_near_miss() {
+        let src = "account expenses:travel:train\naccount expenses:groceries\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "exp:trav");
+        let r = s.submit();
+        let Submit::ConfirmNewAccount { name, suggestion } = r else {
+            panic!("expected ConfirmNewAccount, got {r:?}");
+        };
+        assert_eq!(name, "exp:trav");
+        assert_eq!(suggestion.as_deref(), Some("expenses:travel:train"));
+        // Confirming proceeds.
+        assert_eq!(s.submit_confirmed_account(), Submit::Advanced);
+    }
+
+    #[test]
+    fn error_policy_blocks_new_accounts() {
+        let src = "account expenses:groceries\n";
+        let cfg = Config {
+            new_account: Some(crate::config::NewAccountPolicy::Error),
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(src, cfg);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:grocery");
+        let r = s.submit();
+        let Submit::Invalid(msg) = r else {
+            panic!("expected Invalid, got {r:?}");
+        };
+        assert!(msg.contains("did you mean expenses:groceries"), "{msg}");
+    }
+
+    #[test]
+    fn known_accounts_include_those_used_in_transactions() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:travel:train");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn description_completion_is_frecency_ranked_and_conditioned() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        // Substring matching on descriptions.
+        type_in(&mut s, "ew");
+        let c = s.candidates();
+        assert_eq!(c, vec!["Rewe"]);
+        type_in(&mut s, "Rewe");
+        s.submit();
+        // Account candidates conditioned on Rewe: groceries first.
+        type_in(&mut s, "");
+        let c = s.candidates();
+        assert_eq!(c.first().map(String::as_str), Some("expenses:groceries"));
+        // Segment matching kicks in on a colon.
+        type_in(&mut s, "ex:tra");
+        assert_eq!(s.candidates(), vec!["expenses:travel:train"]);
+    }
+
+    #[test]
+    fn declared_but_unused_accounts_complete_too() {
+        let src = "account equity:conversion\n2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "conv");
+        assert_eq!(s.candidates(), vec!["equity:conversion"]);
+    }
+
+    #[test]
+    fn commodity_completion_completes_the_trailing_token() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "12.50 E");
+        let c = s.candidates();
+        assert_eq!(c, vec!["12.50 EUR"]);
+    }
+
+    #[test]
+    fn navigation_moves_between_fields_and_reloads_text() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit(); // date
+        type_in(&mut s, "Rewe");
+        s.submit(); // description
+        s.submit(); // account 1 (template)
+        assert_eq!(s.draft.field, Field::Amount(0));
+        // Up to account 1, edit, back down.
+        assert!(s.draft.nav_up());
+        assert_eq!(s.draft.field, Field::Account(0));
+        assert_eq!(s.draft.buffer, "expenses:groceries");
+        assert!(s.draft.nav_up());
+        assert_eq!(s.draft.field, Field::Description);
+        assert_eq!(s.draft.buffer, "Rewe");
+        assert!(s.draft.nav_down());
+        assert!(s.draft.nav_down());
+        assert_eq!(s.draft.field, Field::Amount(0));
+        // The frontier stops downward navigation.
+        assert!(!s.draft.nav_down());
+    }
+
+    #[test]
+    fn preview_renders_at_file_widths_and_resolves_the_date() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        s.submit(); // account from template
+        type_in(&mut s, "9.99 EUR");
+        s.submit();
+        let lines = s.preview_lines();
+        assert_eq!(lines[0], "2026-08-10 Rewe");
+        // Account column padded to the file's widest account
+        // (liabilities:creditcard, 22) and number right-aligned to the
+        // file-wide numW (-23.45 → 6).
+        assert_eq!(lines[1], "    expenses:groceries        9.99 EUR");
+    }
+
+    #[test]
+    fn preview_shows_unresolved_dates_with_a_question_mark() {
+        let (mut s, _t) = session(JOURNAL);
+        type_in(&mut s, "wat");
+        assert_eq!(s.preview_lines()[0], "wat?");
+        type_in(&mut s, "30");
+        assert_eq!(s.preview_lines()[0], "2026-08-30");
+    }
+
+    #[test]
+    fn running_imbalance_reports_per_commodity() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit_confirmed_account();
+        type_in(&mut s, "10 EUR");
+        s.submit();
+        assert_eq!(
+            s.running_imbalance(),
+            Some(vec![("EUR".to_owned(), "10".parse().unwrap())])
+        );
+    }
+
+    #[test]
+    fn undo_pops_the_last_completed_transaction() {
+        let (mut s, _t) = session(JOURNAL);
+        s.complete(NewTransaction {
+            date: d(2026, 8, 10),
+            description: "X".into(),
+            postings: vec![("a".into(), "1 EUR".into()), ("b".into(), "-1 EUR".into())],
+        });
+        type_in(&mut s, "u");
+        assert_eq!(s.submit(), Submit::Undo);
+        assert!(s.undo().is_some());
+        assert!(s.completed.is_empty());
+        // Nothing left: `u` is now invalid.
+        type_in(&mut s, "u");
+        assert!(matches!(s.submit(), Submit::Invalid(_)));
+    }
+
+    #[test]
+    fn default_commodity_attaches_to_unitless_balancing_prefills() {
+        let src = "D 1000.00 EUR\n2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "a:b");
+        s.submit();
+        type_in(&mut s, "12.50"); // unitless
+        s.submit();
+        type_in(&mut s, "c:d");
+        s.submit();
+        // Balancing prefill: unitless sum + D commodity, editable.
+        assert_eq!(s.draft.buffer, "-12.50 EUR");
+    }
+
+    #[test]
+    fn typing_over_a_pristine_prefill_replaces_it() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        // Account 1 arrives pre-filled and pristine; typing starts fresh.
+        assert_eq!(s.draft.buffer, "expenses:groceries");
+        assert!(s.draft.pristine);
+        s.draft.insert('l');
+        assert_eq!(s.draft.buffer, "l");
+        assert!(!s.draft.pristine);
+    }
+
+    #[test]
+    fn backspace_on_a_pristine_prefill_keeps_the_text_for_editing() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        // goto loads pristine; backspace switches to editing.
+        assert!(s.draft.pristine);
+        s.draft.backspace();
+        assert_eq!(s.draft.buffer, "expenses:grocerie");
+        s.draft.insert('s');
+        assert_eq!(s.draft.buffer, "expenses:groceries");
+    }
+
+    #[test]
+    fn levenshtein_basics() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("abc", "abc"), 0);
+        assert_eq!(levenshtein("abc", "abd"), 1);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+}

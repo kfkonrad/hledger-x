@@ -15,12 +15,23 @@ name = "rledger"
 path = "src/lib.rs"
 
 [dependencies]
+# DATES AND SMART-DATE RESOLUTION
+chrono = "0.4.45"
 # COMMAND LINE PARSING
 clap = { version = "4.5.53", features = ["derive"] }
 # SIMPLE PRETTY ERROR HANDLING
 color-eyre = "0.6.5"
+# RAW-MODE TERMINAL UI
+crossterm = "0.29.0"
+# INCLUDE-DIRECTIVE GLOB EXPANSION
+glob = "0.3.4"
 # SUPERPOWERED ITERATORS
 itertools = "0.14.0"
+# EXACT DECIMAL AMOUNTS, NEVER FLOATS
+rust_decimal = "1.42.1"
+# CONFIG (DE)SERIALIZATION
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
 
 [lints.clippy]
 # UM, ACTUALLY
@@ -41,3 +52,6 @@ panic_in_result_fn = "deny"
 panic = "deny"
 exit = "deny"
 as_conversions = "deny"
+
+[dev-dependencies]
+tempfile = "3.27.0"

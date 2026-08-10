@@ -9,7 +9,6 @@ Format hledger journals and enter transactions ergonomically
 - `rledger fmt` — a format-preserving journal formatter, a drop-in equivalent to
   [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)
 - `rledger add` — ergonomic interactive data entry, a better `hledger add`
-  (**not implemented yet**)
 
 The formatter is line-oriented and never builds a semantic model. Directives,
 comments, `include` lines and `P` price lines pass through byte-for-byte, so
@@ -22,6 +21,8 @@ are reflowed.
 - [Install](#install)
 - [Usage](#usage)
 - [Formatting rules](#formatting-rules)
+- [Interactive entry](#interactive-entry)
+- [Configuration](#configuration)
 - [Testing](#testing)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
@@ -30,8 +31,9 @@ are reflowed.
 ## Status
 
 `rledger fmt` is complete and verified against the reference implementation's
-golden fixtures. `rledger add` is designed but not yet built; see `DESIGN.md`
-for what it will do and `IMPLEMENTATION.md` for how.
+golden fixtures. `rledger add` is implemented; its key-navigation scheme is
+young and may still change with use. See `DESIGN.md` for the decisions behind
+both.
 
 ## Install
 
@@ -114,6 +116,81 @@ remaining files are still processed and the run exits non-zero.
 Alignment is **file-wide**, not per transaction: the account and number columns
 are computed over every posting in the file. Adding one transaction with a
 longer account name or number therefore reflows every posting line in the file.
+
+## Interactive entry
+
+```sh
+rledger add [-f FILE] [--to FILE]
+```
+
+The journal is `-f FILE` or `$LEDGER_FILE`. `--to` writes new transactions
+into a different file, which must be reachable through the journal's `include`
+graph.
+
+`rledger add` walks the whole include tree (nested includes, globs), honours
+`account`, `commodity`, `decimal-mark` and `D` directives, and builds a
+frecency index over every transaction it finds. Entry is field by field —
+date, description, then account/amount pairs — with:
+
+- a **live preview** above the prompt, formatted exactly as it will be
+  written, at the file's own alignment widths
+- **pre-filled postings** from the most recent transaction with the same
+  description; the final amount is pre-filled with the balancing amount.
+  Typing over a pre-fill replaces it; Enter accepts it as-is
+- **completion** everywhere: ghost-text suggestion (`→` accepts) plus a
+  `Tab` menu, ranked by frecency and conditioned on the description already
+  entered. Account queries match by substring, or per-segment once the query
+  contains a colon (`ex:gro` → `expenses:groceries`)
+- a **new-account guard** that surfaces near-misses ("did you mean …?")
+  instead of silently forking your account tree
+- **smart dates**: `30`, `8/30`, `yesterday`, resolved against today and
+  shown resolved in the preview before you commit
+- a running per-commodity imbalance in the separator line; a transaction that
+  provably does not balance cannot be finished
+
+Keys: `Enter` accepts a field (on an empty account line it finishes the
+transaction), `↑`/`↓` move between fields, `Tab`/`Shift-Tab` cycle the
+completion menu, `→` accepts the ghost suggestion, `Ctrl-E` opens the draft in
+`$EDITOR`, `Ctrl-C` aborts the current transaction, `Ctrl-D` quits. `u` at the
+date prompt undoes the last completed transaction.
+
+Everything is buffered and written **once, on exit** — both `Ctrl-C` and
+`Ctrl-D` keep completed transactions. A recovery journal under
+`$XDG_STATE_HOME/rledger/` is maintained during the session and replayed on
+the next launch if the process dies without writing; it is invisible when
+nothing goes wrong.
+
+When stdin is not a terminal, `rledger add` falls back to plain line-based
+prompts, so it can be scripted and tested through pipes.
+
+Amounts are handled exactly (never floating point), historical amounts are
+never reinterpreted — pre-fills reproduce them verbatim — and a commodity is
+never inferred: generated amounts follow the journal's `commodity` /
+`decimal-mark` display styles, and a default commodity (from `D` or the
+config) only ever appears as editable pre-filled text.
+
+## Configuration
+
+`~/.config/rledger/config.toml`, overridden key-by-key by the nearest
+`.rledger.toml` found walking up from the current directory. All keys are
+optional; unknown keys are rejected so typos cannot silently disable anything.
+
+```toml
+format_file = true            # rewrite the whole file, formatted, on write
+sort = false                  # also sort transactions by date on write
+insertion = "append"          # or "chronological"
+new_account = "confirm"       # confirm | warn | allow | error
+half_life_days = 90           # frecency decay half-life
+account_matching = "substring"     # prefix | substring | segment | fuzzy
+description_matching = "substring"
+default_commodity = "EUR"     # offered as editable pre-fill, never applied silently
+```
+
+`new_account` defaults to `confirm` when the journal declares accounts via
+`account` directives and `warn` otherwise. `format_file = false` writes only
+the new lines (rendered at the would-be file-wide widths) and warns when the
+file's existing lines become stale; combining it with `sort = true` is
+rejected, since sorting rewrites the whole file anyway.
 
 ## Testing
 
