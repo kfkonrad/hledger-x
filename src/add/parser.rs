@@ -135,8 +135,17 @@ pub enum ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(p, e) => write!(f, "{}: {e}", p.display()),
-            Self::Cycle(p) => write!(f, "include cycle: {} included twice", p.display()),
+            Self::Io(p, e) => write!(
+                f,
+                "{}: {}",
+                crate::errors::display_path(p),
+                crate::errors::io_reason(e)
+            ),
+            Self::Cycle(p) => write!(
+                f,
+                "include cycle: {} is included twice",
+                crate::errors::display_path(p)
+            ),
         }
     }
 }
@@ -371,7 +380,7 @@ impl Walk {
                     Ok(txn) => self.journal.transactions.push(txn),
                     Err(why) => self.journal.warnings.push(format!(
                         "{}:{lineno}: skipping unparseable transaction ({why})",
-                        path.display()
+                        crate::errors::display_path(path)
                     )),
                 }
             } else if let Some(pattern) = directive_arg(line, "include") {
@@ -408,7 +417,7 @@ impl Walk {
         if targets.is_empty() {
             self.journal.warnings.push(format!(
                 "{}: include not found: {pattern} — accounts and history from it are unavailable",
-                parent.display()
+                crate::errors::display_path(parent)
             ));
             return Ok(());
         }
@@ -416,9 +425,10 @@ impl Walk {
             match fs::read_to_string(&target) {
                 Ok(src) => self.file(&target, &src, state.clone())?,
                 Err(e) => self.journal.warnings.push(format!(
-                    "{}: include not readable: {}: {e} — accounts and history from it are unavailable",
-                    parent.display(),
-                    target.display()
+                    "{}: include not readable: {}: {} — accounts and history from it are unavailable",
+                    crate::errors::display_path(parent),
+                    crate::errors::display_path(&target),
+                    crate::errors::io_reason(&e)
                 )),
             }
         }

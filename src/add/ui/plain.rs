@@ -90,7 +90,11 @@ fn finish_txn<W: Write>(
     out: &mut W,
 ) -> std::io::Result<()> {
     if let Err(e) = recovery.record(&txn) {
-        writeln!(out, "warning: could not write recovery journal: {e}")?;
+        writeln!(
+            out,
+            "warning: could not write the recovery journal: {}",
+            crate::errors::io_reason(&e)
+        )?;
     }
     for l in render_done(session, &txn) {
         writeln!(out, "{l}")?;

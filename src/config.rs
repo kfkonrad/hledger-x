@@ -212,9 +212,14 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
 }
 
 fn apply_file(cfg: &mut Config, path: &Path) -> Result<(), ConfigError> {
-    let src = fs::read_to_string(path)
-        .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-    apply_str(cfg, &src, &path.display().to_string(), path.parent())
+    let src = fs::read_to_string(path).map_err(|e| {
+        ConfigError(format!(
+            "{}: {}",
+            crate::errors::display_path(path),
+            crate::errors::io_reason(&e)
+        ))
+    })?;
+    apply_str(cfg, &src, &crate::errors::display_path(path), path.parent())
 }
 
 /// Resolve a configured path: `~/` against `$HOME`, a relative path against
@@ -238,8 +243,8 @@ fn apply_str(
     origin: &str,
     base: Option<&Path>,
 ) -> Result<(), ConfigError> {
-    let raw: Raw =
-        toml::from_str(src).map_err(|e| ConfigError(format!("{origin}: {e}")))?;
+    let raw: Raw = toml::from_str(src)
+        .map_err(|e| ConfigError(crate::errors::toml_error(src, origin, &e)))?;
     if let Some(v) = raw.ledger_file {
         cfg.ledger_file = Some(resolve_path(v, base));
     }

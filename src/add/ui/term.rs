@@ -298,7 +298,10 @@ impl Ui {
             Submit::Done(txn) => {
                 let txn = *txn;
                 if let Err(e) = recovery.record(&txn) {
-                    self.note = Note::Error(format!("recovery journal: {e}"));
+                    self.note = Note::Error(format!(
+                        "could not write the recovery journal: {}",
+                        crate::errors::io_reason(&e)
+                    ));
                 }
                 // The finished block joins the in-frame log; the next draw
                 // paints it above the prompt. Nothing goes to scrollback
@@ -513,7 +516,17 @@ impl Ui {
                 }
             }
             Ok(_) => self.note = Note::Info("editor exited nonzero; draft kept".to_owned()),
-            Err(e) => self.note = Note::Error(format!("could not run {editor}: {e}")),
+            // A missing editor is the usual cause here, and `$EDITOR` is what
+            // to change; the OS's word for it on its own explains nothing.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.note = Note::Error(format!("no editor called {editor} — check $EDITOR"));
+            }
+            Err(e) => {
+                self.note = Note::Error(format!(
+                    "could not run {editor}: {}",
+                    crate::errors::io_reason(&e)
+                ));
+            }
         }
         let _ = std::fs::remove_file(&path);
         Ok(())

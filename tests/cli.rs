@@ -638,7 +638,8 @@ fn add_appends_a_formatted_transaction() {
         "file was:\n{written}"
     );
     assert!(written.contains("assets:bank:checking  -18.20 EUR\n"));
-    assert!(out.stderr.contains("wrote 1 transaction(s)"), "{}", out.stderr);
+    assert!(out.stderr.contains("wrote 1 transaction"), "{}", out.stderr);
+    assert!(!out.stderr.contains("(s)"), "{}", out.stderr);
 }
 
 #[test]
@@ -665,7 +666,11 @@ fn add_to_an_unreachable_target_errors() {
         "",
     );
     assert_ne!(out.code, 0);
-    assert!(out.stderr.contains("include graph"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("does not include that file"),
+        "{}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -866,4 +871,109 @@ fn add_leaves_conversions_alone_by_default() {
     assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
     let text = fs::read_to_string(&journal).unwrap();
     assert!(!text.contains("equity:conversion"), "file was:\n{text}");
+}
+
+// ---------------------------------------------------------------------------
+// Error presentation.
+//
+// These pin the promise rather than the prose: whatever a message says, it
+// must not say it in Rust's or the OS's vocabulary. `eyre`'s `Error:` banner
+// and `Location:` frame, backtrace instructions, `os error N`, serde's
+// `invalid type`, and rustc's `|`-gutter diagnostic art are all things the
+// user has no use for and cannot act on.
+// ---------------------------------------------------------------------------
+
+/// Everything a user must never be shown, and what it would mean if they were.
+const LEAKS: &[(&str, &str)] = &[
+    ("os error", "a raw errno"),
+    ("Location:", "an eyre source-location frame"),
+    ("RUST_BACKTRACE", "backtrace instructions"),
+    ("Backtrace omitted", "backtrace instructions"),
+    ("invalid type:", "serde's type vocabulary"),
+    ("unknown field", "serde's field vocabulary"),
+    ("TOML parse error", "the toml crate's own header"),
+    ("  |", "rustc-style diagnostic gutter"),
+    ("^^^", "rustc-style diagnostic carets"),
+];
+
+#[track_caller]
+fn assert_no_leaks(stderr: &str) {
+    for (needle, what) in LEAKS {
+        assert!(
+            !stderr.contains(needle),
+            "{what} (`{needle}`) reached the user:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_file_is_reported_in_english() {
+    let dir = scratch("err_missing");
+    let out = run_in(&dir, &["fmt", "nope.journal"], "");
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("no such file"), "{}", out.stderr);
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn an_unreadable_file_is_reported_in_english() {
+    let dir = scratch("err_perm");
+    let p = write(&dir, "locked.journal", "2026-01-01 x\n    a:b  1\n");
+    fs::set_permissions(&p, <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o000))
+        .unwrap();
+    let out = run_in(&dir, &["fmt", p.to_str().unwrap()], "");
+    fs::set_permissions(&p, <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644))
+        .unwrap();
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("permission denied"), "{}", out.stderr);
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn a_typo_in_the_config_names_the_setting_it_meant() {
+    let dir = scratch("err_cfg_typo");
+    write(&dir, ".hledger-x.toml", "formatfile = true\n");
+    let out = run_in(&dir, &["fmt", "-"], "");
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("unknown setting `formatfile`")
+            && out.stderr.contains("did you mean `format_file`?"),
+        "{}",
+        out.stderr
+    );
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn a_wrongly_typed_config_value_says_what_it_wanted() {
+    let dir = scratch("err_cfg_type");
+    write(&dir, ".hledger-x.toml", "sort = true\nstrict = \"yes\"\n");
+    let out = run_in(&dir, &["fmt", "-"], "");
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("line 2") && out.stderr.contains("expected true or false"),
+        "{}",
+        out.stderr
+    );
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn add_reports_a_missing_journal_without_a_report_banner() {
+    let dir = scratch("err_add_missing");
+    let out = run_add(&dir, &["-f", "nope.journal"], "");
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.starts_with("hledger-x add: "), "{}", out.stderr);
+    assert!(out.stderr.contains("no such file"), "{}", out.stderr);
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn add_reports_a_bad_config_without_a_report_banner() {
+    let dir = scratch("err_add_cfg");
+    write(&dir, ".hledger-x.toml", "half_life_days = 0\n");
+    let out = run_add(&dir, &[], "");
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(out.stderr.starts_with("hledger-x add: "), "{}", out.stderr);
+    assert_no_leaks(&out.stderr);
 }

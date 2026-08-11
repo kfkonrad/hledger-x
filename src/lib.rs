@@ -7,5 +7,6 @@
 pub mod add;
 pub mod amount;
 pub mod config;
+pub mod errors;
 pub mod fmt;
 pub mod lex;

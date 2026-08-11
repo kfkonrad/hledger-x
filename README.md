@@ -25,6 +25,7 @@ commodity with a declared display style are restyled to it, the way
 - [Formatting rules](#formatting-rules)
 - [Interactive entry](#interactive-entry)
 - [Configuration](#configuration)
+- [Messages](#messages)
 - [Testing](#testing)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
@@ -152,6 +153,11 @@ when it is named as an operand.
 
 The worst outcome wins: a run that both finds unformatted files and fails to
 read one exits 3.
+
+`hledger-x add` uses the same codes: 0 when it finishes, 2 when the invocation
+or the configuration does not make sense (no journal to add to, a `--to` target
+the journal does not include, a bad config key), and 3 when something could not
+be read or written.
 
 ## Formatting rules
 
@@ -321,6 +327,42 @@ commodity in a cost or assertion tail. Unitless amounts are always valid. `forma
 the new lines (rendered at the would-be file-wide widths) and warns when the
 file's existing lines become stale; combining it with `sort = true` is
 rejected, since sorting rewrites the whole file anyway.
+
+## Messages
+
+Diagnostics are written for someone keeping books, not for someone reading a
+stack trace. An error names the program and subcommand, says what failed and why
+in plain language, and — where knowing why is not enough to act on — adds an
+indented hint. Non-fatal problems are prefixed `warning:` and the run continues:
+
+```console
+$ hledger-x fmt nope.journal
+hledger-x fmt: nope.journal: no such file
+
+$ hledger-x add
+hledger-x add: no journal file to add to
+  (pass -f FILE, set `ledger_file` in .hledger-x.toml, or set $LEDGER_FILE)
+```
+
+A mistake in the config is reported against the file and line it is on, with
+that line echoed and, where the intent is unambiguous, the setting you meant:
+
+```console
+$ hledger-x fmt
+hledger-x fmt: config: .hledger-x.toml, line 1: unknown setting `formatfile`
+      formatfile = true
+  (did you mean `format_file`?)
+```
+
+Paths are shown as you would name them — relative to the working directory when
+they sit under it, absolute when they do not. Raw OS error numbers, Rust
+backtrace instructions, source locations, and serde's type vocabulary are never
+part of a message; `tests/cli.rs` asserts that none of them can reach you. A
+panic is the one exception, because a panic is a bug in `hledger-x` and its
+report exists for whoever fixes it.
+
+If `add` fails after you have entered something, the message says where the
+recovery journal is — nothing you typed is lost.
 
 ## Testing
 
