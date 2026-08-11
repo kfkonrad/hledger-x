@@ -6,8 +6,9 @@ Format hledger journals and enter transactions ergonomically
 
 `hledger-x` is a CLI for plain text accounting journals with two subcommands:
 
-- `hledger-x fmt` — a format-preserving journal formatter, a drop-in equivalent to
-  [`hledger-fmt`](https://github.com/mikluko/hledger-fmt)
+- `hledger-x fmt` — a format-preserving journal formatter producing the same
+  output as [`hledger-fmt`](https://github.com/mikluko/hledger-fmt), behind a
+  project-aware CLI in the shape of `gofmt` and `cargo fmt`
 - `hledger-x add` — ergonomic interactive data entry, a better `hledger add`
 
 The formatter is line-oriented. Directives, comments, `include` lines and `P`
@@ -62,28 +63,52 @@ is the one `hledger-x` returns.
 ## Usage
 
 ```sh
-hledger-x fmt [--check] [--sort] [FILE|-]...
+hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f ROOT]... [FILE|-]...
 ```
 
-Format files in place:
+With no arguments, format the whole journal — the configured `ledger_file`, or
+`$LEDGER_FILE`, together with every file it includes. This is the everyday
+invocation, and the reason `ledger_file` is worth setting:
+
+```sh
+hledger-x fmt
+```
+
+Format a journal that is not the configured one, again with its includes:
+
+```sh
+hledger-x fmt -f 2025/main.journal
+```
+
+Format exactly the files named, without following their includes:
 
 ```sh
 hledger-x fmt main.journal 2025.journal
 ```
 
-Format standard input to standard output — `-` and no arguments both mean
-stdin:
+`-f`/`--follow` is repeatable and combines with plain file operands. A file
+reachable from more than one root, or named as an operand as well, is formatted
+once:
 
 ```sh
-hledger-x fmt < main.journal
+hledger-x fmt -f main.journal -f archive/2024.journal stray.journal
 ```
 
-Check without writing anything. Exits non-zero and lists the offending files on
-stderr if any file is not already formatted, which makes it suitable for CI and
-pre-commit hooks:
+Format standard input to standard output:
 
 ```sh
-hledger-x fmt --check *.journal
+hledger-x fmt - < main.journal
+```
+
+Each file that changed is listed on stdout; `-q`/`--quiet` suppresses that
+list. Files already in final form are left untouched on disk, so their
+modification times do not move.
+
+Check without writing anything. Lists what it would reformat on stderr and
+exits 1, which makes it suitable for CI and pre-commit hooks:
+
+```sh
+hledger-x fmt --check
 ```
 
 Also sort transactions by date. Sorting is stable (equal dates keep their source
@@ -96,15 +121,26 @@ transaction travels with it.
 hledger-x fmt --sort main.journal
 ```
 
-Files are processed one at a time, like a linter: `include` directives are not
-followed. A file that cannot be read is reported on stderr and skipped; the
-remaining files are still processed and the run exits non-zero.
+Sorting is part of what "formatted" means, so it belongs in the config
+(`sort = true`) rather than in a flag that some invocations remember to pass
+and others forget. `--sort` and `--no-sort` override the configured value in
+either direction.
 
-| Exit code | Meaning                                              |
-|-----------|------------------------------------------------------|
-| 0         | success, or `--check` found nothing to fix           |
-| 1         | `--check` found unformatted files, or a file errored |
-| 2         | usage error                                          |
+A file that cannot be read is reported on stderr and skipped; the remaining
+files are still processed. Directories are not walked — a directory argument is
+reported as such. Commodity display styles come from the include tree the file
+was reached through: a root's tree under `--follow`, and the file's own tree
+when it is named as an operand.
+
+| Exit code | Meaning                                                     |
+|-----------|-------------------------------------------------------------|
+| 0         | success, or `--check` found nothing to fix                  |
+| 1         | `--check` found files that need formatting                  |
+| 2         | usage error, including no journal to format                 |
+| 3         | a file could not be read, written, or walked                |
+
+The worst outcome wins: a run that both finds unformatted files and fails to
+read one exits 3.
 
 ## Formatting rules
 
@@ -229,10 +265,12 @@ optional; unknown keys are rejected so typos cannot silently disable anything.
 A relative `ledger_file` is resolved against the directory of the config file
 that set it, and a leading `~/` against `$HOME`.
 
+Both subcommands read `ledger_file` and `sort`; the rest govern `add` alone.
+
 ```toml
-ledger_file = "main.journal"  # journal for `add`, below -f and above $LEDGER_FILE
+ledger_file = "main.journal"  # the journal, below -f and above $LEDGER_FILE
 format_file = true            # rewrite the whole file, formatted, on write
-sort = false                  # also sort transactions by date on write
+sort = false                  # keep transactions in date order
 insertion = "append"          # or "chronological"
 strict = false                # ask before using undeclared accounts/commodities
 half_life_days = 90           # frecency decay half-life

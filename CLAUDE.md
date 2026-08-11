@@ -2,7 +2,8 @@
 
 A Rust CLI for plain text accounting (hledger) journals:
 
-- `hledger-x fmt` — a formatter, drop-in equivalent to `hledger-fmt`
+- `hledger-x fmt` — a formatter; `hledger-fmt`'s output, behind a
+  project-aware CLI (`DESIGN.md` § CLI ergonomics)
 - `hledger-x add` — ergonomic interactive data entry, a better `hledger add`
 
 The name is load-bearing: `x` is not an hledger built-in, so with `hledger-x` on

@@ -215,15 +215,35 @@ Unparseable dates sort first; the stable sort preserves their source order.
 
 ## CLI
 
+Revised 2026-08; `DESIGN.md` § CLI has the shape and the rationale.
+
 ```
-hledger-x fmt [--check] [--sort] [FILE|-]...
+hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]...
 ```
 
-- `FILE...` → format each in place
-- `--check` → write nothing; exit non-zero if any file is not already
-  formatted; list the offenders. With `--sort`, check against `format_sorted`.
-- `-` or no arguments → stdin to stdout
-- no `include` following — one file at a time, like a linter
+`main.rs` resolves the operands into a `Plan` — a list of `Job`s (path,
+display name, index into the plan's `AmountCtx` list) deduplicated by canonical
+path — and then walks it:
+
+- no arguments → the configured `ledger_file`, then `$LEDGER_FILE`, as a
+  `--follow` root; usage error (2) when neither resolves
+- `--follow ROOT` → `parse_journal(ROOT)`, then a job per file in the tree, all
+  sharing the tree's `amount_ctx()`. A cycle falls back to formatting the root
+  alone; an I/O failure drops the root entirely (there is nothing to fall back
+  to, and the read error is reported once)
+- `FILE...` → one job each, styled by the file's own include tree, exactly as
+  before
+- `-` → stdin to stdout; rejected (2) alongside any other operand
+- `--check` → write nothing; `would reformat: PATH` per file on stderr; exit 1.
+  With sorting on, check against `format_sorted`
+- writes list changed paths on stdout unless `-q`; an unchanged file is never
+  written, so its mtime does not move
+- sorting comes from the config, overridden by `--sort` / `--no-sort`
+  (`SortFlags::resolve`)
+
+Exit codes are a `Status` enum ordered worst-last (`Ok` < `Unformatted` <
+`Usage` < `Error`) merged across files, so `0`/`1`/`2`/`3` fall out of
+`Status::code`.
 
 ## Tests
 

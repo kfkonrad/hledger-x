@@ -137,18 +137,55 @@ needed again.
 
 ## CLI
 
-Matches hledger-fmt's surface so it is a drop-in substitute:
+Originally hledger-fmt's surface verbatim, so it was a drop-in substitute.
+**Revised 2026-08 with the user** (see § CLI ergonomics below): the *output* is
+still hledger-fmt's byte for byte, but the argument model now follows the
+mainstream formatters instead.
 
 ```
-hledger-x fmt [--check] [--sort] [FILE|-]...
+hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]...
 ```
 
-- `FILE...` — format each file in place
-- `--check` — write nothing, exit non-zero if any file is not already
-  formatted, listing offenders (CI and pre-commit)
-- `--sort` — also sort transactions by date
-- `-` or no arguments — stdin to stdout
-- no `include` following: one file at a time, like a linter
+- no arguments — the configured `ledger_file`, then `$LEDGER_FILE`, **plus its
+  include tree**; a usage error when neither resolves
+- `-f`/`--follow ROOT` — that root plus its include tree. Repeatable, and
+  combinable with operands
+- `FILE...` — format each file in place, **without** following its includes
+- `-` — stdin to stdout. Cannot be combined with anything else
+- `--check` — write nothing, list what it would reformat on stderr, exit 1
+- `--sort` / `--no-sort` — override the configured `sort`
+- `-q`/`--quiet` — do not list the files that changed
+
+Every selected file is deduplicated by canonical path, so a file reachable from
+two roots — or named as an operand as well — is formatted once. Roots are
+resolved before operands, so a file in a tree keeps the tree's styles.
+
+Exit codes: `0` clean, `1` `--check` found work, `2` usage, `3` a file could
+not be read, written, or walked. Worst outcome wins.
+
+### CLI ergonomics — why this shape
+
+Settled with the user 2026-08, after surveying `gofmt`, `cargo fmt`,
+`terraform fmt`, `prettier` and `black`. What they share, and what the original
+surface was missing:
+
+1. **A bare invocation does the obvious project-wide thing.** `gofmt` is the
+   only survivor of the older stdin-by-default convention. `hledger-x` already
+   discovers a project root the way `cargo` discovers `Cargo.toml`, so `fmt`
+   with no arguments formats it. Stdin now needs an explicit `-`.
+2. **The include tree is the project.** It is the journal's analog of a crate's
+   module tree. `fmt` already walked it read-only for commodity styles; it now
+   formats it too, for roots (not for bare operands, which stay linter-like).
+3. **The tool says what it changed** — `terraform fmt` and `black` both do.
+4. **Canonical-form decisions live in the config**, not only in flags, so a
+   pre-commit hook and a developer's bare `fmt` cannot disagree about what
+   "formatted" means. That is what moved `sort` into the config for `fmt`.
+5. **`--check` failing is distinguishable from the run breaking**, hence the
+   `1` / `3` split.
+
+Deferred, and deliberately so: directory arguments are *not* walked (a
+directory is a reported error, which keeps the door open to walking it later
+without breaking anyone), and there is no `--diff`.
 
 ## Layout rules
 

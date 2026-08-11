@@ -20,191 +20,18 @@ struct Output {
     stderr: String,
 }
 
-fn run(args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(BIN)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    Output {
-        code: out.status.code().unwrap(),
-        stdout: String::from_utf8(out.stdout).unwrap(),
-        stderr: String::from_utf8(out.stderr).unwrap(),
-    }
+/// Run the binary in `dir`, with no user config and no `$LEDGER_FILE`, so
+/// nothing on the developer's machine reaches the run. `fmt` resolves its
+/// journal from the config and the environment now, which makes that
+/// isolation load-bearing rather than merely tidy.
+fn run_in(dir: &Path, args: &[&str], stdin: &str) -> Output {
+    run_env(dir, args, stdin, None)
 }
 
-/// A scratch directory unique to the calling test.
-fn scratch(name: &str) -> PathBuf {
-    let dir: PathBuf = [env!("CARGO_TARGET_TMPDIR"), name].iter().collect();
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
-    let path = dir.join(name);
-    fs::write(&path, contents).unwrap();
-    path
-}
-
-const UNFORMATTED: &str = "2025-01-01 x\n  A:B  1 USD\n";
-const FORMATTED: &str = "2025-01-01 x\n    A:B  1 USD\n";
-
-#[test]
-fn no_arguments_formats_stdin_to_stdout() {
-    let out = run(&["fmt"], UNFORMATTED);
-    assert_eq!(out.code, 0);
-    assert_eq!(out.stdout, FORMATTED);
-}
-
-#[test]
-fn a_dash_operand_also_means_stdin() {
-    let out = run(&["fmt", "-"], UNFORMATTED);
-    assert_eq!(out.code, 0);
-    assert_eq!(out.stdout, FORMATTED);
-}
-
-#[test]
-fn files_are_formatted_in_place() {
-    let dir = scratch("in_place");
-    let a = write(&dir, "a.journal", UNFORMATTED);
-    let b = write(&dir, "b.journal", UNFORMATTED);
-    let out = run(&["fmt", a.to_str().unwrap(), b.to_str().unwrap()], "");
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout, "");
-    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
-    assert_eq!(fs::read_to_string(&b).unwrap(), FORMATTED);
-}
-
-#[test]
-fn check_passes_on_formatted_files_and_writes_nothing() {
-    let dir = scratch("check_pass");
-    let a = write(&dir, "a.journal", FORMATTED);
-    let out = run(&["fmt", "--check", a.to_str().unwrap()], "");
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
-}
-
-#[test]
-fn check_fails_and_lists_offenders_without_writing() {
-    let dir = scratch("check_fail");
-    let a = write(&dir, "a.journal", UNFORMATTED);
-    let out = run(&["fmt", "--check", a.to_str().unwrap()], "");
-    assert_eq!(out.code, 1);
-    assert!(
-        out.stderr.contains("unformatted:") && out.stderr.contains("a.journal"),
-        "stderr: {}",
-        out.stderr
-    );
-    // --check must not modify the file.
-    assert_eq!(fs::read_to_string(&a).unwrap(), UNFORMATTED);
-}
-
-#[test]
-fn check_on_stdin_reports_through_the_exit_code_only() {
-    let bad = run(&["fmt", "--check"], UNFORMATTED);
-    assert_eq!(bad.code, 1);
-    assert_eq!(bad.stdout, "");
-    let good = run(&["fmt", "--check"], FORMATTED);
-    assert_eq!(good.code, 0);
-    assert_eq!(good.stdout, "");
-}
-
-#[test]
-fn sort_reorders_transactions_by_date() {
-    let src = "2025-03-02 b\n    A:B  1 USD\n\n2025-01-05 a\n    A:B  2 USD\n";
-    let out = run(&["fmt", "--sort"], src);
-    assert_eq!(out.code, 0);
-    assert_eq!(
-        out.stdout,
-        "2025-01-05 a\n    A:B  2 USD\n\n2025-03-02 b\n    A:B  1 USD\n"
-    );
-}
-
-#[test]
-fn check_sort_measures_against_the_sorted_form() {
-    let unsorted = "2025-03-02 b\n\n2025-01-05 a\n";
-    assert_eq!(run(&["fmt", "--check", "--sort"], unsorted).code, 1);
-    // Formatted but unsorted still passes a plain --check.
-    assert_eq!(run(&["fmt", "--check"], unsorted).code, 0);
-}
-
-#[test]
-fn an_unreadable_file_is_reported_and_the_run_fails() {
-    let dir = scratch("missing");
-    let missing = dir.join("nope.journal");
-    let out = run(&["fmt", missing.to_str().unwrap()], "");
-    assert_ne!(out.code, 0);
-    assert!(
-        out.stderr.contains("nope.journal"),
-        "stderr: {}",
-        out.stderr
-    );
-}
-
-#[test]
-fn one_bad_file_does_not_stop_the_others() {
-    let dir = scratch("partial");
-    let good = write(&dir, "good.journal", UNFORMATTED);
-    let missing = dir.join("nope.journal");
-    let out = run(
-        &["fmt", missing.to_str().unwrap(), good.to_str().unwrap()],
-        "",
-    );
-    assert_ne!(out.code, 0);
-    assert_eq!(fs::read_to_string(&good).unwrap(), FORMATTED);
-}
-
-#[test]
-fn an_already_formatted_file_is_left_untouched_on_disk() {
-    let dir = scratch("untouched");
-    let a = write(&dir, "a.journal", FORMATTED);
-    let before = fs::metadata(&a).unwrap().modified().unwrap();
-    let out = run(&["fmt", a.to_str().unwrap()], "");
-    assert_eq!(out.code, 0);
-    assert_eq!(fs::metadata(&a).unwrap().modified().unwrap(), before);
-}
-
-#[test]
-fn unknown_options_are_a_usage_error() {
-    let out = run(&["fmt", "--nope"], "");
-    assert_eq!(out.code, 2);
-    assert!(!out.stderr.is_empty());
-}
-
-#[test]
-fn help_and_version_are_available() {
-    let help = run(&["fmt", "--help"], "");
-    assert_eq!(help.code, 0);
-    assert!(help.stdout.contains("--check") && help.stdout.contains("--sort"));
-
-    let version = run(&["--version"], "");
-    assert_eq!(version.code, 0);
-    assert!(version.stdout.contains(env!("CARGO_PKG_VERSION")));
-}
-
-// ---- hledger-x add (plain line mode: stdin is a pipe) ----
-
-/// Run `hledger-x add` with an isolated HOME/XDG so no user config or
-/// recovery state leaks in or out.
-fn run_add(dir: &Path, args: &[&str], stdin: &str) -> Output {
-    run_add_env(dir, args, stdin, None)
-}
-
-/// As [`run_add`], with an explicit `$LEDGER_FILE` (unset when `None`).
-fn run_add_env(dir: &Path, args: &[&str], stdin: &str, ledger_file: Option<&str>) -> Output {
+/// As [`run_in`], with an explicit `$LEDGER_FILE` (unset when `None`).
+fn run_env(dir: &Path, args: &[&str], stdin: &str, ledger_file: Option<&str>) -> Output {
     let mut cmd = Command::new(BIN);
-    cmd.arg("add")
-        .args(args)
+    cmd.args(args)
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_STATE_HOME", dir.join("state"));
@@ -231,6 +58,453 @@ fn run_add_env(dir: &Path, args: &[&str], stdin: &str, ledger_file: Option<&str>
         stdout: String::from_utf8(out.stdout).unwrap(),
         stderr: String::from_utf8(out.stderr).unwrap(),
     }
+}
+
+/// Run from a directory that holds nothing at all — for the cases that pass
+/// absolute paths and care only about the operands.
+fn run(args: &[&str], stdin: &str) -> Output {
+    let dir: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "_empty"].iter().collect();
+    // Shared by every caller, so it is created but never removed.
+    fs::create_dir_all(&dir).unwrap();
+    run_in(&dir, args, stdin)
+}
+
+/// A scratch directory unique to the calling test.
+fn scratch(name: &str) -> PathBuf {
+    let dir: PathBuf = [env!("CARGO_TARGET_TMPDIR"), name].iter().collect();
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+const UNFORMATTED: &str = "2025-01-01 x\n  A:B  1 USD\n";
+const FORMATTED: &str = "2025-01-01 x\n    A:B  1 USD\n";
+
+#[test]
+fn a_dash_operand_means_stdin() {
+    let out = run(&["fmt", "-"], UNFORMATTED);
+    assert_eq!(out.code, 0);
+    assert_eq!(out.stdout, FORMATTED);
+}
+
+#[test]
+fn a_dash_cannot_be_combined_with_other_operands() {
+    let dir = scratch("fmt_dash_mixed");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let out = run(&["fmt", "-", a.to_str().unwrap()], UNFORMATTED);
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("stdin"), "stderr: {}", out.stderr);
+    // Nothing was written on the way to refusing.
+    assert_eq!(fs::read_to_string(&a).unwrap(), UNFORMATTED);
+}
+
+// ---- what gets formatted: the configured journal, --follow trees, operands ----
+
+/// A root that includes `sub.journal`, both unformatted.
+fn tree(dir: &Path) -> (PathBuf, PathBuf) {
+    let main = write(
+        dir,
+        "main.journal",
+        &format!("include sub.journal\n\n{UNFORMATTED}"),
+    );
+    let sub = write(dir, "sub.journal", UNFORMATTED);
+    (main, sub)
+}
+
+#[test]
+fn no_arguments_formats_the_configured_journal_and_its_includes() {
+    let dir = scratch("fmt_config_root");
+    write(&dir, ".hledger-x.toml", "ledger_file = \"main.journal\"\n");
+    let (main, sub) = tree(&dir);
+    let out = run_in(&dir, &["fmt"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&main).unwrap().ends_with(FORMATTED));
+    assert_eq!(fs::read_to_string(&sub).unwrap(), FORMATTED);
+}
+
+#[test]
+fn no_arguments_falls_back_to_the_ledger_file_environment() {
+    let dir = scratch("fmt_env_root");
+    let (main, sub) = tree(&dir);
+    let out = run_env(&dir, &["fmt"], "", Some(main.to_str().unwrap()));
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&main).unwrap().ends_with(FORMATTED));
+    assert_eq!(fs::read_to_string(&sub).unwrap(), FORMATTED);
+}
+
+#[test]
+fn no_arguments_without_a_journal_is_a_usage_error() {
+    let dir = scratch("fmt_no_root");
+    let out = run_in(&dir, &["fmt"], "");
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("--follow") && out.stderr.contains("LEDGER_FILE"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn follow_formats_the_root_and_everything_it_includes() {
+    let dir = scratch("fmt_follow");
+    let (main, sub) = tree(&dir);
+    let out = run_in(&dir, &["fmt", "--follow", main.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&main).unwrap().ends_with(FORMATTED));
+    assert_eq!(fs::read_to_string(&sub).unwrap(), FORMATTED);
+}
+
+#[test]
+fn operands_do_not_follow_includes() {
+    let dir = scratch("fmt_operand_no_follow");
+    let (main, sub) = tree(&dir);
+    let out = run_in(&dir, &["fmt", main.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&main).unwrap().ends_with(FORMATTED));
+    assert_eq!(fs::read_to_string(&sub).unwrap(), UNFORMATTED);
+}
+
+#[test]
+fn follow_is_repeatable_and_combines_with_operands() {
+    let dir = scratch("fmt_follow_repeat");
+    let (main, sub) = tree(&dir);
+    let other = write(&dir, "other.journal", UNFORMATTED);
+    let loose = write(&dir, "loose.journal", UNFORMATTED);
+    let out = run_in(
+        &dir,
+        &[
+            "fmt",
+            "-f",
+            "main.journal",
+            "--follow",
+            "other.journal",
+            "loose.journal",
+        ],
+        "",
+    );
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&main).unwrap().ends_with(FORMATTED));
+    assert_eq!(fs::read_to_string(&sub).unwrap(), FORMATTED);
+    assert_eq!(fs::read_to_string(&other).unwrap(), FORMATTED);
+    assert_eq!(fs::read_to_string(&loose).unwrap(), FORMATTED);
+}
+
+#[test]
+fn a_file_reached_twice_is_formatted_once() {
+    let dir = scratch("fmt_dedup");
+    let (_main, sub) = tree(&dir);
+    // `sub.journal` is in main's tree and named as an operand as well.
+    let out = run_in(
+        &dir,
+        &["fmt", "-f", "main.journal", "sub.journal"],
+        "",
+    );
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(fs::read_to_string(&sub).unwrap(), FORMATTED);
+    assert_eq!(
+        out.stdout.matches("sub.journal").count(),
+        1,
+        "stdout: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn a_followed_file_is_styled_by_the_root_tree() {
+    let dir = scratch("fmt_follow_styles");
+    // The style is declared in the root; the amount to restyle sits in the
+    // included file, which has no directives of its own.
+    write(
+        &dir,
+        "main.journal",
+        "commodity 1_000.00 EUR\ninclude sub.journal\n",
+    );
+    let sub = write(&dir, "sub.journal", "2026-01-01 x\n    a:b  1234EUR\n");
+    let out = run_in(&dir, &["fmt", "--follow", "main.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        fs::read_to_string(&sub).unwrap(),
+        "2026-01-01 x\n    a:b  1_234 EUR\n"
+    );
+
+    // Reached as a plain operand it sees only its own directives, so the
+    // amount stands as written.
+    let sub2 = write(&dir, "sub.journal", "2026-01-01 x\n    a:b  1234EUR\n");
+    let out = run_in(&dir, &["fmt", "sub.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        fs::read_to_string(&sub2).unwrap(),
+        "2026-01-01 x\n    a:b  1234EUR\n"
+    );
+}
+
+// ---- reporting ----
+
+#[test]
+fn changed_files_are_listed_on_stdout() {
+    let dir = scratch("fmt_list");
+    write(&dir, "a.journal", UNFORMATTED);
+    write(&dir, "b.journal", FORMATTED);
+    let out = run_in(&dir, &["fmt", "a.journal", "b.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    // Only the file that actually changed, named as it was given.
+    assert_eq!(out.stdout, "a.journal\n");
+}
+
+#[test]
+fn quiet_suppresses_the_list_but_not_the_work() {
+    let dir = scratch("fmt_quiet");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let out = run_in(&dir, &["fmt", "-q", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
+}
+
+#[test]
+fn formatting_stdin_lists_nothing() {
+    let out = run(&["fmt", "-"], UNFORMATTED);
+    // stdout is the payload; a file list would corrupt it.
+    assert_eq!(out.stdout, FORMATTED);
+}
+
+// ---- sort as a configured setting ----
+
+#[test]
+fn sort_can_come_from_the_config() {
+    let dir = scratch("fmt_config_sort");
+    write(&dir, ".hledger-x.toml", "sort = true\n");
+    let unsorted = "2025-03-02 b\n    A:B  1 USD\n\n2025-01-05 a\n    A:B  2 USD\n";
+    let a = write(&dir, "a.journal", unsorted);
+    let out = run_in(&dir, &["fmt", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        fs::read_to_string(&a).unwrap().starts_with("2025-01-05 a"),
+        "file was:\n{}",
+        fs::read_to_string(&a).unwrap()
+    );
+}
+
+#[test]
+fn no_sort_overrides_the_config() {
+    let dir = scratch("fmt_no_sort");
+    write(&dir, ".hledger-x.toml", "sort = true\n");
+    let unsorted = "2025-03-02 b\n    A:B  1 USD\n\n2025-01-05 a\n    A:B  2 USD\n";
+    let a = write(&dir, "a.journal", unsorted);
+    let out = run_in(&dir, &["fmt", "--no-sort", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(fs::read_to_string(&a).unwrap(), unsorted);
+}
+
+#[test]
+fn the_configured_sort_also_governs_check() {
+    let dir = scratch("fmt_config_sort_check");
+    write(&dir, ".hledger-x.toml", "sort = true\n");
+    write(&dir, "a.journal", "2025-03-02 b\n\n2025-01-05 a\n");
+    assert_eq!(run_in(&dir, &["fmt", "--check", "a.journal"], "").code, 1);
+    assert_eq!(
+        run_in(&dir, &["fmt", "--check", "--no-sort", "a.journal"], "").code,
+        0
+    );
+}
+
+#[test]
+fn files_are_formatted_in_place() {
+    let dir = scratch("in_place");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let b = write(&dir, "b.journal", UNFORMATTED);
+    let out = run(&["fmt", a.to_str().unwrap(), b.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
+    assert_eq!(fs::read_to_string(&b).unwrap(), FORMATTED);
+}
+
+#[test]
+fn check_passes_on_formatted_files_and_writes_nothing() {
+    let dir = scratch("check_pass");
+    let a = write(&dir, "a.journal", FORMATTED);
+    let out = run(&["fmt", "--check", a.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
+}
+
+#[test]
+fn check_fails_and_lists_offenders_without_writing() {
+    let dir = scratch("check_fail");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let out = run(&["fmt", "--check", a.to_str().unwrap()], "");
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains("would reformat:") && out.stderr.contains("a.journal"),
+        "stderr: {}",
+        out.stderr
+    );
+    // --check must not modify the file.
+    assert_eq!(fs::read_to_string(&a).unwrap(), UNFORMATTED);
+}
+
+#[test]
+fn check_on_stdin_reports_through_the_exit_code_only() {
+    let bad = run(&["fmt", "--check", "-"], UNFORMATTED);
+    assert_eq!(bad.code, 1);
+    assert_eq!(bad.stdout, "");
+    let good = run(&["fmt", "--check", "-"], FORMATTED);
+    assert_eq!(good.code, 0);
+    assert_eq!(good.stdout, "");
+}
+
+#[test]
+fn sort_reorders_transactions_by_date() {
+    let src = "2025-03-02 b\n    A:B  1 USD\n\n2025-01-05 a\n    A:B  2 USD\n";
+    let out = run(&["fmt", "--sort", "-"], src);
+    assert_eq!(out.code, 0);
+    assert_eq!(
+        out.stdout,
+        "2025-01-05 a\n    A:B  2 USD\n\n2025-03-02 b\n    A:B  1 USD\n"
+    );
+}
+
+#[test]
+fn check_sort_measures_against_the_sorted_form() {
+    let unsorted = "2025-03-02 b\n\n2025-01-05 a\n";
+    assert_eq!(run(&["fmt", "--check", "--sort", "-"], unsorted).code, 1);
+    // Formatted but unsorted still passes a plain --check.
+    assert_eq!(run(&["fmt", "--check", "-"], unsorted).code, 0);
+}
+
+// ---- exit codes: 0 clean, 1 would reformat, 2 usage, 3 error ----
+
+#[test]
+fn an_unreadable_file_is_reported_and_exits_three() {
+    let dir = scratch("missing");
+    let missing = dir.join("nope.journal");
+    let out = run(&["fmt", missing.to_str().unwrap()], "");
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("nope.journal"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn one_bad_file_does_not_stop_the_others() {
+    let dir = scratch("partial");
+    let good = write(&dir, "good.journal", UNFORMATTED);
+    let missing = dir.join("nope.journal");
+    let out = run(
+        &["fmt", missing.to_str().unwrap(), good.to_str().unwrap()],
+        "",
+    );
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert_eq!(fs::read_to_string(&good).unwrap(), FORMATTED);
+}
+
+#[test]
+fn an_error_outranks_a_check_failure() {
+    let dir = scratch("worst_wins");
+    write(&dir, "a.journal", UNFORMATTED);
+    let out = run_in(&dir, &["fmt", "--check", "a.journal", "nope.journal"], "");
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("would reformat:"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn a_directory_operand_is_reported_and_exits_three() {
+    let dir = scratch("dir_operand");
+    fs::create_dir(dir.join("sub")).unwrap();
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let out = run_in(&dir, &["fmt", "sub", "a.journal"], "");
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("is a directory") && !out.stderr.contains("os error"),
+        "stderr: {}",
+        out.stderr
+    );
+    // The other operand is still processed.
+    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
+}
+
+#[test]
+fn a_directory_root_is_reported_too() {
+    let dir = scratch("dir_root");
+    fs::create_dir(dir.join("sub")).unwrap();
+    let out = run_in(&dir, &["fmt", "--follow", "sub"], "");
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("is a directory"), "stderr: {}", out.stderr);
+}
+
+#[test]
+fn an_unreadable_root_is_reported_and_exits_three() {
+    let dir = scratch("missing_root");
+    let out = run_in(&dir, &["fmt", "--follow", "nope.journal"], "");
+    assert_eq!(out.code, 3, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("nope.journal"),
+        "stderr: {}",
+        out.stderr
+    );
+    // Reported once, not once per resolution attempt.
+    assert_eq!(out.stderr.matches("nope.journal").count(), 1);
+}
+
+#[test]
+fn an_already_formatted_file_is_left_untouched_on_disk() {
+    let dir = scratch("untouched");
+    let a = write(&dir, "a.journal", FORMATTED);
+    let before = fs::metadata(&a).unwrap().modified().unwrap();
+    let out = run(&["fmt", a.to_str().unwrap()], "");
+    assert_eq!(out.code, 0);
+    assert_eq!(fs::metadata(&a).unwrap().modified().unwrap(), before);
+}
+
+#[test]
+fn unknown_options_are_a_usage_error() {
+    let out = run(&["fmt", "--nope"], "");
+    assert_eq!(out.code, 2);
+    assert!(!out.stderr.is_empty());
+}
+
+#[test]
+fn help_and_version_are_available() {
+    let help = run(&["fmt", "--help"], "");
+    assert_eq!(help.code, 0);
+    assert!(
+        help.stdout.contains("--check")
+            && help.stdout.contains("--sort")
+            && help.stdout.contains("--follow"),
+        "help was:\n{}",
+        help.stdout
+    );
+
+    let version = run(&["--version"], "");
+    assert_eq!(version.code, 0);
+    assert!(version.stdout.contains(env!("CARGO_PKG_VERSION")));
+}
+
+// ---- hledger-x add (plain line mode: stdin is a pipe) ----
+
+/// Run `hledger-x add` with an isolated HOME/XDG so no user config or
+/// recovery state leaks in or out.
+fn run_add(dir: &Path, args: &[&str], stdin: &str) -> Output {
+    run_add_env(dir, args, stdin, None)
+}
+
+/// As [`run_add`], with an explicit `$LEDGER_FILE` (unset when `None`).
+fn run_add_env(dir: &Path, args: &[&str], stdin: &str, ledger_file: Option<&str>) -> Output {
+    let mut all = vec!["add"];
+    all.extend_from_slice(args);
+    run_env(dir, &all, stdin, ledger_file)
 }
 
 const ADD_JOURNAL: &str = "\
@@ -404,7 +678,7 @@ fn fmt_restyles_amounts_using_styles_from_included_files() {
         "commodity 1_000.00 EUR\n"
     );
     // stdin has no include tree: only the text's own directives apply.
-    let out = run(&["fmt"], "2026-01-01 x\n    a:b  1234EUR\n");
+    let out = run(&["fmt", "-"], "2026-01-01 x\n    a:b  1234EUR\n");
     assert_eq!(out.stdout, "2026-01-01 x\n    a:b  1234EUR\n");
 }
 
