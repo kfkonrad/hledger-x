@@ -565,6 +565,34 @@ obvious answer.
   parse typed `23,45` with a comma decimal mark. Getting this wrong produces a
   file that reformats on the next `fmt` pass.
 
+## Equity conversion postings (2026-08, with the user)
+
+Config `equity_conversion = true | false`, default `false`, plus
+`equity_conversion_account`, default `equity:conversion` — the account hledger's
+own `--infer-equity` uses.
+
+A transaction with a cost (`10 USD @@ 9.06 EUR` against `-9.06 EUR`) balances
+*at cost* but its face amounts do not sum to zero. hledger accepts either form;
+some people prefer the conversion made explicit, as a pair of postings to an
+equity account. When the option is on, they are appended to the transaction the
+moment it is finished — so they land in the written file and in the block
+echoed to the terminal, with no extra prompt.
+
+- The amounts are the **negated face-value imbalance** (`face_balance` in
+  `amount`, which reads `ParsedAmount::value` where the ordinary balance reads
+  `contributes`). One posting per imbalanced commodity, in the order the
+  commodities first appear in the transaction.
+- **Never guess.** Nothing is generated when the face imbalance is unknown —
+  an unparseable amount, or an elided one — mirroring how an unknown imbalance
+  is already handled everywhere else.
+- Single-commodity transactions are untouched: their face imbalance is zero.
+- This is a flat account, not hledger's per-pair
+  `equity:conversion:EUR-USD:USD` subaccounts. Verified against hledger 1.99:
+  it reads the flat form back as balanced.
+- The generated postings deliberately skip the strict-mode check. hledger-x is
+  generating them, not the user typing them; in a strict journal the account
+  wants declaring once.
+
 ## Strict mode — the undeclared-name guard
 
 Config `strict = true | false`, default `false`. (Supersedes the earlier

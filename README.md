@@ -234,7 +234,29 @@ half_life_days = 90           # frecency decay half-life
 account_matching = "substring"     # prefix | substring | segment | fuzzy
 description_matching = "substring"
 default_commodity = "EUR"     # written into bare amounts as visible, editable text
+equity_conversion = false     # append equity postings for multi-commodity transactions
+equity_conversion_account = "equity:conversion"
 ```
+
+With `equity_conversion = true`, a transaction that balances at cost but whose
+face amounts do not sum to zero gets the difference posted to
+`equity_conversion_account` — one posting per commodity, in the order the
+commodities appear. They are appended and shown the moment the transaction is
+finished:
+
+```
+2026-08-04 IVPN
+    expenses:subscriptions:services     10 USD @@ 9.06 EUR
+    assets:dkb:giro                  -9.06 EUR
+    equity:conversion                  -10 USD
+    equity:conversion                 9.06 EUR
+```
+
+This is the flat-account form of what `hledger print --infer-equity`
+generates. Nothing is generated when the imbalance cannot be computed (an
+unparseable or elided amount), and single-commodity transactions are
+untouched. In a strict journal, declare the account once — the generated
+postings do not prompt.
 
 With `strict = true`, accounts and commodities are checked against the
 declarations (`account` / `commodity` directives) visible at the insertion

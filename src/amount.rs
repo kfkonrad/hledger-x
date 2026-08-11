@@ -408,13 +408,37 @@ pub fn tail_commodities(text: &str) -> Vec<String> {
 /// non-empty amount fails to parse — the imbalance is then unknown.
 #[must_use]
 pub fn balance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decimal)>> {
+    sum_by_commodity(amounts, ctx, false)
+}
+
+/// Per-commodity sums at *face* value.
+///
+/// What a posting says, not what it costs: the sum hledger balances when no
+/// cost is being interpreted, and so the sum equity conversion postings have
+/// to cancel.
+#[must_use]
+pub fn face_balance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decimal)>> {
+    sum_by_commodity(amounts, ctx, true)
+}
+
+/// Shared body of [`balance`] and [`face_balance`]: sums in first-appearance
+/// order, taking either the face value or the cost contribution.
+fn sum_by_commodity(
+    amounts: &[&str],
+    ctx: &AmountCtx,
+    face: bool,
+) -> Option<Vec<(String, Decimal)>> {
     let mut sums: Vec<(String, Decimal)> = Vec::new();
     for text in amounts {
         if text.trim().is_empty() {
             continue;
         }
         let parsed = parse_amount(text, ctx)?;
-        let (value, commodity) = parsed.contributes;
+        let (value, commodity) = if face {
+            (parsed.value, parsed.commodity)
+        } else {
+            parsed.contributes
+        };
         if let Some(slot) = sums.iter_mut().find(|(c, _)| *c == commodity) {
             slot.1 = slot.1.checked_add(value)?;
         } else {
@@ -428,6 +452,38 @@ pub fn balance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decimal
 #[must_use]
 pub fn imbalance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decimal)>> {
     balance(amounts, ctx).map(|sums| sums.into_iter().filter(|(_, v)| !v.is_zero()).collect())
+}
+
+/// As [`imbalance`], at face value.
+#[must_use]
+pub fn face_imbalance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decimal)>> {
+    face_balance(amounts, ctx)
+        .map(|sums| sums.into_iter().filter(|(_, v)| !v.is_zero()).collect())
+}
+
+/// The amounts of the equity conversion postings a transaction needs.
+///
+/// The negated face imbalance, one per commodity, in the order the
+/// commodities first appear. Posting these makes the transaction sum to zero
+/// without interpreting the cost — what `hledger print --infer-equity`
+/// generates, in a flat account rather than per-commodity subaccounts.
+///
+/// Empty when nothing is converted, and equally when the face imbalance is
+/// unknown (an unparseable or elided amount) — never guess.
+#[must_use]
+pub fn equity_conversions(amounts: &[&str], ctx: &AmountCtx) -> Vec<String> {
+    if amounts.iter().any(|a| a.trim().is_empty()) {
+        return Vec::new();
+    }
+    let Some(sums) = face_imbalance(amounts, ctx) else {
+        return Vec::new();
+    };
+    sums.into_iter()
+        .filter_map(|(commodity, value)| {
+            let negated = Decimal::ZERO.checked_sub(value)?;
+            Some(render_amount(negated, &commodity, ctx))
+        })
+        .collect()
 }
 
 /// Render a value in a commodity's declared style — or, absent a declared
@@ -820,6 +876,46 @@ mod tests {
     fn cost_postings_balance_in_the_priced_commodity() {
         let imb = imbalance(&["-5 EUR @ 1.2 USD", "6.0 USD"], &ctx()).unwrap();
         assert!(imb.is_empty());
+    }
+
+    // ---- face balance and equity conversions ----
+
+    #[test]
+    fn face_balance_ignores_cost_tails() {
+        // At cost this balances; at face value it does not.
+        let amounts = ["10 USD @@ 9.06 EUR", "-9.06 EUR"];
+        assert!(imbalance(&amounts, &ctx()).unwrap().is_empty());
+        assert_eq!(
+            face_imbalance(&amounts, &ctx()).unwrap(),
+            vec![("USD".into(), dec("10")), ("EUR".into(), dec("-9.06"))]
+        );
+    }
+
+    #[test]
+    fn equity_conversions_negate_the_face_imbalance_in_first_appearance_order() {
+        assert_eq!(
+            equity_conversions(&["10 USD @@ 9.06 EUR", "-9.06 EUR"], &ctx()),
+            vec!["-10 USD".to_owned(), "9.06 EUR".to_owned()]
+        );
+    }
+
+    #[test]
+    fn equity_conversions_are_empty_when_nothing_is_converted() {
+        // A single-commodity transaction needs none.
+        assert!(equity_conversions(&["5 EUR", "-5 EUR"], &ctx()).is_empty());
+        // Unknown imbalance: never guess.
+        assert!(equity_conversions(&["5 EUR", "wat"], &ctx()).is_empty());
+        // An elided amount makes the face imbalance meaningless.
+        assert!(equity_conversions(&["5 EUR", ""], &ctx()).is_empty());
+    }
+
+    #[test]
+    fn equity_conversions_follow_declared_styles() {
+        let c = ctx_with("EUR", "1.000,00 EUR");
+        assert_eq!(
+            equity_conversions(&["10 USD @@ 9,06 EUR", "-9,06 EUR"], &c),
+            vec!["-10 USD".to_owned(), "9,06 EUR".to_owned()]
+        );
     }
 
     // ---- styles and rendering ----

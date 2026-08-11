@@ -9,6 +9,30 @@ use serde::Deserialize;
 
 use crate::add::write::{Insertion, WriteOptions};
 
+/// The account equity conversion postings default to, as hledger's
+/// `--infer-equity` does.
+pub const DEFAULT_EQUITY_CONVERSION_ACCOUNT: &str = "equity:conversion";
+
+/// Whether a finished transaction gets equity conversion postings. A
+/// two-variant enum rather than a `bool` so the account beside it reads as
+/// what it is: only meaningful when conversions are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EquityConversion {
+    /// Leave the transaction exactly as entered (the default).
+    #[default]
+    Off,
+    /// Append the postings that cancel the face-value imbalance.
+    On,
+}
+
+impl EquityConversion {
+    /// Whether conversions are on.
+    #[must_use]
+    pub const fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 /// A completion matching strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -50,6 +74,12 @@ pub struct Config {
     /// `D` directive also supplies one; that takes precedence, being
     /// file-local truth).
     pub default_commodity: Option<String>,
+    /// Append equity conversion postings to a finished transaction whose
+    /// postings balance at cost but not at face value (a `@`/`@@` conversion).
+    /// Off by default.
+    pub equity_conversion: EquityConversion,
+    /// The account those postings are written to.
+    pub equity_conversion_account: String,
 }
 
 impl Default for Config {
@@ -63,6 +93,8 @@ impl Default for Config {
             account_matching: Matching::Substring,
             description_matching: Matching::Substring,
             default_commodity: None,
+            equity_conversion: EquityConversion::Off,
+            equity_conversion_account: DEFAULT_EQUITY_CONVERSION_ACCOUNT.to_owned(),
         }
     }
 }
@@ -92,6 +124,8 @@ struct Raw {
     account_matching: Option<Matching>,
     description_matching: Option<Matching>,
     default_commodity: Option<String>,
+    equity_conversion: Option<bool>,
+    equity_conversion_account: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -156,6 +190,11 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
                 .to_owned(),
         ));
     }
+    if cfg.equity_conversion_account.trim().is_empty() {
+        return Err(ConfigError(
+            "equity_conversion_account must not be empty".to_owned(),
+        ));
+    }
     if !cfg.half_life_days.is_finite() || cfg.half_life_days <= 0.0 {
         return Err(ConfigError(format!(
             "half_life_days must be a positive number, got {}",
@@ -201,6 +240,16 @@ fn apply_str(cfg: &mut Config, src: &str, origin: &str) -> Result<(), ConfigErro
     if let Some(v) = raw.default_commodity {
         cfg.default_commodity = Some(v);
     }
+    if let Some(v) = raw.equity_conversion {
+        cfg.equity_conversion = if v {
+            EquityConversion::On
+        } else {
+            EquityConversion::Off
+        };
+    }
+    if let Some(v) = raw.equity_conversion_account {
+        cfg.equity_conversion_account = v;
+    }
     Ok(())
 }
 
@@ -243,6 +292,24 @@ mod tests {
         assert_eq!(cfg.account_matching, Matching::Substring);
         assert_eq!(cfg.description_matching, Matching::Substring);
         assert_eq!(cfg.default_commodity, None);
+        assert!(!cfg.equity_conversion.is_on());
+        assert_eq!(cfg.equity_conversion_account, "equity:conversion");
+    }
+
+    #[test]
+    fn equity_conversion_keys_parse() {
+        let cfg = load_str(
+            Some("equity_conversion = true\nequity_conversion_account = \"equity:trading\"\n"),
+            None,
+        )
+        .unwrap();
+        assert!(cfg.equity_conversion.is_on());
+        assert_eq!(cfg.equity_conversion_account, "equity:trading");
+    }
+
+    #[test]
+    fn an_empty_equity_conversion_account_is_rejected() {
+        assert!(load_str(Some("equity_conversion_account = \"\"\n"), None).is_err());
     }
 
     #[test]

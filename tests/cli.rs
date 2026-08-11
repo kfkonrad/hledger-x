@@ -380,3 +380,59 @@ fn add_writes_typed_amounts_in_the_declared_style() {
         "file was:\n{text}"
     );
 }
+
+#[test]
+fn add_appends_equity_conversion_postings_when_configured() {
+    let dir = scratch("add_equity_conversion");
+    write(&dir, ".hledger-x.toml", "equity_conversion = true\n");
+    let journal = write(
+        &dir,
+        "main.journal",
+        "2026-08-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
+    );
+    // A multi-commodity transaction: balanced at cost, not at face value.
+    let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n.\n";
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    let text = fs::read_to_string(&journal).unwrap();
+    assert!(
+        text.contains("equity:conversion") && text.contains("-10 USD"),
+        "file was:\n{text}"
+    );
+    // Written in the order the commodities appear.
+    let conversions: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("equity:conversion"))
+        .collect();
+    assert_eq!(conversions.len(), 2, "file was:\n{text}");
+    assert!(conversions[0].ends_with("-10 USD"), "file was:\n{text}");
+    assert!(conversions[1].ends_with("9.06 EUR"), "file was:\n{text}");
+
+    // hledger accepts the result, and its face-value balance is zero.
+    if Command::new("hledger").arg("--version").output().is_ok() {
+        let bal = Command::new("hledger")
+            .args(["-f", journal.to_str().unwrap(), "balance", "--no-total"])
+            .output()
+            .unwrap();
+        assert!(
+            bal.status.success(),
+            "hledger rejected the journal: {}",
+            String::from_utf8_lossy(&bal.stderr)
+        );
+    }
+}
+
+#[test]
+fn add_leaves_conversions_alone_by_default() {
+    let dir = scratch("add_no_equity_conversion");
+    let journal = write(
+        &dir,
+        "main.journal",
+        "2026-08-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
+    );
+    let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n.\n";
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    let text = fs::read_to_string(&journal).unwrap();
+    assert!(!text.contains("equity:conversion"), "file was:\n{text}");
+}

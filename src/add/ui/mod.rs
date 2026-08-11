@@ -865,12 +865,29 @@ impl Session {
         let Some(date) = self.draft.date else {
             return Submit::Invalid("no date".to_owned());
         };
+        let mut postings = self.draft.postings.clone();
+        postings.extend(self.equity_conversions());
         let txn = NewTransaction {
             date,
             description: self.draft.description.clone(),
-            postings: self.draft.postings.clone(),
+            postings,
         };
         Submit::Done(Box::new(txn))
+    }
+
+    /// The equity conversion postings for the finished draft: the negated
+    /// face-value imbalance, which is what is left over when a `@`/`@@` cost
+    /// balances the transaction but the face amounts do not. Empty unless
+    /// `equity_conversion` is on.
+    fn equity_conversions(&self) -> Vec<(String, String)> {
+        if !self.ctx.config.equity_conversion.is_on() {
+            return Vec::new();
+        }
+        let amounts = self.draft.committed_amounts();
+        crate::amount::equity_conversions(&amounts, &self.ctx.amount_ctx)
+            .into_iter()
+            .map(|amount| (self.ctx.config.equity_conversion_account.clone(), amount))
+            .collect()
     }
 
     /// Move to `field`, loading its stored text or, when empty, its
@@ -1201,6 +1218,91 @@ mod tests {
                 ("assets:bank:checking".to_owned(), "-18.20 EUR".to_owned()),
             ]
         );
+    }
+
+    /// Enter the IVPN-shaped conversion transaction and finish it.
+    fn conversion_txn(config: Config) -> Submit {
+        let (mut s, _t) = session_with(JOURNAL, config);
+        s.submit(); // date
+        type_in(&mut s, "IVPN");
+        s.submit();
+        type_in(&mut s, "expenses:subscriptions:services");
+        s.submit();
+        type_in(&mut s, "10 USD @@ 9.06 EUR");
+        s.submit();
+        type_in(&mut s, "assets:bank:checking");
+        s.submit();
+        type_in(&mut s, "-9.06 EUR");
+        s.submit();
+        // Empty account finishes: the postings already balance at cost.
+        type_in(&mut s, "");
+        s.submit()
+    }
+
+    #[test]
+    fn equity_conversions_are_off_by_default() {
+        let Submit::Done(txn) = conversion_txn(Config::default()) else {
+            panic!("expected Done");
+        };
+        assert_eq!(txn.postings.len(), 2);
+    }
+
+    #[test]
+    fn equity_conversions_are_appended_once_the_transaction_is_finished() {
+        let config = Config {
+            equity_conversion: crate::config::EquityConversion::On,
+            ..Config::default()
+        };
+        let Submit::Done(txn) = conversion_txn(config) else {
+            panic!("expected Done");
+        };
+        assert_eq!(
+            txn.postings,
+            vec![
+                (
+                    "expenses:subscriptions:services".to_owned(),
+                    "10 USD @@ 9.06 EUR".to_owned()
+                ),
+                ("assets:bank:checking".to_owned(), "-9.06 EUR".to_owned()),
+                ("equity:conversion".to_owned(), "-10 USD".to_owned()),
+                ("equity:conversion".to_owned(), "9.06 EUR".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_equity_conversion_account_is_configurable() {
+        let config = Config {
+            equity_conversion: crate::config::EquityConversion::On,
+            equity_conversion_account: "equity:trading".to_owned(),
+            ..Config::default()
+        };
+        let Submit::Done(txn) = conversion_txn(config) else {
+            panic!("expected Done");
+        };
+        assert!(txn.postings[2..]
+            .iter()
+            .all(|(a, _)| a == "equity:trading"));
+    }
+
+    #[test]
+    fn a_single_commodity_transaction_gets_no_equity_conversions() {
+        let config = Config {
+            equity_conversion: crate::config::EquityConversion::On,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(JOURNAL, config);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        s.submit(); // templated account
+        type_in(&mut s, "18.20 EUR");
+        s.submit();
+        s.submit(); // templated account 2
+        let Submit::Done(txn) = s.submit() else {
+            panic!("expected Done");
+        };
+        assert_eq!(txn.postings.len(), 2);
     }
 
     #[test]
