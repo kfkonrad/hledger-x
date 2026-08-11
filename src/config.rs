@@ -51,6 +51,11 @@ pub enum Matching {
 /// The resolved configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The journal file `add` reads and writes when `-f` is not given. Sits
+    /// between the flag and `$LEDGER_FILE` in precedence. A relative path is
+    /// resolved against the directory of the config file that set it, and a
+    /// leading `~/` against `$HOME`.
+    pub ledger_file: Option<PathBuf>,
     /// Reformat the whole file on write.
     pub format_file: bool,
     /// Also sort transactions by date on write.
@@ -85,6 +90,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            ledger_file: None,
             format_file: true,
             sort: false,
             insertion: Insertion::Append,
@@ -116,6 +122,7 @@ impl Config {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    ledger_file: Option<PathBuf>,
     format_file: Option<bool>,
     sort: Option<bool>,
     insertion: Option<RawInsertion>,
@@ -174,10 +181,10 @@ pub fn load(cwd: &Path) -> Result<Config, ConfigError> {
 pub fn load_str(user: Option<&str>, local: Option<&str>) -> Result<Config, ConfigError> {
     let mut cfg = Config::default();
     if let Some(src) = user {
-        apply_str(&mut cfg, src, "config.toml")?;
+        apply_str(&mut cfg, src, "config.toml", None)?;
     }
     if let Some(src) = local {
-        apply_str(&mut cfg, src, ".hledger-x.toml")?;
+        apply_str(&mut cfg, src, ".hledger-x.toml", None)?;
     }
     validate(&cfg)?;
     Ok(cfg)
@@ -207,12 +214,35 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
 fn apply_file(cfg: &mut Config, path: &Path) -> Result<(), ConfigError> {
     let src = fs::read_to_string(path)
         .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-    apply_str(cfg, &src, &path.display().to_string())
+    apply_str(cfg, &src, &path.display().to_string(), path.parent())
 }
 
-fn apply_str(cfg: &mut Config, src: &str, origin: &str) -> Result<(), ConfigError> {
+/// Resolve a configured path: `~/` against `$HOME`, a relative path against
+/// the directory holding the config file that set it (nothing to resolve
+/// against — `load_str` in tests — leaves it as written).
+fn resolve_path(value: PathBuf, base: Option<&Path>) -> PathBuf {
+    if let Ok(rest) = value.strip_prefix("~") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    match base {
+        Some(dir) if value.is_relative() => dir.join(value),
+        _ => value,
+    }
+}
+
+fn apply_str(
+    cfg: &mut Config,
+    src: &str,
+    origin: &str,
+    base: Option<&Path>,
+) -> Result<(), ConfigError> {
     let raw: Raw =
         toml::from_str(src).map_err(|e| ConfigError(format!("{origin}: {e}")))?;
+    if let Some(v) = raw.ledger_file {
+        cfg.ledger_file = Some(resolve_path(v, base));
+    }
     if let Some(v) = raw.format_file {
         cfg.format_file = v;
     }
@@ -294,6 +324,32 @@ mod tests {
         assert_eq!(cfg.default_commodity, None);
         assert!(!cfg.equity_conversion.is_on());
         assert_eq!(cfg.equity_conversion_account, "equity:conversion");
+        assert_eq!(cfg.ledger_file, None);
+    }
+
+    #[test]
+    fn ledger_file_parses_and_the_local_file_wins() {
+        let cfg = load_str(Some("ledger_file = \"/a/main.journal\"\n"), None).unwrap();
+        assert_eq!(cfg.ledger_file, Some(PathBuf::from("/a/main.journal")));
+
+        let cfg = load_str(
+            Some("ledger_file = \"/a/main.journal\"\n"),
+            Some("ledger_file = \"/b/other.journal\"\n"),
+        )
+        .unwrap();
+        assert_eq!(cfg.ledger_file, Some(PathBuf::from("/b/other.journal")));
+    }
+
+    #[test]
+    fn a_relative_ledger_file_resolves_against_the_config_directory() {
+        assert_eq!(
+            resolve_path(PathBuf::from("main.journal"), Some(Path::new("/acc"))),
+            PathBuf::from("/acc/main.journal")
+        );
+        assert_eq!(
+            resolve_path(PathBuf::from("/abs/main.journal"), Some(Path::new("/acc"))),
+            PathBuf::from("/abs/main.journal")
+        );
     }
 
     #[test]

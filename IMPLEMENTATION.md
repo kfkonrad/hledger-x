@@ -266,7 +266,7 @@ Keep 1–4 free of any terminal dependency so they stay unit-testable.
 ## `parser.rs`
 
 **Include walk** (all verified against hledger 1.99 — see `DESIGN.md`):
-- start at `-f` or `$LEDGER_FILE`
+- start at `-f`, else config `ledger_file`, else `$LEDGER_FILE`
 - resolve include paths **relative to the including file's directory**, not cwd
 - expand globs, in sorted order
 - detect cycles via a set of canonicalized absolute paths; error on revisit

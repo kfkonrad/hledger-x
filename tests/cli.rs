@@ -197,13 +197,22 @@ fn help_and_version_are_available() {
 /// Run `hledger-x add` with an isolated HOME/XDG so no user config or
 /// recovery state leaks in or out.
 fn run_add(dir: &Path, args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(BIN)
-        .arg("add")
+    run_add_env(dir, args, stdin, None)
+}
+
+/// As [`run_add`], with an explicit `$LEDGER_FILE` (unset when `None`).
+fn run_add_env(dir: &Path, args: &[&str], stdin: &str, ledger_file: Option<&str>) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("add")
         .args(args)
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("config"))
-        .env("XDG_STATE_HOME", dir.join("state"))
-        .env_remove("LEDGER_FILE")
+        .env("XDG_STATE_HOME", dir.join("state"));
+    match ledger_file {
+        Some(v) => cmd.env("LEDGER_FILE", v),
+        None => cmd.env_remove("LEDGER_FILE"),
+    };
+    let mut child = cmd
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -332,6 +341,45 @@ fn add_respects_local_config() {
     let middle = text.find("Middle").unwrap();
     let late = text.find("late").unwrap();
     assert!(early < middle && middle < late, "file was:\n{text}");
+}
+
+#[test]
+fn add_falls_back_to_the_configured_ledger_file() {
+    let dir = scratch("add_config_ledger_file");
+    // Relative to the config file's directory.
+    write(&dir, ".hledger-x.toml", "ledger_file = \"main.journal\"\n");
+    let journal = write(&dir, "main.journal", ADD_JOURNAL);
+    let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
+    let out = run_add(&dir, &[], input);
+    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert!(fs::read_to_string(&journal).unwrap().contains("18.20 EUR"));
+}
+
+#[test]
+fn the_ledger_file_precedence_is_flag_then_config_then_env() {
+    let dir = scratch("add_ledger_file_precedence");
+    let flagged = write(&dir, "flag.journal", ADD_JOURNAL);
+    let configured = write(&dir, "config.journal", ADD_JOURNAL);
+    let env = write(&dir, "env.journal", ADD_JOURNAL);
+    write(&dir, ".hledger-x.toml", "ledger_file = \"config.journal\"\n");
+    let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
+
+    // The flag beats both.
+    let out = run_add_env(
+        &dir,
+        &["-f", flagged.to_str().unwrap()],
+        input,
+        Some(env.to_str().unwrap()),
+    );
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&flagged).unwrap().contains("18.20 EUR"));
+    assert!(!fs::read_to_string(&env).unwrap().contains("18.20 EUR"));
+
+    // Without the flag, the config beats the environment.
+    let out = run_add_env(&dir, &[], input, Some(env.to_str().unwrap()));
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(fs::read_to_string(&configured).unwrap().contains("18.20 EUR"));
+    assert!(!fs::read_to_string(&env).unwrap().contains("18.20 EUR"));
 }
 
 #[test]

@@ -256,7 +256,12 @@ Requires a semantic parser; epic 1 does not.
 
 All behaviour below verified against hledger 1.99.
 
-- Start at the main file: `-f` or `$LEDGER_FILE`.
+- Start at the main file: `-f`, else the config's `ledger_file`, else
+  `$LEDGER_FILE`. The config key sits between the two so a per-directory
+  `.hledger-x.toml` can point at its journal without exporting anything, while
+  the flag still wins for a one-off. A relative path there resolves against
+  the config file's own directory (the same rule `include` follows), a leading
+  `~/` against `$HOME`.
 - **Include paths resolve relative to the *including* file's directory**, not
   cwd. Verified: `include deep/d.journal` inside `g/sub/mid.journal` resolved to
   `g/sub/deep/d.journal`.
@@ -661,7 +666,7 @@ Interactions:
   the new one, following `fmt --sort` semantics rather than inventing a second
   notion of ordering. If the file is not sorted, **warn and proceed anyway**,
   telling the user the file is unsorted.
-- Write target: the main file from `-f` or `$LEDGER_FILE`. Overridable per
+- Write target: the main file resolved above. Overridable per
   invocation; **error** if the override file is not reachable through the
   include graph. Nested includes must resolve.
 

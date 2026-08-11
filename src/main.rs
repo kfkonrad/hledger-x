@@ -37,7 +37,8 @@ enum Command {
 
 #[derive(clap::Args)]
 struct AddArgs {
-    /// The journal file. Defaults to `$LEDGER_FILE`.
+    /// The journal file. Defaults to the config's `ledger_file`, then
+    /// `$LEDGER_FILE`.
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
     /// Write new transactions into this file instead of the main file. Must
@@ -72,11 +73,16 @@ fn run_add(args: &AddArgs) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let config = hledger_x::config::load(&cwd).map_err(|e| eyre!("config: {e}"))?;
 
+    // Precedence: the flag, then the config's `ledger_file`, then the
+    // environment.
     let main_file = args
         .file
         .clone()
+        .or_else(|| config.ledger_file.clone())
         .or_else(|| std::env::var_os("LEDGER_FILE").map(PathBuf::from))
-        .ok_or_else(|| eyre!("no journal file: pass -f FILE or set $LEDGER_FILE"))?;
+        .ok_or_else(|| {
+            eyre!("no journal file: pass -f FILE, set ledger_file in the config, or set $LEDGER_FILE")
+        })?;
 
     let journal = parse_journal(&main_file)?;
     for w in &journal.warnings {

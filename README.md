@@ -145,7 +145,8 @@ longer account name or number therefore reflows every posting line in the file.
 hledger-x add [-f FILE] [--to FILE]
 ```
 
-The journal is `-f FILE` or `$LEDGER_FILE`. `--to` writes new transactions
+The journal is `-f FILE`, else the config's `ledger_file`, else
+`$LEDGER_FILE`. `--to` writes new transactions
 into a different file, which must be reachable through the journal's `include`
 graph.
 
@@ -225,8 +226,11 @@ transaction could never balance.
 `~/.config/hledger-x/config.toml`, overridden key-by-key by the nearest
 `.hledger-x.toml` found walking up from the current directory. All keys are
 optional; unknown keys are rejected so typos cannot silently disable anything.
+A relative `ledger_file` is resolved against the directory of the config file
+that set it, and a leading `~/` against `$HOME`.
 
 ```toml
+ledger_file = "main.journal"  # journal for `add`, below -f and above $LEDGER_FILE
 format_file = true            # rewrite the whole file, formatted, on write
 sort = false                  # also sort transactions by date on write
 insertion = "append"          # or "chronological"
