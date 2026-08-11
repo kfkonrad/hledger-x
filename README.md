@@ -194,8 +194,9 @@ suggestion, `→` accepts the ghost suggestion, `Ctrl-U` clears the buffer,
 one word — on account fields one `:`-segment at a time — `Ctrl-E` opens the
 draft in `$EDITOR`, `Ctrl-C` aborts the current transaction. To leave, type
 `q` at the date prompt or press `Ctrl-D` anywhere; both write everything
-completed. `u` at the date prompt undoes the last completed transaction. The
-UI shows these hints inline as the fields come up, so none of this needs
+completed. `u` at the date prompt undoes the last completed transaction, which
+also removes it from the log of finished transactions shown above the prompt.
+The UI shows these hints inline as the fields come up, so none of this needs
 remembering.
 
 Everything is buffered and written **once, on exit** — both `Ctrl-C` and

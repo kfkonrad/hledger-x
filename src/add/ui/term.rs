@@ -1,10 +1,12 @@
 //! The inline raw-mode terminal frontend.
 //!
 //! No alternate screen: normal scrollback is preserved and the program
-//! controls only a few lines around the cursor — the live transaction block,
-//! a separator carrying the running imbalance, the prompt, and either the
-//! ghost suggestion or the completion menu. Every completed transaction is
-//! printed permanently into scrollback.
+//! controls only the lines around the cursor — the log of completed
+//! transactions, the live transaction block, a separator carrying the running
+//! imbalance, the prompt, and either the ghost suggestion or the completion
+//! menu. The log lives in the live frame rather than in scrollback, so that
+//! undoing a transaction takes it back off the screen; it is printed
+//! permanently into scrollback only when the session ends.
 
 use std::io::{self, Write};
 
@@ -81,7 +83,7 @@ pub fn run(session: &mut Session, recovery: &Recovery) -> io::Result<Vec<NewTran
             Flow::Quit => break,
         }
     }
-    ui.retire(&mut out)?;
+    ui.retire(session, &mut out)?;
     Ok(session.completed.clone())
 }
 
@@ -135,7 +137,7 @@ impl Ui {
                 KeyCode::Char('y' | 'Y') => {
                     self.note = Note::None;
                     let r = session.submit_confirmed();
-                    return self.apply_submit(session, recovery, r, out);
+                    return Ok(self.apply_submit(session, recovery, r));
                 }
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => self.note = Note::None,
                 _ => {}
@@ -187,7 +189,7 @@ impl Ui {
                     }
                 } else {
                     let r = session.submit();
-                    return self.apply_submit(session, recovery, r, out);
+                    return Ok(self.apply_submit(session, recovery, r));
                 }
             }
             _ => {}
@@ -274,8 +276,7 @@ impl Ui {
         session: &mut Session,
         recovery: &Recovery,
         result: Submit,
-        out: &mut impl Write,
-    ) -> io::Result<Flow> {
+    ) -> Flow {
         match result {
             Submit::Advanced => self.note = Note::None,
             Submit::AdvancedWithNote(n) => self.note = Note::Info(n),
@@ -283,7 +284,7 @@ impl Ui {
             Submit::Confirm { question } => {
                 self.note = Note::Confirm(format!("{question} [y/n]"));
             }
-            Submit::Quit => return Ok(Flow::Quit),
+            Submit::Quit => return Flow::Quit,
             Submit::Undo => {
                 if let Some(t) = session.undo() {
                     rewrite_recovery(session, recovery);
@@ -299,18 +300,13 @@ impl Ui {
                 if let Err(e) = recovery.record(&txn) {
                     self.note = Note::Error(format!("recovery journal: {e}"));
                 }
-                // Retire the live area and print the final block into
-                // scrollback.
-                self.clear_frame(out)?;
-                for l in render_done(session, &txn) {
-                    out.queue(Print(l))?.queue(Print("\r\n"))?;
-                }
-                out.queue(Print("\r\n"))?;
-                out.flush()?;
+                // The finished block joins the in-frame log; the next draw
+                // paints it above the prompt. Nothing goes to scrollback
+                // yet — `u` may still take it back.
                 session.complete(txn);
             }
         }
-        Ok(Flow::Continue)
+        Flow::Continue
     }
 
     fn open_menu(&mut self, candidates: Vec<String>) {
@@ -340,9 +336,17 @@ impl Ui {
         Ok(())
     }
 
-    /// Called on exit: drop the live frame.
-    fn retire(&mut self, out: &mut impl Write) -> io::Result<()> {
+    /// Called on exit: drop the live frame and hand the log — everything
+    /// that survived undo — to scrollback, where it stays after the program
+    /// is gone.
+    fn retire(&mut self, session: &Session, out: &mut impl Write) -> io::Result<()> {
         self.clear_frame(out)?;
+        for txn in &session.completed {
+            for l in render_done(session, txn) {
+                out.queue(Print(l))?.queue(Print("\r\n"))?;
+            }
+            out.queue(Print("\r\n"))?;
+        }
         out.flush()
     }
 
@@ -354,7 +358,15 @@ impl Ui {
         // A row is one or more (text, dim) spans.
         let mut rows: Vec<Vec<(String, bool)>> = Vec::new();
 
-        for l in session.preview_lines() {
+        let preview = session.preview_lines();
+        // What the log may use: whatever the rest of the frame — preview,
+        // separator, prompt, one note or menu row, one spare — leaves over.
+        let log_budget = height
+            .saturating_sub(preview.len())
+            .saturating_sub(4);
+        rows.extend(log_rows(session, log_budget));
+
+        for l in preview {
             rows.push(vec![(format!("  {l}"), false)]);
         }
         rows.push(vec![(separator(session, width), true)]);
@@ -421,7 +433,19 @@ impl Ui {
             (None, Note::Error(e)) => rows.push(vec![(format!("  ✗ {e}"), false)]),
         }
 
-        // Paint: move to the frame top, clear down, print every row.
+        self.paint(&rows, width, (prompt_row, prompt_col), out)
+    }
+
+    /// Paint a built frame: move to its top, clear down, print every row and
+    /// park the cursor on the prompt.
+    fn paint(
+        &mut self,
+        rows: &[Vec<(String, bool)>],
+        width: usize,
+        prompt: (usize, usize),
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        let (prompt_row, prompt_col) = prompt;
         if self.drawn > 0 {
             let up = u16::try_from(self.cursor_row).unwrap_or(u16::MAX);
             if up > 0 {
@@ -510,6 +534,49 @@ impl Menu {
     }
 }
 
+/// The completed transactions, as frame rows: newest last, each block
+/// followed by a blank line. Only the newest ones that fit in `budget` rows
+/// are kept; the rest are stood in for by a dim elision line. Rendering this
+/// from `session.completed` on every draw is what makes an undone
+/// transaction disappear.
+fn log_rows(session: &Session, budget: usize) -> Vec<Vec<(String, bool)>> {
+    if budget == 0 || session.completed.is_empty() {
+        return Vec::new();
+    }
+    // Take blocks newest-first for as long as they fit.
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut used = 0usize;
+    for txn in session.completed.iter().rev() {
+        let mut block = render_done(session, txn);
+        block.push(String::new());
+        let next = used.saturating_add(block.len());
+        if next > budget {
+            break;
+        }
+        used = next;
+        blocks.push(block);
+    }
+    let mut hidden = session.completed.len().saturating_sub(blocks.len());
+    // The elision line needs a row of its own; buy it back from the oldest
+    // block shown.
+    if hidden > 0 && used.saturating_add(1) > budget && blocks.pop().is_some() {
+        hidden = hidden.saturating_add(1);
+    }
+    let mut rows: Vec<Vec<(String, bool)>> = Vec::new();
+    if hidden > 0 {
+        rows.push(vec![(
+            format!("  … {hidden} earlier transaction(s)"),
+            true,
+        )]);
+    }
+    for block in blocks.iter().rev() {
+        for l in block {
+            rows.push(vec![(format!("  {l}").trim_end().to_owned(), false)]);
+        }
+    }
+    rows
+}
+
 /// The separator line: a rule, with the running imbalance surfaced when it
 /// is nonzero (or unknown).
 fn separator(session: &Session, width: usize) -> String {
@@ -560,5 +627,93 @@ fn ghost(session: &Session) -> Option<String> {
     }
     let top = session.candidates().into_iter().next()?;
     (top != session.draft.buffer).then_some(top)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::add::parser::{parse_journal, FileMap};
+    use crate::add::ui::SessionCtx;
+    use crate::config::Config;
+    use chrono::NaiveDate;
+    use std::fs;
+    use tempfile::TempDir;
+
+    const JOURNAL: &str = "\
+2026-08-05 Rewe
+    expenses:groceries        12.00 EUR
+    assets:bank:checking     -12.00 EUR
+";
+
+    fn session() -> (Session, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("main.journal");
+        fs::write(&path, JOURNAL).unwrap();
+        let journal = parse_journal(&path).unwrap();
+        let map = FileMap::build(JOURNAL);
+        let today = NaiveDate::from_ymd_opt(2026, 8, 10).unwrap();
+        let ctx = SessionCtx::new(journal, Config::default(), today, path, &map);
+        (Session::new(ctx), dir)
+    }
+
+    fn complete(s: &mut Session, description: &str) {
+        s.complete(NewTransaction {
+            date: NaiveDate::from_ymd_opt(2026, 8, 10).unwrap(),
+            description: description.to_owned(),
+            postings: vec![
+                ("expenses:groceries".to_owned(), "1 EUR".to_owned()),
+                ("assets:bank:checking".to_owned(), "-1 EUR".to_owned()),
+            ],
+        });
+    }
+
+    fn text(rows: &[Vec<(String, bool)>]) -> String {
+        rows.iter()
+            .map(|r| r.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn an_undone_transaction_leaves_the_log() {
+        let (mut s, _t) = session();
+        complete(&mut s, "Rewe");
+        complete(&mut s, "Edeka");
+        let before = text(&log_rows(&s, 40));
+        assert!(before.contains("Rewe"), "{before}");
+        assert!(before.contains("Edeka"), "{before}");
+
+        assert!(s.undo().is_some());
+        let after = text(&log_rows(&s, 40));
+        assert!(after.contains("Rewe"), "{after}");
+        assert!(!after.contains("Edeka"), "{after}");
+
+        assert!(s.undo().is_some());
+        assert!(log_rows(&s, 40).is_empty());
+    }
+
+    #[test]
+    fn a_log_taller_than_the_budget_keeps_the_newest_and_elides_the_rest() {
+        let (mut s, _t) = session();
+        for d in ["One", "Two", "Three"] {
+            complete(&mut s, d);
+        }
+        // Each block is 3 lines plus its blank: room for one, and the
+        // elision line.
+        let rows = log_rows(&s, 5);
+        let out = text(&rows);
+        assert!(out.starts_with("  … 2 earlier transaction(s)"), "{out}");
+        assert!(out.contains("Three"), "{out}");
+        assert!(!out.contains("Two"), "{out}");
+        assert!(rows.len() <= 5, "{out}");
+    }
+
+    #[test]
+    fn a_budget_too_small_for_any_block_shows_only_the_elision() {
+        let (mut s, _t) = session();
+        complete(&mut s, "One");
+        assert_eq!(text(&log_rows(&s, 2)), "  … 1 earlier transaction(s)");
+        assert!(log_rows(&s, 0).is_empty());
+    }
 }
 

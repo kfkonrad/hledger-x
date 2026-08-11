@@ -506,7 +506,12 @@ Up/Down stay field navigation, never history.
 
 No "save this transaction? [y]" confirmation — redundant when the transaction
 has been visible the whole time. `u` at the date prompt undoes the last
-completed transaction. The UI surfaces these affordances as inline hints
+completed transaction — and because undo has to be able to take a transaction
+back off the screen, the log of completed transactions above the prompt is
+part of the redrawn frame, not scrollback. It is handed to scrollback on exit,
+so what stays behind is exactly what was written. When the log outgrows the
+terminal the newest entries win, with a dim `… N earlier transaction(s)` line
+standing in for the rest. The UI surfaces these affordances as inline hints
 (dimmed, under the prompt) when the relevant field comes up — how to finish a
 transaction and how to leave must be discoverable without documentation.
 
