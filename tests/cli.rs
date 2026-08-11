@@ -274,6 +274,115 @@ fn formatting_stdin_lists_nothing() {
     assert_eq!(out.stdout, FORMATTED);
 }
 
+// ---- --diff ----
+
+#[test]
+fn diff_shows_what_changed_and_still_writes() {
+    let dir = scratch("fmt_diff_write");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let out = run_in(&dir, &["fmt", "--diff", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        "\
+--- a/a.journal
++++ b/a.journal
+@@ -1,2 +1,2 @@
+ 2025-01-01 x
+-  A:B  1 USD
++    A:B  1 USD
+"
+    );
+    // --diff on its own is not --check: the file is written.
+    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
+}
+
+#[test]
+fn check_diff_writes_nothing() {
+    let dir = scratch("fmt_diff_check");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let out = run_in(&dir, &["fmt", "--check", "--diff", "a.journal"], "");
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("+    A:B  1 USD"), "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("would reformat:"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(fs::read_to_string(&a).unwrap(), UNFORMATTED);
+}
+
+#[test]
+fn diff_replaces_the_plain_changed_file_list() {
+    let dir = scratch("fmt_diff_list");
+    write(&dir, "a.journal", UNFORMATTED);
+    let out = run_in(&dir, &["fmt", "--diff", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    // The headers name the file; a bare `a.journal` line would be noise.
+    assert!(
+        !out.stdout.lines().any(|l| l == "a.journal"),
+        "stdout: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn an_unchanged_file_produces_no_diff() {
+    let dir = scratch("fmt_diff_clean");
+    write(&dir, "a.journal", FORMATTED);
+    let out = run_in(&dir, &["fmt", "--diff", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "");
+}
+
+#[test]
+fn diff_on_stdin_replaces_the_formatted_payload() {
+    let out = run(&["fmt", "--diff", "-"], UNFORMATTED);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.starts_with("--- a/<stdin>\n+++ b/<stdin>\n"),
+        "stdout: {}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("2025-01-01 x\n    A:B"), "stdout: {}", out.stdout);
+}
+
+#[test]
+fn diff_covers_every_file_in_a_followed_tree() {
+    let dir = scratch("fmt_diff_follow");
+    tree(&dir);
+    let out = run_in(&dir, &["fmt", "--check", "--diff", "-f", "main.journal"], "");
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("--- a/main.journal") && out.stdout.contains("--- a/sub.journal"),
+        "stdout: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn quiet_leaves_diffs_alone() {
+    let dir = scratch("fmt_diff_quiet");
+    write(&dir, "a.journal", UNFORMATTED);
+    // -q suppresses the file list; asking for a diff is asking for output.
+    let out = run_in(&dir, &["fmt", "--diff", "-q", "a.journal"], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("+    A:B  1 USD"), "stdout: {}", out.stdout);
+}
+
+#[test]
+fn diff_reflects_sorting() {
+    let dir = scratch("fmt_diff_sort");
+    write(&dir, "a.journal", "2025-03-02 b\n\n2025-01-05 a\n");
+    let out = run_in(&dir, &["fmt", "--check", "--diff", "--sort", "a.journal"], "");
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("+2025-01-05 a"),
+        "stdout: {}",
+        out.stdout
+    );
+}
+
 // ---- sort as a configured setting ----
 
 #[test]

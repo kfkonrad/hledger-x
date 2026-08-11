@@ -143,7 +143,7 @@ still hledger-fmt's byte for byte, but the argument model now follows the
 mainstream formatters instead.
 
 ```
-hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]...
+hledger-x fmt [--check] [--diff] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]...
 ```
 
 - no arguments — the configured `ledger_file`, then `$LEDGER_FILE`, **plus its
@@ -153,8 +153,13 @@ hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]..
 - `FILE...` — format each file in place, **without** following its includes
 - `-` — stdin to stdout. Cannot be combined with anything else
 - `--check` — write nothing, list what it would reformat on stderr, exit 1
+- `--diff` — a unified diff of every change on stdout, in place of the file
+  list. On its own it still writes (`terraform fmt -diff`, not `black --diff`);
+  pair it with `--check` to write nothing. On stdin it replaces the formatted
+  payload, there being no file to write
 - `--sort` / `--no-sort` — override the configured `sort`
-- `-q`/`--quiet` — do not list the files that changed
+- `-q`/`--quiet` — do not list the files that changed. `--diff` outranks it:
+  asking for a diff is asking for output
 
 Every selected file is deduplicated by canonical path, so a file reachable from
 two roots — or named as an operand as well — is formatted once. Roots are
@@ -183,9 +188,16 @@ surface was missing:
 5. **`--check` failing is distinguishable from the run breaking**, hence the
    `1` / `3` split.
 
-Deferred, and deliberately so: directory arguments are *not* walked (a
+Deferred, and deliberately so: directory arguments are *not* walked — a
 directory is a reported error, which keeps the door open to walking it later
-without breaking anyone), and there is no `--diff`.
+without breaking anyone.
+
+`--diff` renders through the [`similar`](https://docs.rs/similar) crate rather
+than a hand-rolled LCS: hunk boundaries and context radius are exactly where
+hand-rolled diffs go wrong, and it costs one dependency with no transitives of
+its own. Note that a diff is often long out of proportion to the edit, because
+alignment is file-wide (see below) — that is the formatter working as designed,
+not the diff misreporting.
 
 ## Layout rules
 

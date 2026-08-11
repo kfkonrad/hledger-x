@@ -17,10 +17,8 @@ use hledger_x::config::Config;
 use hledger_x::add::ui::{plain, term, Session, SessionCtx};
 use hledger_x::add::write::{integrate_with, Recovery};
 use hledger_x::amount::AmountCtx;
-use hledger_x::fmt::{
-    format, format_sorted, format_sorted_with, format_with, is_formatted, is_formatted_sorted,
-    is_formatted_sorted_with, is_formatted_with,
-};
+use hledger_x::fmt::{format, format_sorted, format_sorted_with, format_with};
+use similar::TextDiff;
 
 #[derive(Parser)]
 #[command(name = "hledger-x", version, about = "Plain text accounting tooling")]
@@ -54,6 +52,9 @@ struct FmtArgs {
     /// Write nothing; exit 1 if any file is not already formatted.
     #[arg(long)]
     check: bool,
+    /// Print a unified diff of every change, instead of just naming the files.
+    #[arg(long)]
+    diff: bool,
     /// Format this journal together with every file it includes. Repeatable,
     /// and combinable with FILE operands.
     #[arg(short = 'f', long = "follow", value_name = "ROOT")]
@@ -234,14 +235,17 @@ fn transform(sort: bool, src: &str, ctx: Option<&AmountCtx>) -> String {
     }
 }
 
-/// Whether a file's contents are already in final form, per `--sort`.
-fn formatted(sort: bool, src: &str, ctx: Option<&AmountCtx>) -> bool {
-    match (sort, ctx) {
-        (true, Some(c)) => is_formatted_sorted_with(src, c),
-        (true, None) => is_formatted_sorted(src),
-        (false, Some(c)) => is_formatted_with(src, c),
-        (false, None) => is_formatted(src),
-    }
+/// A unified diff of one file's before and after, headed the way `git diff`
+/// heads its own.
+fn write_diff(out: &mut impl Write, display: &str, before: &str, after: &str) -> io::Result<()> {
+    write!(
+        out,
+        "{}",
+        TextDiff::from_lines(before, after)
+            .unified_diff()
+            .context_radius(3)
+            .header(&format!("a/{display}"), &format!("b/{display}"))
+    )
 }
 
 /// The declared commodity styles visible from `path` — its whole include
@@ -377,7 +381,7 @@ fn fmt_status(args: &FmtArgs) -> Status {
     let sort = args.sort.resolve(config.sort);
     match select(args, &config) {
         Err(status) => status,
-        Ok(Target::Stdin) => run_stdin(args.check, sort),
+        Ok(Target::Stdin) => run_stdin(args, sort),
         Ok(Target::Files(plan)) => run_files(args, sort, &plan),
     }
 }
@@ -422,25 +426,37 @@ fn select(args: &FmtArgs, config: &Config) -> Result<Target, Status> {
     Ok(Target::Files(plan))
 }
 
-fn run_stdin(check: bool, sort: bool) -> Status {
+fn run_stdin(args: &FmtArgs, sort: bool) -> Status {
     let mut src = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut src) {
         eprintln!("hledger-x fmt: stdin: {e}");
         return Status::Error;
     }
-    if check {
-        return if formatted(sort, &src, None) {
-            Status::Ok
+    let formatted = transform(sort, &src, None);
+    let changed = formatted != src;
+    let mut out = io::stdout().lock();
+    // There is no file to write here, so a diff takes the place of the
+    // formatted text rather than accompanying it.
+    let written = if args.diff {
+        if changed {
+            write_diff(&mut out, "<stdin>", &src, &formatted)
         } else {
-            Status::Unformatted
-        };
-    }
-    let out = transform(sort, &src, None);
-    if let Err(e) = io::stdout().write_all(out.as_bytes()) {
+            Ok(())
+        }
+    } else if args.check {
+        Ok(())
+    } else {
+        out.write_all(formatted.as_bytes())
+    };
+    if let Err(e) = written {
         eprintln!("hledger-x fmt: stdout: {e}");
         return Status::Error;
     }
-    Status::Ok
+    if args.check && changed {
+        Status::Unformatted
+    } else {
+        Status::Ok
+    }
 }
 
 /// Format or check each file. One that cannot be read or written is reported
@@ -459,16 +475,17 @@ fn run_files(args: &FmtArgs, sort: bool, plan: &Plan) -> Status {
             }
         };
         let ctx = plan.ctxs.get(job.ctx).and_then(Option::as_ref);
-        if args.check {
-            if !formatted(sort, &src, ctx) {
-                eprintln!("would reformat: {}", job.display);
-                status.merge(Status::Unformatted);
-            }
-            continue;
-        }
         let formatted = transform(sort, &src, ctx);
         // Leave an already-formatted file untouched on disk.
         if formatted == src {
+            continue;
+        }
+        if args.diff {
+            let _ = write_diff(&mut out, &job.display, &src, &formatted);
+        }
+        if args.check {
+            eprintln!("would reformat: {}", job.display);
+            status.merge(Status::Unformatted);
             continue;
         }
         if let Err(e) = fs::write(&job.path, &formatted) {
@@ -476,7 +493,8 @@ fn run_files(args: &FmtArgs, sort: bool, plan: &Plan) -> Status {
             status.merge(Status::Error);
             continue;
         }
-        if !args.quiet {
+        // The diff already names the file; a bare path line would be noise.
+        if !args.diff && !args.quiet {
             let _ = writeln!(out, "{}", job.display);
         }
     }

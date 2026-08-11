@@ -218,7 +218,7 @@ Unparseable dates sort first; the stable sort preserves their source order.
 Revised 2026-08; `DESIGN.md` § CLI has the shape and the rationale.
 
 ```
-hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]...
+hledger-x fmt [--check] [--diff] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [FILE|-]...
 ```
 
 `main.rs` resolves the operands into a `Plan` — a list of `Job`s (path,
@@ -236,8 +236,11 @@ path — and then walks it:
 - `-` → stdin to stdout; rejected (2) alongside any other operand
 - `--check` → write nothing; `would reformat: PATH` per file on stderr; exit 1.
   With sorting on, check against `format_sorted`
-- writes list changed paths on stdout unless `-q`; an unchanged file is never
-  written, so its mtime does not move
+- `--diff` → `write_diff` renders `similar::TextDiff::from_lines(..)`'s
+  `unified_diff()` with `context_radius(3)` and `a/PATH` `b/PATH` headers, to
+  stdout, in place of the file list. It does not imply `--check`
+- writes list changed paths on stdout unless `-q` or `--diff`; an unchanged
+  file is never written, so its mtime does not move
 - sorting comes from the config, overridden by `--sort` / `--no-sort`
   (`SortFlags::resolve`)
 

@@ -63,7 +63,7 @@ is the one `hledger-x` returns.
 ## Usage
 
 ```sh
-hledger-x fmt [--check] [--sort|--no-sort] [-q] [-f ROOT]... [FILE|-]...
+hledger-x fmt [--check] [--diff] [--sort|--no-sort] [-q] [-f ROOT]... [FILE|-]...
 ```
 
 With no arguments, format the whole journal — the configured `ledger_file`, or
@@ -110,6 +110,17 @@ exits 1, which makes it suitable for CI and pre-commit hooks:
 ```sh
 hledger-x fmt --check
 ```
+
+Show a unified diff of every change on stdout, in place of the file list:
+
+```sh
+hledger-x fmt --diff          # format, and show what changed
+hledger-x fmt --check --diff  # write nothing, and show what would change
+```
+
+Diffs can be long out of proportion to the edit: posting alignment is computed
+over every posting in the file, so one account or number wider than the current
+maximum reflows every posting line.
 
 Also sort transactions by date. Sorting is stable (equal dates keep their source
 order) and directive-bounded: directives and standalone comment blocks act as
