@@ -36,10 +36,15 @@ tests/
 
 Everything under `ui/` except `term.rs` is terminal-free and unit-tested.
 
-Dependencies: `clap` (CLI), `color-eyre` (errors). Epic 2 adds `crossterm`,
-`rust_decimal`, `glob`, `toml` + `serde`, `chrono`.
+Dependencies: `clap` (CLI), `color-eyre` (errors), `similar` (`fmt --diff`),
+and `tempfile` as a dev-dependency. Epic 2 adds `crossterm`, `rust_decimal`,
+`glob`, `toml` + `serde`, `chrono`.
 
-Distribution is GitHub releases; no crates.io publish, no CI yet.
+Distribution is GitHub releases, built by goreleaser (`.goreleaser.yaml`) from
+a `v*` tag via `.github/workflows/release.yml`, whose notes come from the
+matching `CHANGELOG.md` section. `.github/workflows/ci.yml` runs `cargo test`
+(with hledger installed, so the semantic-equivalence tests do not skip
+themselves) and `cargo clippy --all-targets -- -D warnings` on pull requests.
 
 ---
 
@@ -377,8 +382,10 @@ same state machine over pipes so entry is testable and scriptable.)
 
 **Field state machine**: date → description → account 1 → amount 1 → account 2
 → … Each field owns its completer. Keep the state machine as the *only* thing
-that knows a posting is two fields — uniting account and amount into one
-journal-syntax line later must not touch the completers or the pre-fill logic.
+that knows a posting is two fields; the completers and the pre-fill logic must
+not depend on it. (The two fields are permanent — the single-line alternative
+was settled against on 2026-08-12; see `DESIGN.md` § Posting entry. This is
+plain modularity now, not preparation for a merge.)
 
 The live preview is rendered by `fmt` against the **file's** widths, not the
 transaction's own, so it is byte-accurate and visibly shifts when an entry will
@@ -395,6 +402,12 @@ Keys, no-confirmation save, and undo: see `DESIGN.md`.
 - `format_file` (default true), `sort` (default false), `insertion`
   (default `append`). Reject `format_file = false` + `sort = true` at config
   load — sorting inherently rewrites the file.
+- The rest of the settings live in `config.rs` and are consumed by `ui/`, not
+  here: `strict`, `account_completion` / `description_completion`,
+  `default_commodity`, `equity_conversion` and `equity_conversion_account`.
+  `ledger_file` and `sort` sit at the config's top level (both subcommands read
+  them); everything `add` alone governs is in the `[add]` table, listed in
+  `config::ADD_SETTINGS` so a misplaced key can name its section.
 - `chronological` insertion follows `fmt --sort` semantics. If the file is not
   sorted, warn and proceed.
 - Write target is the main file; an override must be reachable through the

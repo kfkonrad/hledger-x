@@ -509,9 +509,13 @@ own completer. This is the starting point.
 A single-line alternative (`account<2+ spaces>amount COMMODITY` in journal
 syntax, with the completer switching mode on cursor position) was considered.
 It halves the prompt count and uses syntax the user already knows, but it is
-unproven and harder to complete against. **Start with two fields; uniting them
-later is a change to the field state machine only**, since both designs share
-the same completers and the same pre-fill logic. Keep that seam clean.
+unproven and harder to complete against.
+
+**Settled 2026-08-12 with the user, after living with epic 2: the two fields
+stay separate.** The single-line form is not happening; this is no longer an
+open question. The seam is still worth keeping clean — the field state machine
+remains the only thing that knows a posting is two fields — but as ordinary
+modularity, not as preparation for a merge.
 
 Accounts are pre-filled from the template, so accepting is one keypress.
 Amounts are **never pre-filled into the buffer**: the template amount (or,
@@ -570,7 +574,8 @@ standing in for the rest. The UI surfaces these affordances as inline hints
 (dimmed, under the prompt) when the relevant field comes up — how to finish a
 transaction and how to leave must be discoverable without documentation.
 
-**Unproven** — needs to be seen in practice before sign-off.
+**Signed off 2026-08-12** by the user after using epic 2: the navigation scheme
+holds up in practice and stands as described.
 
 ## Completion
 
@@ -831,8 +836,10 @@ model above.
 
 # Open questions
 
-Neither blocks epic 1.
+None. Both questions that stood through epics 1 and 2 were settled with the
+user on 2026-08-12, after living with the shipped `add`:
 
-- Should account and amount be united into one journal-syntax line? Deferred —
-  build two fields first, decide by feel.
-- Does the navigation scheme hold up in practice?
+- *Should account and amount be united into one journal-syntax line?* **No** —
+  they stay two separate fields. See § Posting entry.
+- *Does the navigation scheme hold up in practice?* **Yes** — signed off as
+  described, see § Navigation.

@@ -18,8 +18,9 @@ deviation from the plan: `ui` is built directly on `crossterm`, not
 `reedline` — the design sanctioned this fallback, and the live preview block
 plus field-navigation keys fight reedline's line-editor repaint model. `ui`
 splits into submodules (`dates`, `complete`, `plain`, `term`); everything
-except `term` is terminal-free and unit-tested. The `add` navigation scheme is
-flagged "unproven" in the design — expect user feedback to reshape it.
+except `term` is terminal-free and unit-tested. The `add` navigation scheme and
+the two-fields-per-posting split were both signed off by the user on 2026-08-12
+after using the shipped tool; `DESIGN.md` has no open questions left.
 
 ## Start here
 
