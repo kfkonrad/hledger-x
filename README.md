@@ -219,15 +219,34 @@ date, description, then account/amount pairs — with:
   field as entered. The first posting must carry an amount; Enter on an
   **empty amount** on any later posting writes the balancing amount
   explicitly and finishes the transaction — the quickest way to end one
-- **completion** everywhere: ghost-text suggestion (`→` accepts) plus a
-  `Tab` menu — as tall as the screen allows, scrolling beyond that — ranked
-  by frecency and conditioned on the description already entered. On an
-  empty field that menu is the whole candidate list, which is how you
-  browse history. Account
-  queries match by substring, or per-segment once the query contains a colon
-  (`ex:gro` → `expenses:groceries`). In amounts, commodities complete both
+- **completion** everywhere, and `Tab` really completes: it inserts as much
+  as every remaining candidate agrees on, exactly like bash or fish. A
+  unique match lands in the buffer whole — with the default substring
+  style, `check` + `Tab` gives you `assets:bank:checking` outright, no menu
+  and no Enter to select. When the candidates only agree part-way, you get
+  that much (`an` → `assets:bank:`) and a menu of what is left, as tall as
+  the screen allows and scrolling beyond that, ranked by frecency and
+  conditioned on the description already entered. On an empty field that
+  menu is the whole candidate list, which is how you browse history.
+  Completion never widens your query: a `Tab` that would drop a constraint
+  you typed opens the menu instead of guessing, and a query that matches
+  nothing leaves the buffer untouched. Ranking orders the menu but never
+  decides an insertion — only unanimity does
+- **account completion is segment-aware** under every style: a query is
+  matched one `:`-segment at a time and never across the colon. `prefix` is
+  anchored, segment against segment (`ex:gro` → `expenses:groceries`;
+  `gro` alone matches nothing). `substring` and `fuzzy` allow gaps, so a
+  bare `check` or `ckng` reaches `assets:bank:checking` while `asbk` — which
+  would span `assets:bank` — does not. Descriptions are plain text, so a `:`
+  in one is never a segment break. In amounts, commodities complete both
   for the face amount and for the second commodity of an `@`/`@@` cost or
   `=`/`==`/`=*`/`==*` assertion tail
+- **accounts do not have to be declared.** Anything used in a posting
+  anywhere in the include tree completes, declared or not, as does anything
+  declared but never used. An account you introduce during a session joins
+  the pool immediately — available to the next posting of the same
+  transaction and to every later transaction, announced as new only once,
+  and asked about only once under `strict`. Undo takes it back out
 - an optional **strict mode** (`strict = true`): using an account or
   commodity that is not declared at the insertion point asks first — "…is
   not a declared account — use it anyway?" — surfacing near-misses ("did
@@ -241,9 +260,10 @@ date, description, then account/amount pairs — with:
   provably does not balance cannot be finished
 
 Keys: `Enter` accepts a field (on an empty amount or an empty account line it
-finishes the transaction), `↑`/`↓` move between fields, `Tab`/`Shift-Tab`
-open the completion menu and then cycle it, `Tab`/`→` pick up the grey
-suggestion, `→` accepts the ghost suggestion, `Ctrl-U` clears the buffer,
+finishes the transaction) as typed — Enter never completes for you, so what
+is in the buffer is what you get, `↑`/`↓` move between fields,
+`Tab`/`Shift-Tab` complete and then, if the result is still ambiguous, open
+the menu and cycle it, `Tab`/`→` pick up the grey suggestion, `→` accepts the ghost suggestion, `Ctrl-U` clears the buffer,
 `Ctrl-W` deletes
 one word — on account fields one `:`-segment at a time — `Ctrl-E` opens the
 draft in `$EDITOR`, `Ctrl-C` aborts the current transaction. To leave, type
@@ -291,8 +311,8 @@ sort = false                  # keep transactions in date order
 insertion = "append"          # or "chronological"
 strict = false                # ask before using undeclared accounts/commodities
 half_life_days = 90           # frecency decay half-life
-account_matching = "substring"     # prefix | substring | segment | fuzzy
-description_matching = "substring"
+account_completion = "substring"     # prefix | substring | fuzzy
+description_completion = "substring"
 default_commodity = "EUR"     # written into bare amounts as visible, editable text
 equity_conversion = false     # append equity postings for multi-commodity transactions
 equity_conversion_account = "equity:conversion"

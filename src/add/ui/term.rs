@@ -230,6 +230,17 @@ impl Ui {
             KeyCode::Tab | KeyCode::BackTab => {
                 if let Some(s) = session.suggestion() {
                     session.draft.set_buffer(&s);
+                } else if let Some(t) = session.complete_buffer() {
+                    // Tab completes as far as the candidates unanimously
+                    // agree. If that settled it, get out of the way;
+                    // otherwise show what is left to choose between.
+                    session.draft.set_buffer(&t);
+                    let candidates = session.candidates();
+                    if candidates.len() > 1 {
+                        self.open_menu(candidates);
+                    } else {
+                        self.menu = None;
+                    }
                 } else {
                     let candidates = session.candidates();
                     self.open_menu(candidates);
@@ -685,6 +696,74 @@ mod tests {
             .map(|r| r.iter().map(|(t, _)| t.as_str()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn ui() -> Ui {
+        Ui {
+            menu: None,
+            note: Note::None,
+            drawn: 0,
+            cursor_row: 0,
+            menu_rows: 8,
+        }
+    }
+
+    /// Get to the first account prompt of a transaction.
+    fn at_account(s: &mut Session) {
+        s.submit();
+        s.draft.set_buffer("Rewe");
+        s.submit();
+    }
+
+    #[test]
+    fn tab_inserts_a_unique_completion_and_leaves_the_menu_shut() {
+        let (mut s, _t) = session();
+        let mut ui = ui();
+        at_account(&mut s);
+        s.draft.set_buffer("roc");
+        ui.navigate(&mut s, KeyCode::Tab);
+        assert_eq!(s.draft.buffer, "expenses:groceries");
+        assert!(ui.menu.is_none());
+    }
+
+    #[test]
+    fn tab_on_an_ambiguous_query_completes_as_far_as_it_can_and_opens_the_menu() {
+        let (mut s, _t) = session();
+        let mut ui = ui();
+        at_account(&mut s);
+        // Both accounts match `e`, and they agree on nothing, so this is
+        // the pure-menu case.
+        s.draft.set_buffer("e");
+        ui.navigate(&mut s, KeyCode::Tab);
+        assert_eq!(s.draft.buffer, "e");
+        let menu = ui.menu.as_ref().expect("menu should open");
+        assert_eq!(menu.candidates.len(), 2);
+        // A second Tab cycles it rather than re-completing.
+        ui.navigate(&mut s, KeyCode::Tab);
+        assert_eq!(ui.menu.as_ref().map(|m| m.selected), Some(1));
+    }
+
+    #[test]
+    fn tab_on_an_empty_account_opens_the_whole_list() {
+        let (mut s, _t) = session();
+        let mut ui = ui();
+        at_account(&mut s);
+        s.draft.set_buffer("");
+        ui.navigate(&mut s, KeyCode::Tab);
+        assert!(s.draft.buffer.is_empty());
+        assert!(ui.menu.is_some());
+    }
+
+    #[test]
+    fn tab_with_no_match_leaves_the_buffer_alone() {
+        let (mut s, _t) = session();
+        let mut ui = ui();
+        at_account(&mut s);
+        s.draft.set_buffer("zzz");
+        ui.navigate(&mut s, KeyCode::Tab);
+        assert_eq!(s.draft.buffer, "zzz");
+        assert!(ui.menu.is_none());
+        assert!(matches!(ui.note, Note::Info(_)));
     }
 
     #[test]

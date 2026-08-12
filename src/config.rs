@@ -33,18 +33,19 @@ impl EquityConversion {
     }
 }
 
-/// A completion matching strategy.
+/// A completion style. Account names are matched one colon-separated
+/// segment at a time under all three — no style ever matches across a `:`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Matching {
-    /// Classic prefix match.
+pub enum Completion {
+    /// Anchored prefix match, segment by segment: `ex:gro` →
+    /// `expenses:groceries`, but `gro` alone matches nothing.
     Prefix,
-    /// Middle-of-string match.
+    /// Middle-of-segment match, segments in order but gaps allowed:
+    /// `check` → `assets:bank:checking`.
     Substring,
-    /// Split the query on `:` and prefix-match each account component
-    /// (`ex:gro` → `expenses:groceries`).
-    Segment,
-    /// Subsequence match, ranked by quality.
+    /// Subsequence match within a segment, ranked by quality, gaps allowed:
+    /// `ckng` → `assets:bank:checking`.
     Fuzzy,
 }
 
@@ -70,11 +71,11 @@ pub struct Config {
     pub strict: bool,
     /// Frecency half-life in days.
     pub half_life_days: f64,
-    /// Matching for the account field. Substring by default, switching to
-    /// segment as soon as the query contains a colon.
-    pub account_matching: Matching,
-    /// Matching for the description field.
-    pub description_matching: Matching,
+    /// Completion style for the account field, matched segment by segment.
+    pub account_completion: Completion,
+    /// Completion style for the description field. Descriptions are plain
+    /// text, so a `:` in one is never a segment break.
+    pub description_completion: Completion,
     /// Default commodity offered as editable pre-filled text (the journal's
     /// `D` directive also supplies one; that takes precedence, being
     /// file-local truth).
@@ -96,8 +97,8 @@ impl Default for Config {
             insertion: Insertion::Append,
             strict: false,
             half_life_days: crate::add::index::DEFAULT_HALF_LIFE_DAYS,
-            account_matching: Matching::Substring,
-            description_matching: Matching::Substring,
+            account_completion: Completion::Substring,
+            description_completion: Completion::Substring,
             default_commodity: None,
             equity_conversion: EquityConversion::Off,
             equity_conversion_account: DEFAULT_EQUITY_CONVERSION_ACCOUNT.to_owned(),
@@ -128,8 +129,8 @@ struct Raw {
     insertion: Option<RawInsertion>,
     strict: Option<bool>,
     half_life_days: Option<f64>,
-    account_matching: Option<Matching>,
-    description_matching: Option<Matching>,
+    account_completion: Option<Completion>,
+    description_completion: Option<Completion>,
     default_commodity: Option<String>,
     equity_conversion: Option<bool>,
     equity_conversion_account: Option<String>,
@@ -266,11 +267,11 @@ fn apply_str(
     if let Some(v) = raw.half_life_days {
         cfg.half_life_days = v;
     }
-    if let Some(v) = raw.account_matching {
-        cfg.account_matching = v;
+    if let Some(v) = raw.account_completion {
+        cfg.account_completion = v;
     }
-    if let Some(v) = raw.description_matching {
-        cfg.description_matching = v;
+    if let Some(v) = raw.description_completion {
+        cfg.description_completion = v;
     }
     if let Some(v) = raw.default_commodity {
         cfg.default_commodity = Some(v);
@@ -324,8 +325,8 @@ mod tests {
         assert_eq!(cfg.insertion, Insertion::Append);
         assert!(!cfg.strict);
         assert!((cfg.half_life_days - 90.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.account_matching, Matching::Substring);
-        assert_eq!(cfg.description_matching, Matching::Substring);
+        assert_eq!(cfg.account_completion, Completion::Substring);
+        assert_eq!(cfg.description_completion, Completion::Substring);
         assert_eq!(cfg.default_commodity, None);
         assert!(!cfg.equity_conversion.is_on());
         assert_eq!(cfg.equity_conversion_account, "equity:conversion");
@@ -385,13 +386,13 @@ mod tests {
     #[test]
     fn enums_parse_from_lowercase() {
         let cfg = load_str(
-            Some("strict = true\ninsertion = \"chronological\"\naccount_matching = \"fuzzy\"\n"),
+            Some("strict = true\ninsertion = \"chronological\"\naccount_completion = \"fuzzy\"\n"),
             None,
         )
         .unwrap();
         assert!(cfg.strict);
         assert_eq!(cfg.insertion, Insertion::Chronological);
-        assert_eq!(cfg.account_matching, Matching::Fuzzy);
+        assert_eq!(cfg.account_completion, Completion::Fuzzy);
     }
 
     #[test]

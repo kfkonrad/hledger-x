@@ -24,7 +24,7 @@ src/
     index.rs       frecency indices
     ui/            field state machine, completion, live preview
       mod.rs       Draft/Session state machine, pre-fill, suggestions
-      complete.rs  the four matching strategies
+      complete.rs  the three completion styles, and what Tab inserts
       dates.rs     smart date resolution
       plain.rs     line-based frontend (stdin is not a tty)
       term.rs      raw-mode crossterm frontend

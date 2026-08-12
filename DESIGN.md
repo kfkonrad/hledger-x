@@ -573,17 +573,56 @@ transaction and how to leave must be discoverable without documentation.
 
 ## Completion
 
-**Matching**, configurable per field, all four available:
+**Style**, configurable per field (`account_completion`,
+`description_completion`), three available. Segmentation is not one of them —
+it is the frame all three run in, revised 2026-08 with the user. An account
+query is split on `:` and matched one segment at a time; **no style ever
+matches across a colon.**
 
-| Strategy | Behaviour |
+| Style | Behaviour on accounts |
 | --- | --- |
-| `prefix` | classic |
-| `substring` | middle-of-string |
-| `segment` | split query on `:`, prefix-match each account component — `ex:gro` → `expenses:groceries` |
-| `fuzzy` | subsequence, ranked by match quality |
+| `prefix` | anchored: query segment *i* against candidate segment *i*, no gaps. `ex:gro` → `expenses:groceries`; `gro` alone matches nothing, and `a:s` does not reach `assets:bank:savings` |
+| `substring` | middle-of-segment, segments in order with gaps allowed — `check` → `assets:bank:checking` |
+| `fuzzy` | subsequence within a segment, gaps allowed, ranked by match quality — `ckng` → `assets:bank:checking`, but `asbk` does not span `assets:bank` |
 
-Default for **accounts**: `substring`, switching to `segment` as soon as the
-query contains a colon. Default for **descriptions**: `substring`.
+`prefix` is anchored and the other two are not, deliberately. Anchoring
+`substring` would test `check` against the `assets` segment and never find
+`assets:bank:checking`, which is the case the style exists for; leaving
+`prefix` unanchored would make it something other than a prefix match.
+
+Default for both fields: `substring`. Descriptions are plain text — a `:` in
+one is ordinary (hledger's payee separator is `|`), so they are never
+segmented.
+
+**Tab completes**, it does not merely filter (revised 2026-08 — the first
+implementation only opened a menu, and selecting from it needed Enter). Tab
+inserts the longest prefix of the matches' common prefix that is both longer
+than what is typed and still matches *exactly the same candidates*. That
+second condition is load-bearing: completing must never widen the match set,
+which would silently drop a constraint the user typed. A unique match is
+inserted whole; a partial agreement is inserted and the menu opens on what
+is left; no match leaves the buffer untouched. Ranking orders the menu but
+never decides an insertion — only unanimity does, so a confident-looking
+fuzzy top hit can never be committed behind the user's back. An empty buffer
+does not complete: there Tab opens the whole candidate list, which is how
+history is browsed.
+
+**Enter never completes.** It submits the buffer literally, so `check` +
+Enter enters an account named `check` (caught by the new-account note, or by
+`strict`'s confirmation). hledger's own `add` completes on Enter; that
+implicitness is the thing being rejected, and the settled preference is
+explicit over implicit.
+
+**Accounts need no declaration.** hledger only requires `account` directives
+under `--strict`, so the completion pool is every account *used* in a posting
+anywhere in the include tree, plus every account declared anywhere (offering
+a declared-but-unused name is harmless). Accounts entered during a session
+join the pool the moment they are committed — available to later postings of
+the same transaction and to later transactions — scored at today, so they
+rank where a just-used account belongs. They stop counting as new: the
+"new to this journal" note fires once, and `strict` asks once. Undo removes
+completed transactions from the pool again; it does not un-ask the question,
+because the acceptance was deliberate either way.
 
 Fields and their completers: date (none), description (descriptions index),
 account (accounts index, conditioned on description), amount (commodities).
@@ -597,10 +636,11 @@ obvious answer.
 **Presentation** — both at once, fish-style:
 - ghost text of the top candidate, `→` accepts (zero extra keystrokes in the
   common case)
-- `Tab` or `Shift-Tab` opens the menu — on an empty buffer that is the whole
-  candidate list — and once open they cycle it, arrows navigate. Entries are
-  bare names — no hint columns — and the menu is as tall as the screen
-  allows, scrolling beyond that
+- `Tab` or `Shift-Tab` completes as far as the candidates agree; if that
+  settles it the menu stays shut, otherwise it opens on what is left — on an
+  empty buffer that is the whole candidate list — and once open they cycle
+  it, arrows navigate. Entries are bare names — no hint columns — and the
+  menu is as tall as the screen allows, scrolling beyond that
 
 ## Amounts and commodities
 

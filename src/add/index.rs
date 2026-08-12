@@ -60,7 +60,7 @@ impl Index {
         for (i, txn) in journal.transactions.iter().enumerate() {
             let weight = decay(today, txn.date, half_life_days);
             if !txn.description.is_empty() {
-                bump(&mut idx.descriptions, txn.description.clone(), txn, weight);
+                bump(&mut idx.descriptions, txn.description.clone(), txn.date, weight);
                 // Later transactions win ties: strictly-greater keeps the
                 // earlier one only when it is genuinely newer.
                 let slot = idx.templates.entry(txn.description.clone()).or_insert(i);
@@ -70,21 +70,57 @@ impl Index {
                 }
             }
             for p in &txn.postings {
-                bump(&mut idx.accounts, p.account.clone(), txn, weight);
+                bump(&mut idx.accounts, p.account.clone(), txn.date, weight);
                 if !txn.description.is_empty() {
                     bump(
                         &mut idx.by_description,
                         (txn.description.clone(), p.account.clone()),
-                        txn,
+                        txn.date,
                         weight,
                     );
                 }
                 if let Some(c) = &p.commodity {
-                    bump(&mut idx.commodities, c.clone(), txn, weight);
+                    bump(&mut idx.commodities, c.clone(), txn.date, weight);
                 }
             }
         }
         idx
+    }
+
+    /// Fold a transaction entered in *this session* into the indices, so the
+    /// accounts, description and commodities it introduces complete for the
+    /// rest of the session — hledger only requires `account` directives in
+    /// strict mode, and even there a name is usable the moment the user has
+    /// committed to it once.
+    ///
+    /// `templates` is deliberately left alone: it indexes into the journal,
+    /// which these transactions are not part of until they are written.
+    pub fn bump_session(
+        &mut self,
+        date: NaiveDate,
+        description: &str,
+        postings: &[(String, Option<String>)],
+        today: NaiveDate,
+        half_life_days: f64,
+    ) {
+        let weight = decay(today, date, half_life_days);
+        if !description.is_empty() {
+            bump(&mut self.descriptions, description.to_owned(), date, weight);
+        }
+        for (account, commodity) in postings {
+            bump(&mut self.accounts, account.clone(), date, weight);
+            if !description.is_empty() {
+                bump(
+                    &mut self.by_description,
+                    (description.to_owned(), account.clone()),
+                    date,
+                    weight,
+                );
+            }
+            if let Some(c) = commodity {
+                bump(&mut self.commodities, c.clone(), date, weight);
+            }
+        }
     }
 
     /// The template transaction for `description`, if any.
@@ -141,16 +177,16 @@ fn decay(today: NaiveDate, date: NaiveDate, half_life_days: f64) -> f64 {
 fn bump<K: std::hash::Hash + Eq>(
     map: &mut HashMap<K, Entry>,
     key: K,
-    txn: &Transaction,
+    date: NaiveDate,
     weight: f64,
 ) {
     let e = map.entry(key).or_insert(Entry {
         count: 0,
-        last_date: txn.date,
+        last_date: date,
         score: 0.0,
     });
     e.count = e.count.saturating_add(1);
-    e.last_date = e.last_date.max(txn.date);
+    e.last_date = e.last_date.max(date);
     e.score += weight;
 }
 

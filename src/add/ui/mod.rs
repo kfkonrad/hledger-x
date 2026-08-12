@@ -21,7 +21,7 @@ use crate::amount::{imbalance, parse_amount, render_amount, AmountCtx};
 use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
 use super::write::NewTransaction;
-use crate::config::{Config, Matching};
+use crate::config::{Completion, Config};
 use crate::fmt::posting::{parse_posting, render};
 
 /// The field currently being edited.
@@ -432,6 +432,29 @@ fn char_to_byte(s: &str, chars: usize) -> usize {
 }
 
 /// The running session: completed transactions plus the current draft.
+/// The completion problem for one field: which style and candidate shape
+/// apply, the part of the buffer being completed, and the text that has to
+/// go back in front of the result (only the amount field, which completes
+/// the trailing commodity of `12.00 EUR @ USD`).
+struct CompletionQuery {
+    style: Completion,
+    shape: complete::Shape,
+    text: String,
+    head: String,
+    pool: Vec<String>,
+}
+
+impl CompletionQuery {
+    /// Put a completed candidate back into buffer terms.
+    fn rejoin(&self, candidate: &str) -> String {
+        if self.head.is_empty() {
+            candidate.to_owned()
+        } else {
+            format!("{} {candidate}", self.head)
+        }
+    }
+}
+
 pub struct Session {
     /// Immutable context.
     pub ctx: SessionCtx,
@@ -439,6 +462,12 @@ pub struct Session {
     pub completed: Vec<NewTransaction>,
     /// The draft being edited.
     pub draft: Draft,
+    /// Accounts the user has committed to during this session, oldest
+    /// first. They complete like any other account, and they stop counting
+    /// as new — having accepted `expenses:coffee` once, the user should not
+    /// be asked about it again in the same sitting. Undo does not retract
+    /// them: the acceptance was deliberate either way.
+    entered_accounts: Vec<String>,
 }
 
 impl Session {
@@ -449,9 +478,58 @@ impl Session {
             ctx,
             completed: Vec::new(),
             draft: Draft::new(),
+            entered_accounts: Vec::new(),
         };
         s.reset_draft();
         s
+    }
+
+    /// The account completion pool: the journal's, with accounts introduced
+    /// in this session and not yet in the index put in front — they are the
+    /// freshest thing the user could want.
+    #[must_use]
+    pub fn account_pool(&self) -> Vec<String> {
+        let desc =
+            (!self.draft.description.is_empty()).then_some(self.draft.description.as_str());
+        let mut pool = self.ctx.account_pool(desc);
+        for a in self.entered_accounts.iter().rev() {
+            if !pool.iter().any(|x| x == a) {
+                pool.insert(0, a.clone());
+            }
+        }
+        pool
+    }
+
+    /// Whether `account` is already known: declared, used in the journal, or
+    /// entered earlier in this session.
+    fn account_known(&self, account: &str) -> bool {
+        self.ctx.declared_accounts_visible.contains(account)
+            || self.ctx.used_accounts.contains(account)
+            || self.entered_accounts.iter().any(|a| a == account)
+    }
+
+    /// Rebuild the indices over the journal plus everything completed so
+    /// far, so a description or commodity entered this session completes in
+    /// the next transaction. Cheap enough to redo wholesale, which keeps
+    /// undo correct for free.
+    fn reindex(&mut self) {
+        let half_life = self.ctx.config.half_life_days;
+        let today = self.ctx.today;
+        let mut index = Index::build(&self.ctx.journal, today, half_life);
+        for txn in &self.completed {
+            let postings: Vec<(String, Option<String>)> = txn
+                .postings
+                .iter()
+                .map(|(account, amount)| {
+                    let commodity = parse_amount(amount, &self.ctx.amount_ctx)
+                        .map(|a| a.commodity)
+                        .filter(|c| !c.is_empty());
+                    (account.clone(), commodity)
+                })
+                .collect();
+            index.bump_session(txn.date, &txn.description, &postings, today, half_life);
+        }
+        self.ctx.index = index;
     }
 
     /// Reset to a fresh draft at the date prompt (today ghost-suggested).
@@ -554,34 +632,58 @@ impl Session {
     /// Ranked completion candidates for the current field and buffer.
     #[must_use]
     pub fn candidates(&self) -> Vec<String> {
+        let Some(q) = self.completion_query() else {
+            return Vec::new();
+        };
+        let refs: Vec<&str> = q.pool.iter().map(String::as_str).collect();
+        complete::filter_ranked(q.style, q.shape, &q.text, &refs)
+            .into_iter()
+            .map(|c| q.rejoin(c))
+            .collect()
+    }
+
+    /// What Tab should put in the buffer, or `None` when completion makes no
+    /// progress and the menu should open instead.
+    #[must_use]
+    pub fn complete_buffer(&self) -> Option<String> {
+        let q = self.completion_query()?;
+        let refs: Vec<&str> = q.pool.iter().map(String::as_str).collect();
+        let completed = complete::complete(q.style, q.shape, &q.text, &refs)?;
+        let out = q.rejoin(&completed);
+        (out != self.draft.buffer).then_some(out)
+    }
+
+    /// The completion problem posed by the current field.
+    fn completion_query(&self) -> Option<CompletionQuery> {
         let query = self.draft.buffer.trim();
         match self.draft.field {
-            Field::Date => Vec::new(),
-            Field::Description => {
-                let ranked = self.ctx.index.ranked_descriptions();
-                complete::filter_ranked(self.ctx.config.description_matching, query, &ranked)
+            Field::Date => None,
+            Field::Description => Some(CompletionQuery {
+                style: self.ctx.config.description_completion,
+                // A `:` in a description is ordinary text, never a segment
+                // break — hledger's payee separator is `|`.
+                shape: complete::Shape::Plain,
+                text: query.to_owned(),
+                head: String::new(),
+                pool: self
+                    .ctx
+                    .index
+                    .ranked_descriptions()
                     .into_iter()
                     .map(ToOwned::to_owned)
-                    .collect()
-            }
-            Field::Account(_) => {
-                let desc = (!self.draft.description.is_empty())
-                    .then_some(self.draft.description.as_str());
-                let pool = self.ctx.account_pool(desc);
-                let refs: Vec<&str> = pool.iter().map(String::as_str).collect();
-                let strategy =
-                    complete::account_strategy(self.ctx.config.account_matching, query);
-                complete::filter_ranked(strategy, query, &refs)
-                    .into_iter()
-                    .map(ToOwned::to_owned)
-                    .collect()
-            }
+                    .collect(),
+            }),
+            Field::Account(_) => Some(CompletionQuery {
+                style: self.ctx.config.account_completion,
+                shape: complete::Shape::Account,
+                text: query.to_owned(),
+                head: String::new(),
+                pool: self.account_pool(),
+            }),
             Field::Amount(_) => {
                 // Commodities — the face commodity and equally the second
                 // one after a cost or assertion tail.
-                let Some((head, tail)) = split_commodity_query(query) else {
-                    return Vec::new();
-                };
+                let (head, tail) = split_commodity_query(query)?;
                 let mut pool: Vec<String> = self
                     .ctx
                     .index
@@ -594,17 +696,13 @@ impl Session {
                         pool.push(c.name.clone());
                     }
                 }
-                let refs: Vec<&str> = pool.iter().map(String::as_str).collect();
-                complete::filter_ranked(Matching::Prefix, tail, &refs)
-                    .into_iter()
-                    .map(|c| {
-                        if head.is_empty() {
-                            c.to_owned()
-                        } else {
-                            format!("{head} {c}")
-                        }
-                    })
-                    .collect()
+                Some(CompletionQuery {
+                    style: Completion::Prefix,
+                    shape: complete::Shape::Plain,
+                    text: tail.to_owned(),
+                    head: head.to_owned(),
+                    pool,
+                })
             }
         }
     }
@@ -681,7 +779,13 @@ impl Session {
         // Strict mode mirrors `hledger check accounts`: only declarations
         // visible at the insertion point count. hledger-x never declares
         // anything itself — the question is whether to *use* the name.
-        if !confirmed && self.ctx.strict && !self.ctx.declared_accounts_visible.contains(&text)
+        //
+        // An account accepted earlier in this session counts as settled:
+        // asking about `expenses:coffee` on every posting would be noise.
+        if !confirmed
+            && self.ctx.strict
+            && !self.ctx.declared_accounts_visible.contains(&text)
+            && !self.entered_accounts.iter().any(|a| a == &text)
         {
             let hint = self
                 .near_miss(&text)
@@ -691,9 +795,8 @@ impl Session {
             };
         }
         // Not strict: accept, but surface names that are genuinely new to
-        // the journal (neither declared nor ever used).
-        let brand_new = !self.ctx.declared_accounts_visible.contains(&text)
-            && !self.ctx.used_accounts.contains(&text);
+        // the journal (neither declared nor ever used) — once.
+        let brand_new = !self.account_known(&text);
         self.commit_account(i, &text);
         if brand_new && !confirmed {
             return Submit::AdvancedWithNote(format!("{text} is new to this journal"));
@@ -702,6 +805,11 @@ impl Session {
     }
 
     fn commit_account(&mut self, i: usize, text: &str) {
+        // Record it before it is written, so later postings of *this*
+        // transaction can complete it too.
+        if !self.entered_accounts.iter().any(|a| a == text) {
+            self.entered_accounts.push(text.to_owned());
+        }
         ensure_len(&mut self.draft.postings, i.saturating_add(1));
         if let Some(p) = self.draft.postings.get_mut(i) {
             text.clone_into(&mut p.0);
@@ -916,7 +1024,9 @@ impl Session {
         let (d, candidate) = best?;
         // Also accept segment near-misses like `exp:trav` for
         // `expenses:travel:train`, which levenshtein alone would miss.
-        let segmentish = complete::match_quality(Matching::Segment, name, candidate).is_some();
+        let segmentish =
+            complete::match_quality(Completion::Prefix, complete::Shape::Account, name, candidate)
+                .is_some();
         let close_enough = d <= name.chars().count().saturating_div(2).max(2);
         (segmentish || close_enough).then(|| candidate.clone())
     }
@@ -1015,12 +1125,14 @@ impl Session {
     /// Record a finished transaction and reset for the next one.
     pub fn complete(&mut self, txn: NewTransaction) {
         self.completed.push(txn);
+        self.reindex();
         self.reset_draft();
     }
 
     /// Undo the last completed transaction. Returns it, if any.
     pub fn undo(&mut self) -> Option<NewTransaction> {
         let t = self.completed.pop();
+        self.reindex();
         self.reset_draft();
         t
     }
@@ -1605,9 +1717,134 @@ mod tests {
         type_in(&mut s, "");
         let c = s.candidates();
         assert_eq!(c.first().map(String::as_str), Some("expenses:groceries"));
-        // Segment matching kicks in on a colon.
+        // Segment-wise matching: `ex` and `tra` each match their own
+        // segment, never across the colon.
         type_in(&mut s, "ex:tra");
         assert_eq!(s.candidates(), vec!["expenses:travel:train"]);
+    }
+
+    #[test]
+    fn tab_completes_a_unique_account_outright() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        // Substring (the default): `roc` is unique mid-segment, so Tab
+        // finishes it — no menu, no Enter to select.
+        type_in(&mut s, "roc");
+        assert_eq!(
+            s.complete_buffer().as_deref(),
+            Some("expenses:groceries")
+        );
+        // Ambiguous: nothing unanimous past `assets:bank:`, so Tab stops
+        // there and the caller opens the menu.
+        type_in(&mut s, "ban");
+        assert_eq!(s.complete_buffer().as_deref(), Some("assets:bank:checking"));
+        // No match leaves the buffer alone.
+        type_in(&mut s, "zzz");
+        assert_eq!(s.complete_buffer(), None);
+    }
+
+    #[test]
+    fn tab_completes_a_commodity_after_the_amount() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "5 E");
+        assert_eq!(s.complete_buffer().as_deref(), Some("5 EUR"));
+    }
+
+    #[test]
+    fn an_account_entered_this_session_completes_in_the_next_transaction() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Cafe");
+        s.submit();
+        // Brand new to the journal — noted once, and accepted.
+        type_in(&mut s, "expenses:coffee");
+        assert!(matches!(s.submit(), Submit::AdvancedWithNote(_)));
+        type_in(&mut s, "3.20 EUR");
+        s.submit();
+        type_in(&mut s, "assets:cash");
+        s.submit();
+        type_in(&mut s, "");
+        let Submit::Done(txn) = s.submit() else {
+            panic!("expected the transaction to finish");
+        };
+        s.complete(*txn);
+
+        // Next transaction: it completes like any other account…
+        s.submit();
+        type_in(&mut s, "Cafe");
+        s.submit();
+        type_in(&mut s, "coff");
+        assert_eq!(s.candidates(), vec!["expenses:coffee"]);
+        let completed = s.complete_buffer().unwrap();
+        assert_eq!(completed, "expenses:coffee");
+        // …and is no longer announced as new.
+        type_in(&mut s, &completed);
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn an_account_from_an_earlier_posting_completes_in_the_same_transaction() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Cafe");
+        s.submit();
+        type_in(&mut s, "expenses:coffee");
+        s.submit();
+        type_in(&mut s, "3.20 EUR");
+        s.submit();
+        type_in(&mut s, "coff");
+        assert_eq!(s.candidates(), vec!["expenses:coffee"]);
+    }
+
+    #[test]
+    fn strict_mode_asks_about_a_session_account_only_once() {
+        let src = "account a:b\n";
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(src, cfg);
+        s.submit();
+        type_in(&mut s, "X");
+        s.submit();
+        type_in(&mut s, "expenses:coffee");
+        assert!(matches!(s.submit(), Submit::Confirm { .. }));
+        assert_eq!(s.submit_confirmed(), Submit::Advanced);
+        // Unitless: strict has no commodity to question here.
+        type_in(&mut s, "3.20");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Same undeclared account again: already settled this session.
+        type_in(&mut s, "expenses:coffee");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn undo_retracts_a_session_transaction_from_the_completion_pool() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Pharmacy");
+        s.submit();
+        type_in(&mut s, "expenses:health");
+        s.submit();
+        type_in(&mut s, "9.99 EUR");
+        s.submit();
+        type_in(&mut s, "assets:cash");
+        s.submit();
+        type_in(&mut s, "");
+        let Submit::Done(txn) = s.submit() else {
+            panic!("expected the transaction to finish");
+        };
+        s.complete(*txn);
+        assert!(s.ctx.index.descriptions.contains_key("Pharmacy"));
+        s.undo();
+        assert!(!s.ctx.index.descriptions.contains_key("Pharmacy"));
     }
 
     #[test]
