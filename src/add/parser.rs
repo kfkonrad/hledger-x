@@ -9,24 +9,32 @@
 //!
 //! There are **two** directive scope models, empirically distinct:
 //!
-//! 1. *Parse state* (`decimal-mark`, `D`) — file-scoped, inherited by included
-//!    files, discarded when the include returns.
-//! 2. *Declarations* (`account`, `commodity`) — journal-wide, never discarded,
-//!    but visible only from their flattened-stream position forward.
+//! 1. *Parse state* (`decimal-mark`, `D`, `Y`, `apply account`, `alias`) —
+//!    file-scoped, inherited by included files, discarded when the include
+//!    returns.
+//! 2. *Declarations* (`account`, `commodity`, `payee`, `tag`) — journal-wide,
+//!    never discarded, but visible only from their flattened-stream position
+//!    forward.
 //!
 //! Transactions are parsed lexically, not semantically: the amount side of a
 //! posting stays opaque text. A historical number is never interpreted.
+//!
+//! Account names, by contrast, *are* interpreted — they have to be. Under an
+//! `apply account` block or an `alias`, the text in the file is not the
+//! account hledger sees, and an index full of half-names would poison
+//! completion silently. See [`crate::add::scope`].
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::NaiveDate;
+use chrono::{Datelike as _, NaiveDate};
 
+use crate::add::scope::{Alias, Origin, Scope};
 use crate::lex::{
-    closes_comment_block, directive_arg, is_indented_non_blank, opens_comment_block, opens_txn,
-    rstrip, split_account_amount, split_amount, split_comment,
+    closes_comment_block, directive_arg, directive_rest, is_directive, is_indented_non_blank,
+    opens_comment_block, opens_txn, rstrip, split_account_amount, split_amount, split_comment,
 };
 
 /// Parse state — scope model 1.
@@ -39,6 +47,12 @@ pub struct ParseState {
     pub decimal_mark: Option<char>,
     /// `D` directive's sample amount (raw text, e.g. `1000.00 EUR`), if any.
     pub default_commodity: Option<String>,
+    /// `Y`/`year` directive in effect. `None` means partial dates fall back to
+    /// the current year, which is what hledger does (verified — the first
+    /// control for this used the current year and so proved nothing).
+    pub year: Option<i32>,
+    /// `apply account` / `alias` rewriting in effect.
+    pub scope: Scope,
 }
 
 /// A declared account — scope model 2.
@@ -66,7 +80,8 @@ pub struct CommodityDecl {
 /// One posting of a historical transaction. The amount side is opaque text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawPosting {
-    /// Account name.
+    /// Account name, **resolved** — `apply account` and `alias` applied, so
+    /// this is the name hledger sees, not necessarily the text in the file.
     pub account: String,
     /// Everything after the account/amount separator, verbatim (amount, cost,
     /// assertion — but not the inline comment). Empty for a bare posting.
@@ -74,6 +89,9 @@ pub struct RawPosting {
     /// The commodity token extracted lexically from `amount`, when the lexer
     /// finds one. Used for completion pools only, never for arithmetic.
     pub commodity: Option<String>,
+    /// The posting's inline comment including the leading `;`, if any. Feeds
+    /// the tag pool and comment pre-fill.
+    pub comment: Option<String>,
 }
 
 /// A historical transaction, parsed lexically.
@@ -83,6 +101,8 @@ pub struct Transaction {
     pub date: NaiveDate,
     /// Description as written, status marker and inline comment stripped.
     pub description: String,
+    /// The header's inline comment including the leading `;`, if any.
+    pub comment: Option<String>,
     /// Postings in order.
     pub postings: Vec<RawPosting>,
     /// Index into [`Journal::files`].
@@ -124,6 +144,23 @@ pub struct SourceFile {
     /// each one pulls in. What those files declare comes into effect at that
     /// line, not before it.
     pub includes: Vec<IncludeSpan>,
+    /// Parse state checkpoints: `(0-based line, state in effect from there)`,
+    /// ascending. `insertion = chronological` can land anywhere in the file,
+    /// including inside a *closed* `apply account` region, so the write path
+    /// needs the state at an arbitrary line rather than only at eof.
+    pub states: Vec<(usize, ParseState)>,
+}
+
+impl SourceFile {
+    /// The parse state in effect at 0-based `line` of this file.
+    #[must_use]
+    pub fn state_at(&self, line: usize) -> &ParseState {
+        self.states
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= line)
+            .map_or(&self.state_at_eof, |(_, s)| s)
+    }
 }
 
 /// The semantic product of the parse, over the whole include tree.
@@ -137,6 +174,10 @@ pub struct Journal {
     pub commodities: Vec<CommodityDecl>,
     /// `D` directives: the sample amount as written, with stream positions.
     pub defaults: Vec<Declaration>,
+    /// `payee` declarations with stream positions.
+    pub payees: Vec<Declaration>,
+    /// `tag` declarations with stream positions.
+    pub tags: Vec<Declaration>,
     /// Transactions in stream order.
     pub transactions: Vec<Transaction>,
     /// Non-fatal problems (missing includes, skipped transactions).
@@ -173,15 +214,20 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// The declarations of one kind visible at `pos` in the flattened stream.
+fn visible_at(decls: &[Declaration], pos: usize) -> Vec<&str> {
+    decls
+        .iter()
+        .filter(|d| d.pos < pos)
+        .map(|d| d.name.as_str())
+        .collect()
+}
+
 impl Journal {
     /// Declared account names visible at `pos` in the flattened stream.
     #[must_use]
     pub fn accounts_visible_at(&self, pos: usize) -> Vec<&str> {
-        self.accounts
-            .iter()
-            .filter(|d| d.pos < pos)
-            .map(|d| d.name.as_str())
-            .collect()
+        visible_at(&self.accounts, pos)
     }
 
     /// Whether any `account` directives exist anywhere in the tree (drives the
@@ -189,6 +235,19 @@ impl Journal {
     #[must_use]
     pub const fn declares_accounts(&self) -> bool {
         !self.accounts.is_empty()
+    }
+
+    /// Declared payee names visible at `pos` — what `hledger check payees`
+    /// would accept there.
+    #[must_use]
+    pub fn payees_visible_at(&self, pos: usize) -> Vec<&str> {
+        visible_at(&self.payees, pos)
+    }
+
+    /// Declared tag names visible at `pos`.
+    #[must_use]
+    pub fn tags_visible_at(&self, pos: usize) -> Vec<&str> {
+        visible_at(&self.tags, pos)
     }
 
     /// The file entry for `path`, if it is part of the include tree.
@@ -333,6 +392,9 @@ impl FileMap {
         // A `comment` block is opaque: a date-looking line inside it is prose,
         // not a transaction, and must not become an insertion point.
         let mut opaque = false;
+        // The file's own `Y` directives, so a partial-dated transaction still
+        // gets a date for chronological insertion and the sortedness check.
+        let mut year: Option<i32> = None;
         while let Some(line) = lines.get(i) {
             if opaque {
                 opaque = !closes_comment_block(line);
@@ -350,9 +412,12 @@ impl FileMap {
                 transactions.push(TxnSpan {
                     start,
                     end: i,
-                    date: parse_date(date_tok),
+                    date: parse_date(date_tok, year),
                 });
             } else {
+                if let Some(y) = year_directive(line) {
+                    year = Some(y);
+                }
                 i = i.saturating_add(1);
             }
         }
@@ -421,6 +486,8 @@ impl Walk {
             eof_pos: 0,
             state_at_eof: ParseState::default(),
             includes: Vec::new(),
+            // The inherited state is in effect from the file's first line.
+            states: vec![(0, state.clone())],
         });
 
         let lines: Vec<&str> = crate::fmt::lines(src);
@@ -475,46 +542,25 @@ impl Walk {
                     self.pos = self.pos.saturating_add(1);
                     i = i.saturating_add(1);
                 }
-                match parse_transaction(line, &run, file_idx, lineno, line_pos) {
+                match parse_transaction(line, &run, file_idx, lineno, line_pos, &state) {
                     Ok(txn) => self.journal.transactions.push(txn),
                     Err(why) => self.journal.warnings.push(format!(
                         "{}:{lineno}: skipping unparseable transaction ({why})",
                         crate::errors::display_path(path)
                     )),
                 }
-            } else if let Some(pattern) = directive_arg(line, "include") {
-                let start_pos = self.pos;
-                self.include(path, pattern, &state)?;
-                let span = IncludeSpan {
-                    line: i.saturating_sub(1),
-                    start_pos,
-                    end_pos: self.pos,
-                };
-                if let Some(entry) = self.journal.files.get_mut(file_idx) {
-                    entry.includes.push(span);
-                }
-            } else if let Some(name) = directive_arg(line, "account") {
-                self.journal.accounts.push(Declaration {
-                    name: name.to_owned(),
-                    pos: line_pos,
-                });
-            } else if let Some(sample) = directive_arg(line, "commodity") {
-                open_commodity = Some(self.journal.commodities.len());
-                self.journal
-                    .commodities
-                    .push(parse_commodity(sample, line_pos));
-            } else if let Some(mark) = directive_arg(line, "decimal-mark") {
-                state.decimal_mark = mark.chars().next();
-            } else if let Some(sample) = directive_arg(line, "D") {
-                state.default_commodity = Some(sample.to_owned());
-                self.journal.defaults.push(Declaration {
-                    name: sample.to_owned(),
-                    pos: line_pos,
-                });
+                continue; // the state cannot change inside a transaction
             }
-            // Anything else — blank lines, comments, other directives,
-            // indented lines outside a transaction — is ignored: `add` is an
-            // entry tool, not a validator.
+
+            let at = Origin {
+                file: file_idx,
+                line: lineno,
+            };
+            if self.directive(line, path, at, line_pos, &mut state, &mut open_commodity)? {
+                // A parse-state directive: it takes effect from the next line,
+                // which `i` already points at.
+                self.checkpoint(file_idx, i, &state);
+            }
         }
 
         if let Some(entry) = self.journal.files.get_mut(file_idx) {
@@ -522,6 +568,105 @@ impl Walk {
             entry.state_at_eof = state;
         }
         Ok(())
+    }
+
+    /// Handle one non-transaction line. Returns whether it changed the parse
+    /// state, which is what needs a checkpoint recorded.
+    ///
+    /// Anything unrecognized — blank lines, comments, other directives — is
+    /// ignored: `add` is an entry tool, not a validator.
+    fn directive(
+        &mut self,
+        line: &str,
+        path: &Path,
+        at: Origin,
+        line_pos: usize,
+        state: &mut ParseState,
+        open_commodity: &mut Option<usize>,
+    ) -> Result<bool, ParseError> {
+        if let Some(pattern) = directive_arg(line, "include") {
+            // An include's declarations escape into the parent, but its parse
+            // state does not, so nothing to checkpoint here.
+            let start_pos = self.pos;
+            self.include(path, pattern, state)?;
+            let span = IncludeSpan {
+                line: at.line.saturating_sub(1),
+                start_pos,
+                end_pos: self.pos,
+            };
+            if let Some(entry) = self.journal.files.get_mut(at.file) {
+                entry.includes.push(span);
+            }
+        } else if let Some(name) = directive_arg(line, "account") {
+            // `apply account` prefixes declarations too (verified, AA4):
+            // inside `apply account assets`, `account checking` declares
+            // `assets:checking`, and declaring the resolved name there is the
+            // error.
+            self.journal.accounts.push(Declaration {
+                name: state.scope.resolve(name),
+                pos: line_pos,
+            });
+        } else if let Some(sample) = directive_arg(line, "commodity") {
+            *open_commodity = Some(self.journal.commodities.len());
+            self.journal
+                .commodities
+                .push(parse_commodity(sample, line_pos));
+        } else if let Some(name) = directive_rest(line, "payee") {
+            self.journal.payees.push(Declaration {
+                name: name.to_owned(),
+                pos: line_pos,
+            });
+        } else if let Some(name) = directive_rest(line, "tag") {
+            self.journal.tags.push(Declaration {
+                name: name.to_owned(),
+                pos: line_pos,
+            });
+        } else if let Some(mark) = directive_arg(line, "decimal-mark") {
+            state.decimal_mark = mark.chars().next();
+            return Ok(true);
+        } else if let Some(sample) = directive_arg(line, "D") {
+            state.default_commodity = Some(sample.to_owned());
+            self.journal.defaults.push(Declaration {
+                name: sample.to_owned(),
+                pos: line_pos,
+            });
+            return Ok(true);
+        } else if let Some(y) = year_directive(line) {
+            state.year = Some(y);
+            return Ok(true);
+        } else if let Some(prefix) = directive_rest(line, "apply account") {
+            state.scope.push_apply(prefix, at);
+            return Ok(true);
+        } else if is_directive(line, "end apply account") {
+            state.scope.pop_apply();
+            return Ok(true);
+        } else if is_directive(line, "end aliases") {
+            state.scope.clear_aliases();
+            return Ok(true);
+        } else if let Some(arg) = directive_rest(line, "alias") {
+            if let Some(alias) = Alias::parse(arg, at) {
+                state.scope.push_alias(alias);
+                return Ok(true);
+            }
+            self.journal.warnings.push(format!(
+                "{}:{}: ignoring alias that is not `OLD=NEW` or `/REGEX/=REPLACEMENT`",
+                crate::errors::display_path(path),
+                at.line
+            ));
+        }
+        Ok(false)
+    }
+
+    /// Record the parse state in effect from 0-based `line` of `file_idx`.
+    fn checkpoint(&mut self, file_idx: usize, line: usize, state: &ParseState) {
+        if let Some(entry) = self.journal.files.get_mut(file_idx) {
+            // A directive on the very first line replaces the inherited entry
+            // rather than adding a redundant one.
+            if entry.states.last().is_some_and(|(at, _)| *at == line) {
+                entry.states.pop();
+            }
+            entry.states.push((line, state.clone()));
+        }
     }
 
     /// Expand and walk one `include` directive.
@@ -614,12 +759,13 @@ fn parse_transaction(
     file: usize,
     line: usize,
     pos: usize,
+    state: &ParseState,
 ) -> Result<Transaction, String> {
-    let (body, _comment) = split_comment(header);
+    let (body, comment) = split_comment(header);
     let mut parts = body.splitn(2, char::is_whitespace);
     let date_tok = parts.next().unwrap_or_default();
     let rest = parts.next().unwrap_or_default();
-    let date = parse_date(date_tok).ok_or_else(|| format!("bad date {date_tok:?}"))?;
+    let date = parse_date(date_tok, state.year).ok_or_else(|| format!("bad date {date_tok:?}"))?;
     let description = strip_status(rest).to_owned();
 
     let mut postings = Vec::new();
@@ -628,7 +774,7 @@ fn parse_transaction(
         if s.starts_with(';') {
             continue; // in-transaction comment line
         }
-        let (pbody, _comment) = split_comment(s);
+        let (pbody, comment) = split_comment(s);
         let (account, amount) = split_account_amount(pbody);
         // A posting may carry a status flag of its own (`* assets:bank`).
         // It is not part of the account name, and indexing it as one made an
@@ -641,18 +787,22 @@ fn parse_transaction(
         let toks: Vec<&str> = amount.split_whitespace().collect();
         let (_num, commodity, _rest) = split_amount(&toks);
         postings.push(RawPosting {
-            account: account.to_owned(),
+            // Resolved, so the index holds the account hledger sees rather
+            // than the remainder the file happens to spell it with.
+            account: state.scope.resolve(account),
             amount: amount.to_owned(),
             commodity: if commodity.is_empty() {
                 None
             } else {
                 Some(commodity)
             },
+            comment: comment.map(ToOwned::to_owned),
         });
     }
     Ok(Transaction {
         date,
         description,
+        comment: comment.map(ToOwned::to_owned),
         postings,
         file,
         line,
@@ -661,15 +811,28 @@ fn parse_transaction(
 }
 
 /// Parse a header's primary date. A secondary date (`=DATE`) is dropped.
-/// Only full `Y-M-D` dates (separators `-`, `/`, `.`) are accepted; partial
-/// dates need the `Y` directive, which is epic 3.
-fn parse_date(token: &str) -> Option<NaiveDate> {
+///
+/// A full `Y-M-D` date (separators `-`, `/`, `.`) is taken as written. A
+/// partial `M-D` date takes the `Y`/`year` directive in effect, falling back
+/// to the current year — which is what hledger does, so a partial date is
+/// always resolvable and never skips its transaction.
+fn parse_date(token: &str, year: Option<i32>) -> Option<NaiveDate> {
     let primary = token.split('=').next().unwrap_or_default();
     let parts: Vec<&str> = primary.split(['/', '-', '.']).collect();
-    let [y, m, d] = parts.as_slice() else {
-        return None;
-    };
-    NaiveDate::from_ymd_opt(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?)
+    match parts.as_slice() {
+        [y, m, d] => NaiveDate::from_ymd_opt(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?),
+        [m, d] => {
+            let y = year.unwrap_or_else(|| chrono::Local::now().date_naive().year());
+            NaiveDate::from_ymd_opt(y, m.parse().ok()?, d.parse().ok()?)
+        }
+        _ => None,
+    }
+}
+
+/// The year of a `Y 2019` / `year 2019` directive.
+fn year_directive(line: &str) -> Option<i32> {
+    let arg = directive_arg(line, "Y").or_else(|| directive_arg(line, "year"))?;
+    arg.parse().ok()
 }
 
 /// Drop a leading `*` or `!` status marker from a description.
@@ -1114,11 +1277,225 @@ mod tests {
     fn unknown_directives_are_ignored_silently() {
         let t = tree(&[(
             "main.journal",
-            "payee Rewe\ntag project\nP 2026-01-01 USD 0.9 EUR\napply account assets\nend apply account\n",
+            "P 2026-01-01 USD 0.9 EUR\nN EUR\nassert foo\n",
         )]);
         let j = parse(&t, "main.journal");
         assert!(j.warnings.is_empty());
         assert!(j.transactions.is_empty());
+    }
+
+    // ---- epic 3: payee and tag declarations (scope model 2) ----
+
+    #[test]
+    fn payee_and_tag_declarations_carry_stream_positions() {
+        let t = tree(&[
+            (
+                "main.journal",
+                "include conf.journal\npayee Rewe\ntag project\n",
+            ),
+            ("conf.journal", "payee Deutsche Bahn\ntag client\n"),
+        ]);
+        let j = parse(&t, "main.journal");
+        let payees: Vec<&str> = j.payees.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(payees, vec!["Deutsche Bahn", "Rewe"]);
+        let tags: Vec<&str> = j.tags.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(tags, vec!["client", "project"]);
+
+        // Position-sensitive, exactly like `account`.
+        let conf = j.file(&t.path().join("conf.journal")).unwrap();
+        assert_eq!(j.payees_visible_at(conf.eof_pos), vec!["Deutsche Bahn"]);
+        let main = j.file(&t.path().join("main.journal")).unwrap();
+        assert_eq!(
+            j.payees_visible_at(main.eof_pos),
+            vec!["Deutsche Bahn", "Rewe"]
+        );
+    }
+
+    #[test]
+    fn a_payee_name_may_contain_a_run_of_spaces() {
+        // `directive_arg`'s 2-space annotation cut would truncate this.
+        let t = tree(&[("main.journal", "payee Cafe  Central\n")]);
+        assert_eq!(parse(&t, "main.journal").payees[0].name, "Cafe  Central");
+    }
+
+    // ---- epic 3: Y / year (scope model 1) ----
+
+    #[test]
+    fn the_year_directive_resolves_partial_dates() {
+        // DESIGN test Y1 / Y5 / Y6.
+        let t = tree(&[(
+            "main.journal",
+            "Y 2019\n01-15 first\n    a  1 EUR\n\nY 2021\n03-03 second\n    a  1 EUR\n\n2024-06-06 full\n    a  1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let dates: Vec<NaiveDate> = j.transactions.iter().map(|t| t.date).collect();
+        assert_eq!(dates, vec![d(2019, 1, 15), d(2021, 3, 3), d(2024, 6, 6)]);
+        assert!(j.warnings.is_empty());
+    }
+
+    #[test]
+    fn the_long_year_spelling_works_too() {
+        let t = tree(&[("main.journal", "year 2019\n01-15 x\n    a  1 EUR\n")]);
+        assert_eq!(
+            parse(&t, "main.journal").transactions[0].date,
+            d(2019, 1, 15)
+        );
+    }
+
+    #[test]
+    fn a_partial_date_without_a_year_directive_takes_the_current_year() {
+        // DESIGN test Y2 — the control that nearly proved nothing. A partial
+        // date is always resolvable, so it never skips its transaction.
+        let t = tree(&[("main.journal", "01-15 x\n    a  1 EUR\n")]);
+        let j = parse(&t, "main.journal");
+        let this_year = chrono::Local::now().date_naive().year();
+        assert_eq!(j.transactions[0].date, d(this_year, 1, 15));
+        assert!(j.warnings.is_empty());
+    }
+
+    #[test]
+    fn the_year_directive_is_parse_state_not_a_declaration() {
+        // DESIGN tests Y3 and Y4: inherited into includes, discarded on
+        // return.
+        let t = tree(&[
+            (
+                "main.journal",
+                "Y 2019\ninclude sub.journal\n02-20 parent-after\n    a  1 EUR\n",
+            ),
+            ("sub.journal", "01-15 in-include\n    a  1 EUR\n"),
+            (
+                "main2.journal",
+                "include opener.journal\n02-20 after\n    a  1 EUR\n",
+            ),
+            ("opener.journal", "Y 2019\n01-15 inside\n    a  1 EUR\n"),
+        ]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.transactions[0].date, d(2019, 1, 15)); // into the include
+        assert_eq!(j.transactions[1].date, d(2019, 2, 20)); // still after it
+
+        let j2 = parse(&t, "main2.journal");
+        let this_year = chrono::Local::now().date_naive().year();
+        assert_eq!(j2.transactions[0].date, d(2019, 1, 15));
+        assert_eq!(j2.transactions[1].date, d(this_year, 2, 20)); // discarded
+    }
+
+    // ---- epic 3: apply account / alias resolution on read ----
+
+    #[test]
+    fn apply_account_resolves_posting_accounts() {
+        let t = tree(&[(
+            "main.journal",
+            "apply account assets:bank\n2026-01-05 x\n    checking   1 EUR\n    savings   -1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let names: Vec<&str> = j.transactions[0]
+            .postings
+            .iter()
+            .map(|p| p.account.as_str())
+            .collect();
+        assert_eq!(names, vec!["assets:bank:checking", "assets:bank:savings"]);
+    }
+
+    #[test]
+    fn apply_account_prefixes_account_declarations() {
+        // DESIGN test AA4 — the surprise. Verified against hledger 1.99 with
+        // a control that fails.
+        let t = tree(&[(
+            "main.journal",
+            "apply account assets\naccount checking\nend apply account\naccount cash\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let names: Vec<&str> = j.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["assets:checking", "cash"]);
+    }
+
+    #[test]
+    fn an_unclosed_apply_account_runs_to_end_of_file() {
+        // DESIGN test AA5. Unclosed regions are legal, which is exactly what
+        // an `append` insertion lands inside of.
+        let t = tree(&[(
+            "main.journal",
+            "apply account a\n2026-01-05 x\n    q  1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.transactions[0].postings[0].account, "a:q");
+        let main = j.file(&t.path().join("main.journal")).unwrap();
+        assert!(main.state_at_eof.scope.is_active());
+        assert_eq!(main.state_at_eof.scope.prefix().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn apply_account_is_discarded_when_an_include_returns() {
+        let t = tree(&[
+            (
+                "main.journal",
+                "include opener.journal\n2026-01-06 after\n    q  1 EUR\n",
+            ),
+            (
+                "opener.journal",
+                "apply account a\n2026-01-05 inside\n    q  1 EUR\n",
+            ),
+        ]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.transactions[0].postings[0].account, "a:q");
+        assert_eq!(j.transactions[1].postings[0].account, "q");
+    }
+
+    #[test]
+    fn aliases_resolve_and_end_aliases_stops_them() {
+        let t = tree(&[(
+            "main.journal",
+            "alias bank=assets:checking\n2026-01-05 x\n    bank      1 EUR\n    bank:sub  1 EUR\n\nend aliases\n\n2026-01-06 y\n    bank  1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let first: Vec<&str> = j.transactions[0]
+            .postings
+            .iter()
+            .map(|p| p.account.as_str())
+            .collect();
+        assert_eq!(first, vec!["assets:checking", "assets:checking:sub"]);
+        assert_eq!(j.transactions[1].postings[0].account, "bank");
+    }
+
+    #[test]
+    fn an_unparseable_alias_warns_and_is_skipped() {
+        let t = tree(&[(
+            "main.journal",
+            "alias nonsense\n2026-01-05 x\n    q  1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.transactions[0].postings[0].account, "q");
+        assert_eq!(j.warnings.len(), 1);
+        assert!(j.warnings[0].contains("alias"), "{}", j.warnings[0]);
+    }
+
+    #[test]
+    fn state_checkpoints_answer_for_an_arbitrary_line() {
+        // What `insertion = chronological` needs: a mid-file insertion can
+        // land inside a *closed* region.
+        let src = "2026-01-01 a\n    q  1 EUR\n\napply account P\n\n2026-01-05 b\n    q  1 EUR\n\nend apply account\n\n2026-01-10 c\n    q  1 EUR\n";
+        let t = tree(&[("main.journal", src)]);
+        let j = parse(&t, "main.journal");
+        let f = j.file(&t.path().join("main.journal")).unwrap();
+        // Line 0 is before the block, line 5 is inside it, line 10 after.
+        assert!(!f.state_at(0).scope.is_active());
+        assert_eq!(f.state_at(5).scope.prefix().as_deref(), Some("P"));
+        assert!(!f.state_at(10).scope.is_active());
+        assert!(!f.state_at_eof.scope.is_active());
+    }
+
+    #[test]
+    fn posting_and_header_comments_are_captured() {
+        let t = tree(&[(
+            "main.journal",
+            "2026-01-05 Rewe  ; trip: berlin\n    a  1 EUR  ; note: x\n    b  -1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let txn = &j.transactions[0];
+        assert_eq!(txn.description, "Rewe");
+        assert_eq!(txn.comment.as_deref(), Some("; trip: berlin"));
+        assert_eq!(txn.postings[0].comment.as_deref(), Some("; note: x"));
+        assert_eq!(txn.postings[1].comment, None);
     }
 
     #[test]

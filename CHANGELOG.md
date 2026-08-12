@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Added
+- `payee` directive support, and descriptions are now split into `payee | note` as hledger splits them. Declared payees
+  join the description completion pool; a payee that is neither declared nor used anywhere in the journal is accepted
+  with a note and a "did you mean …?" — so entering `bahn` when `Deutsche Bahn` exists no longer quietly forks the
+  payee. Under `strict`, an undeclared payee asks first, mirroring `hledger check payees`, which likewise tests only
+  the payee half. Transaction templates and account ranking key on the payee too, so putting a distinct note on every
+  entry no longer stops them matching
+- Comments in `hledger-x add`, entered inline: a `;` in the description or an amount makes the rest of that field the
+  comment, exactly as the journal line reads, so entering no comment costs no extra keystrokes. Past the `;`, `Tab`
+  completes tag names from `tag` directives and from tags already used in the journal
+- `Y` / `year` directive support: partial dates like `01-15` now resolve instead of skipping their transaction with a
+  warning. Dates are always *written* in full `YYYY-MM-DD` form
+- `apply account` and `alias` support, both directions: account names are resolved on read, so completion and the live
+  preview show the name hledger sees rather than the remainder the file spells it with, and written back in the form the
+  region at the insertion point requires. Where an account cannot be expressed there at all, `add` refuses and says
+  which directive is responsible instead of silently entering a different account
+
+### Fixed
+- `insertion = "chronological"` could place a transaction inside an `apply account` region, and appending could land
+  inside an unclosed one; both wrote fully-qualified names that hledger then read with the prefix applied twice
+
 ## [0.3.0]
 
 ### Added

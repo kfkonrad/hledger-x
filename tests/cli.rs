@@ -66,14 +66,32 @@ fn run(args: &[&str], stdin: &str) -> Output {
     let dir: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "_empty"].iter().collect();
     // Shared by every caller, so it is created but never removed.
     fs::create_dir_all(&dir).unwrap();
+    // Shadow the repository's own `.hledger-x.toml` — see `scratch()`.
+    write(
+        &dir,
+        ".hledger-x.toml",
+        "# intentionally empty: see scratch()\n",
+    );
     run_in(&dir, args, stdin)
 }
 
 /// A scratch directory unique to the calling test.
+///
+/// It gets an empty `.hledger-x.toml` of its own. `run_env` isolates `$HOME`
+/// and `$XDG_CONFIG_HOME`, but a *local* config is discovered by walking up
+/// from the working directory, and walking up from `target/tmp/<name>/`
+/// reaches the repository root — whose `.hledger-x.toml` would otherwise
+/// decide how these tests behave. Only the nearest local file is read, so an
+/// empty one here shadows it. A test that wants settings overwrites this.
 fn scratch(name: &str) -> PathBuf {
     let dir: PathBuf = [env!("CARGO_TARGET_TMPDIR"), name].iter().collect();
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        ".hledger-x.toml",
+        "# intentionally empty: see scratch()\n",
+    );
     dir
 }
 
@@ -662,9 +680,8 @@ fn add_appends_a_formatted_transaction() {
     let dir = scratch("add_appends");
     let journal = write(&dir, "main.journal", ADD_JOURNAL);
     // date (accept today), description, account (accept template), amount,
-    // account 2 (accept), amount (accept balancing), empty account finishes,
-    // EOF quits.
-    let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
+    // account 2 (accept), amount (accept balancing) finishes; EOF quits.
+    let input = "\nRewe\n\n18.20 EUR\n\n\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
     assert_eq!(
         out.code, 0,
@@ -721,7 +738,7 @@ fn add_to_an_included_file_writes_there() {
         "include sub.journal\n\n2026-08-05 Rewe\n    expenses:groceries  12.00 EUR\n    assets:cash        -12.00 EUR\n",
     );
     let sub = write(&dir, "sub.journal", "");
-    let input = "\nRewe\n\n5.00 EUR\nassets:cash\n\n.\n";
+    let input = "\nRewe\n\n5.00 EUR\nassets:cash\n\n";
     let out = run_add(
         &dir,
         &["-f", main.to_str().unwrap(), "--to", sub.to_str().unwrap()],
@@ -763,7 +780,7 @@ fn add_respects_local_config() {
         "2026-01-01 early\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n\n2026-12-31 late\n    a:b   2.00 EUR\n    c:d  -2.00 EUR\n",
     );
     // Dated between the two: must land between them, not at the end.
-    let input = "2026-06-15\nMiddle\na:b\n3.00 EUR\nc:d\n\n.\n";
+    let input = "2026-06-15\nMiddle\na:b\n3.00 EUR\nc:d\n\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
     assert_eq!(
         out.code, 0,
@@ -783,7 +800,7 @@ fn add_falls_back_to_the_configured_ledger_file() {
     // Relative to the config file's directory.
     write(&dir, ".hledger-x.toml", "ledger_file = \"main.journal\"\n");
     let journal = write(&dir, "main.journal", ADD_JOURNAL);
-    let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
+    let input = "\nRewe\n\n18.20 EUR\n\n\n";
     let out = run_add(&dir, &[], input);
     assert_eq!(
         out.code, 0,
@@ -804,7 +821,7 @@ fn the_ledger_file_precedence_is_flag_then_config_then_env() {
         ".hledger-x.toml",
         "ledger_file = \"config.journal\"\n",
     );
-    let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
+    let input = "\nRewe\n\n18.20 EUR\n\n\n";
 
     // The flag beats both.
     let out = run_add_env(
@@ -882,7 +899,7 @@ fn add_writes_typed_amounts_in_the_declared_style() {
         "main.journal",
         "include conf.journal\n\n2026-01-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
     );
-    let input = "2026-06-15\nIkea\ne:f\n1234EUR\ng:h\n\n.\n";
+    let input = "2026-06-15\nIkea\ne:f\n1234EUR\ng:h\n\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
     assert_eq!(
         out.code, 0,
@@ -909,7 +926,7 @@ fn add_appends_equity_conversion_postings_when_configured() {
         "2026-08-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
     );
     // A multi-commodity transaction: balanced at cost, not at face value.
-    let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n.\n";
+    let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
     assert_eq!(
         out.code, 0,
@@ -1007,7 +1024,7 @@ fn add_leaves_conversions_alone_by_default() {
         "main.journal",
         "2026-08-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
     );
-    let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n.\n";
+    let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
     assert_eq!(
         out.code, 0,

@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 
-use super::parser::FileMap;
+use super::parser::{FileMap, SourceFile};
+use super::scope::Scope;
 use crate::fmt::posting::{parse_posting, render};
 use crate::fmt::{format_opts_at, merged_styles, unlines, widths_with_at, Options};
 use crate::lex::{is_blank, split_amount};
@@ -50,6 +51,30 @@ impl Default for WriteOptions {
     }
 }
 
+/// One posting of a transaction being written.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Posting {
+    /// Account name, **resolved** — spelled for the insertion point only at
+    /// the moment of writing (see [`NewTransaction::raw_lines_in`]).
+    pub account: String,
+    /// Raw amount text; may be empty for a bare posting.
+    pub amount: String,
+    /// Comment text *without* the leading `;`, as typed. Empty for none.
+    pub comment: String,
+}
+
+impl Posting {
+    /// A posting with no comment.
+    #[must_use]
+    pub fn new(account: &str, amount: &str) -> Self {
+        Self {
+            account: account.to_owned(),
+            amount: amount.to_owned(),
+            comment: String::new(),
+        }
+    }
+}
+
 /// A completed transaction, ready to write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTransaction {
@@ -57,8 +82,32 @@ pub struct NewTransaction {
     pub date: NaiveDate,
     /// Description as typed.
     pub description: String,
-    /// (account, raw amount text) pairs; the amount may be empty.
-    pub postings: Vec<(String, String)>,
+    /// Transaction comment text without the leading `;`. Empty for none.
+    pub comment: String,
+    /// Postings in order.
+    pub postings: Vec<Posting>,
+}
+
+/// The text of a `; comment` with the marker and surrounding space removed —
+/// the form a field's buffer holds after the `;` and the user edits.
+#[must_use]
+pub fn comment_text(comment: Option<&str>) -> String {
+    comment.map_or_else(String::new, |c| {
+        c.trim_start().trim_start_matches(';').trim().to_owned()
+    })
+}
+
+/// Render a comment as the trailing `  ; text` of a line, or nothing.
+#[must_use]
+pub fn comment_suffix(comment: &str) -> String {
+    let c = comment.trim();
+    if c.is_empty() {
+        String::new()
+    } else if c.starts_with(';') {
+        format!("  {c}")
+    } else {
+        format!("  ; {c}")
+    }
 }
 
 /// The outcome of integrating new transactions into a file.
@@ -70,24 +119,112 @@ pub struct Integrated {
     pub warnings: Vec<String>,
 }
 
+/// Whether the new transactions could be expressed at their insertion point.
+#[derive(Debug, Clone)]
+pub enum Integration {
+    /// Ready to write.
+    Ready(Integrated),
+    /// At least one account cannot be written where it would go — an
+    /// `apply account` or `alias` in effect there rewrites every spelling of
+    /// it into something else. Refusing is the only correct answer: writing
+    /// the name as-is would silently enter a different account.
+    Refused(Vec<String>),
+}
+
+/// The `apply account` / `alias` scope of the write-target file, by line.
+///
+/// `insertion = append` lands at end of file, where an *unclosed* region may
+/// still be open; `insertion = chronological` can land mid-file, inside a
+/// region that is closed further down. Both are reachable, so the write path
+/// needs the scope at an arbitrary line, not just at eof.
+#[derive(Debug, Clone, Default)]
+pub struct TargetScopes {
+    /// `(0-based line, scope in effect from there)`, ascending.
+    checkpoints: Vec<(usize, Scope)>,
+    /// The scope at end of file.
+    at_eof: Scope,
+}
+
+impl TargetScopes {
+    /// The scopes of a parsed source file.
+    #[must_use]
+    pub fn of(file: &SourceFile) -> Self {
+        Self {
+            checkpoints: file
+                .states
+                .iter()
+                .map(|(at, s)| (*at, s.scope.clone()))
+                .collect(),
+            at_eof: file.state_at_eof.scope.clone(),
+        }
+    }
+
+    /// The scope in effect just before original 0-based `line`; `None` means
+    /// end of file.
+    fn at(&self, line: Option<usize>) -> &Scope {
+        let Some(line) = line else {
+            return &self.at_eof;
+        };
+        self.checkpoints
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= line)
+            .map_or(&self.at_eof, |(_, s)| s)
+    }
+
+    /// Whether anything anywhere in this file rewrites account names — the
+    /// cheap check for warning the user at session start.
+    #[must_use]
+    pub fn any_active(&self) -> bool {
+        self.at_eof.is_active() || self.checkpoints.iter().any(|(_, s)| s.is_active())
+    }
+}
+
 impl NewTransaction {
     /// The transaction in raw journal syntax (header + minimally separated
     /// postings), before any alignment.
+    ///
+    /// The date is always written in full `YYYY-MM-DD` form, even into a file
+    /// where a `Y` directive would let the year be omitted: explicit over
+    /// implicit, and a full date cannot be silently rebound by someone later
+    /// editing the `Y` line above it.
     #[must_use]
     pub fn raw_lines(&self) -> Vec<String> {
-        let mut out = vec![
-            format!("{} {}", self.date.format("%Y-%m-%d"), self.description)
-                .trim_end()
-                .to_owned(),
-        ];
-        for (account, amount) in &self.postings {
-            if amount.trim().is_empty() {
-                out.push(format!("    {account}"));
+        self.raw_lines_in(&Scope::default())
+            .unwrap_or_else(|_| Vec::new())
+    }
+
+    /// [`Self::raw_lines`] with account names spelled for `scope` — the text
+    /// that reads back as the account the user chose.
+    ///
+    /// # Errors
+    ///
+    /// The names that cannot be expressed under `scope` at all.
+    pub fn raw_lines_in(&self, scope: &Scope) -> Result<Vec<String>, Vec<String>> {
+        let header = format!("{} {}", self.date.format("%Y-%m-%d"), self.description)
+            .trim_end()
+            .to_owned();
+        let mut out = vec![format!("{header}{}", comment_suffix(&self.comment))];
+        let mut refused: Vec<String> = Vec::new();
+        for p in &self.postings {
+            let Some(spelled) = scope.spell(&p.account) else {
+                if !refused.contains(&p.account) {
+                    refused.push(p.account.clone());
+                }
+                continue;
+            };
+            let body = if p.amount.trim().is_empty() {
+                format!("    {spelled}")
             } else {
-                out.push(format!("    {account}  {}", amount.trim()));
-            }
+                format!("    {spelled}  {}", p.amount.trim())
+            };
+            out.push(format!("{body}{}", comment_suffix(&p.comment)));
         }
-        out
+        if refused.is_empty() {
+            Ok(out)
+        } else {
+            Err(refused)
+        }
     }
 
     /// The widths this transaction's postings need.
@@ -95,14 +232,14 @@ impl NewTransaction {
         let acc_w = self
             .postings
             .iter()
-            .map(|(a, _)| a.chars().count())
+            .map(|p| p.account.chars().count())
             .max()
             .unwrap_or(0);
         let num_w = self
             .postings
             .iter()
-            .map(|(_, amt)| {
-                let toks: Vec<&str> = amt.split_whitespace().collect();
+            .map(|p| {
+                let toks: Vec<&str> = p.amount.split_whitespace().collect();
                 let (num, _c, _r) = split_amount(&toks);
                 num.chars().count()
             })
@@ -132,6 +269,27 @@ pub fn integrate_with(
     opts: &WriteOptions,
     ctx: &[(usize, crate::amount::AmountCtx)],
 ) -> Integrated {
+    match integrate_in(src, txns, opts, ctx, &TargetScopes::default()) {
+        Integration::Ready(out) => out,
+        // Unreachable with an empty scope — it spells every name as itself —
+        // but expressed as data rather than a panic.
+        Integration::Refused(reasons) => Integrated {
+            contents: src.to_owned(),
+            warnings: reasons,
+        },
+    }
+}
+
+/// [`integrate_with`] against the target file's `apply account` / `alias`
+/// scopes, which decide how each account name is spelled where it lands.
+#[must_use]
+pub fn integrate_in(
+    src: &str,
+    txns: &[NewTransaction],
+    opts: &WriteOptions,
+    ctx: &[(usize, crate::amount::AmountCtx)],
+    scopes: &TargetScopes,
+) -> Integration {
     let mut warnings = Vec::new();
     let map = FileMap::build_with(src, ctx);
 
@@ -142,10 +300,21 @@ pub fn integrate_with(
         warnings.push("file is not sorted by date; inserting chronologically anyway".to_owned());
     }
 
+    // Pass 1: place every transaction and spell its accounts for wherever it
+    // landed. Nothing is written until all of them succeed.
+    let placed = match place(&map, txns, *opts, scopes) {
+        Ok(placed) => placed,
+        Err(reasons) => return Integration::Refused(reasons),
+    };
+    for note in placed.iter().filter_map(|p| p.warning.clone()) {
+        if !warnings.contains(&note) {
+            warnings.push(note);
+        }
+    }
+
     let mut lines: Vec<String> = map.lines.clone();
-    for txn in txns {
-        let at = insertion_index(&FileMap::build(&unlines(&lines)), txn.date, opts.insertion);
-        splice(&mut lines, at, &txn.raw_lines());
+    for p in &placed {
+        splice(&mut lines, p.at, &p.raw);
     }
 
     if opts.format_file {
@@ -155,7 +324,7 @@ pub fn integrate_with(
         } else {
             format_opts_at(&joined, ctx, Options::default())
         };
-        return Integrated { contents, warnings };
+        return Integration::Ready(Integrated { contents, warnings });
     }
 
     // format_file = false: render only our own lines, at widths computed over
@@ -175,25 +344,106 @@ pub fn integrate_with(
         );
     }
 
-    // Re-do the insertion, this time rendering our lines aligned. Our lines
-    // go at the end of the file, so every inherited style is in effect.
+    // Re-do the insertion, this time rendering our lines aligned. The
+    // recorded positions stay valid: the same splices happen in the same
+    // order with blocks of the same length, so the indices repeat exactly.
+    // Our lines go at the end of the file, so every inherited style is in
+    // effect.
     let at_eof = merged_styles(ctx);
     let mut lines: Vec<String> = map.lines;
-    for txn in txns {
-        let at = insertion_index(&FileMap::build(&unlines(&lines)), txn.date, opts.insertion);
-        let mut rendered = vec![txn.raw_lines().first().cloned().unwrap_or_default()];
-        for raw in txn.raw_lines().iter().skip(1) {
+    for p in &placed {
+        let mut rendered = vec![p.raw.first().cloned().unwrap_or_default()];
+        for raw in p.raw.iter().skip(1) {
             rendered.push(render(
                 acc_w,
                 num_w,
                 &crate::fmt::posting::restyle(parse_posting(raw), &at_eof),
             ));
         }
-        splice(&mut lines, at, &rendered);
+        splice(&mut lines, p.at, &rendered);
     }
-    Integrated {
+    Integration::Ready(Integrated {
         contents: unlines(&lines),
         warnings,
+    })
+}
+
+/// One transaction placed: where it goes and the lines to put there, already
+/// spelled for the scope in effect at that point.
+struct Placed {
+    /// Insertion index in the buffer *as it stands when this transaction is
+    /// spliced* — positions are recorded in the order they are applied, not
+    /// in original-file coordinates.
+    at: usize,
+    raw: Vec<String>,
+    warning: Option<String>,
+}
+
+/// Decide where each transaction goes and how its accounts are spelled there.
+///
+/// The placement walk is incremental — each transaction is positioned against
+/// the file as the previous ones left it, which is what makes chronological
+/// insertion of out-of-order transactions come out in date order. Alongside
+/// it runs a map from buffer line to *original* line, because the scope is
+/// only known for the original file; inserted transactions carry no
+/// directives, so they never change it.
+fn place(
+    map: &FileMap,
+    txns: &[NewTransaction],
+    opts: WriteOptions,
+    scopes: &TargetScopes,
+) -> Result<Vec<Placed>, Vec<String>> {
+    let mut out = Vec::new();
+    let mut refusals: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = map.lines.clone();
+    let mut origins: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
+
+    for txn in txns {
+        let at = insertion_index(&FileMap::build(&unlines(&lines)), txn.date, opts.insertion);
+        // The scope just before the next surviving original line; past the
+        // last of them, that is end of file.
+        let next_original = origins
+            .get(at..)
+            .and_then(|rest| rest.iter().flatten().next());
+        let scope = scopes.at(next_original.copied());
+        let warning = scope.active_directives().first().map(|(directive, _)| {
+            format!(
+                "`{directive}` is in effect at the insertion point; account names are written as it requires"
+            )
+        });
+        match txn.raw_lines_in(scope) {
+            Ok(raw) => {
+                let before = lines.len();
+                splice(&mut lines, at, &raw);
+                // Mirror the splice in `origins`: everything inserted is new.
+                let added = lines.len().saturating_sub(before);
+                let tail: Vec<Option<usize>> = origins.split_off(at.min(origins.len()));
+                origins.extend(std::iter::repeat_n(None, added));
+                origins.extend(tail);
+                out.push(Placed { at, raw, warning });
+            }
+            Err(names) => {
+                let directives: Vec<String> = scope
+                    .active_directives()
+                    .into_iter()
+                    .map(|(d, o)| format!("`{d}` (line {})", o.line))
+                    .collect();
+                for name in names {
+                    let reason = format!(
+                        "cannot write `{name}` here: {} rewrites every spelling of it",
+                        directives.join(" and ")
+                    );
+                    if !refusals.contains(&reason) {
+                        refusals.push(reason);
+                    }
+                }
+            }
+        }
+    }
+    if refusals.is_empty() {
+        Ok(out)
+    } else {
+        Err(refusals)
     }
 }
 
@@ -331,7 +581,8 @@ pub fn parse_transactions(src: &str) -> Vec<NewTransaction> {
         let Some(header) = map.lines.get(span.start) else {
             continue;
         };
-        let description = header
+        let (header_body, header_comment) = crate::lex::split_comment(header);
+        let description = header_body
             .split_once(char::is_whitespace)
             .map_or("", |(_, d)| d)
             .trim()
@@ -343,15 +594,19 @@ pub fn parse_transactions(src: &str) -> Vec<NewTransaction> {
             .unwrap_or(&[])
         {
             match parse_posting(line) {
-                crate::fmt::posting::Posting::Bare(account, _) => {
-                    postings.push((account, String::new()));
+                crate::fmt::posting::Posting::Bare(account, comment) => {
+                    postings.push(Posting {
+                        account,
+                        amount: String::new(),
+                        comment: comment_text(comment.as_deref()),
+                    });
                 }
                 crate::fmt::posting::Posting::Amount {
                     account,
                     num,
                     commodity,
                     rest,
-                    ..
+                    comment,
                 } => {
                     let mut amount = num;
                     if !commodity.is_empty() {
@@ -362,7 +617,11 @@ pub fn parse_transactions(src: &str) -> Vec<NewTransaction> {
                         amount.push(' ');
                         amount.push_str(&rest.join(" "));
                     }
-                    postings.push((account, amount));
+                    postings.push(Posting {
+                        account,
+                        amount,
+                        comment: comment_text(comment.as_deref()),
+                    });
                 }
                 crate::fmt::posting::Posting::Comment(_) => {}
             }
@@ -370,6 +629,7 @@ pub fn parse_transactions(src: &str) -> Vec<NewTransaction> {
         out.push(NewTransaction {
             date,
             description,
+            comment: comment_text(header_comment),
             postings,
         });
     }
@@ -403,10 +663,8 @@ mod tests {
         NewTransaction {
             date,
             description: desc.into(),
-            postings: postings
-                .iter()
-                .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
-                .collect(),
+            comment: String::new(),
+            postings: postings.iter().map(|(a, b)| Posting::new(a, b)).collect(),
         }
     }
 
@@ -604,6 +862,214 @@ mod tests {
             out.contents,
             "2026-01-06 one\n    a:b  1 EUR\n\n2026-01-07 two\n    a:b  2 EUR\n"
         );
+    }
+
+    // ---- epic 3: writing under `apply account` / `alias` ----
+
+    /// A `TargetScopes` whose whole file carries `scope`.
+    fn everywhere(scope: Scope) -> TargetScopes {
+        TargetScopes {
+            checkpoints: vec![(0, scope.clone())],
+            at_eof: scope,
+        }
+    }
+
+    fn apply_scope(prefix: &str) -> Scope {
+        let mut s = Scope::default();
+        s.push_apply(prefix, crate::add::scope::Origin { file: 0, line: 1 });
+        s
+    }
+
+    fn ready(i: Integration) -> Integrated {
+        match i {
+            Integration::Ready(out) => out,
+            Integration::Refused(reasons) => {
+                panic!("unexpectedly refused: {}", reasons.join("; "))
+            }
+        }
+    }
+
+    #[test]
+    fn chronological_insertion_of_out_of_order_transactions_still_sorts() {
+        // The later-entered transaction is the earlier-dated one; it must end
+        // up first. Placing every transaction against the *original* file and
+        // shifting by a running total gets this wrong.
+        let src = "2026-01-01 a\n    x:y  1 EUR\n\n2026-01-20 z\n    x:y  1 EUR\n";
+        let opts = WriteOptions {
+            insertion: Insertion::Chronological,
+            ..WriteOptions::default()
+        };
+        let out = integrate(
+            src,
+            &[
+                txn(d(2026, 1, 15), "later-entered", &[("x:y", "2 EUR")]),
+                txn(d(2026, 1, 5), "earlier-dated", &[("x:y", "3 EUR")]),
+            ],
+            &opts,
+        );
+        let order: Vec<&str> = out
+            .contents
+            .lines()
+            .filter(|l| !l.starts_with(char::is_whitespace) && !l.is_empty())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "2026-01-01 a",
+                "2026-01-05 earlier-dated",
+                "2026-01-15 later-entered",
+                "2026-01-20 z",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_account_written_into_an_apply_region_loses_the_prefix() {
+        // The whole point: hledger reads `checking` here as
+        // `assets:bank:checking`, so writing the resolved name would produce
+        // `assets:bank:assets:bank:checking`.
+        let src = "apply account assets:bank\n\n2026-01-05 a\n    checking  1 EUR\n";
+        let out = ready(integrate_in(
+            src,
+            &[txn(
+                d(2026, 1, 6),
+                "b",
+                &[
+                    ("assets:bank:checking", "2 EUR"),
+                    ("assets:bank:savings", "-2 EUR"),
+                ],
+            )],
+            &WriteOptions::default(),
+            &[],
+            &everywhere(apply_scope("assets:bank")),
+        ));
+        assert!(
+            out.contents
+                .contains("    checking   2 EUR\n    savings   -2 EUR"),
+            "{}",
+            out.contents
+        );
+        assert!(
+            !out.contents.contains("assets:bank:checking  "),
+            "{}",
+            out.contents
+        );
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("apply account assets:bank")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn an_unwritable_account_refuses_the_whole_write() {
+        // `expenses:groceries` is outside the applied subtree, so no text at
+        // this insertion point reads back as it.
+        let result = integrate_in(
+            "apply account assets:bank\n",
+            &[txn(
+                d(2026, 1, 6),
+                "b",
+                &[
+                    ("expenses:groceries", "2 EUR"),
+                    ("assets:bank:checking", "-2 EUR"),
+                ],
+            )],
+            &WriteOptions::default(),
+            &[],
+            &everywhere(apply_scope("assets:bank")),
+        );
+        match result {
+            Integration::Refused(reasons) => {
+                assert_eq!(reasons.len(), 1);
+                assert!(reasons[0].contains("expenses:groceries"), "{}", reasons[0]);
+                assert!(
+                    reasons[0].contains("apply account assets:bank"),
+                    "{}",
+                    reasons[0]
+                );
+                assert!(reasons[0].contains("line 1"), "{}", reasons[0]);
+            }
+            Integration::Ready(out) => panic!("should have refused, wrote:\n{}", out.contents),
+        }
+    }
+
+    #[test]
+    fn a_chronological_insertion_uses_the_scope_where_it_lands_not_at_eof() {
+        // The region is *closed* before end of file, so an append would be
+        // unaffected — but a chronological insertion lands inside it.
+        let src = "2026-01-01 a\n    q  1 EUR\n\napply account P\n\n2026-01-05 b\n    q  1 EUR\n\nend apply account\n\n2026-01-10 c\n    q  1 EUR\n";
+        let scopes = TargetScopes {
+            checkpoints: vec![
+                (0, Scope::default()),
+                (4, apply_scope("P")),
+                (9, Scope::default()),
+            ],
+            ..TargetScopes::default()
+        };
+        let out = ready(integrate_in(
+            src,
+            &[txn(
+                d(2026, 1, 7),
+                "mid",
+                &[("P:q", "2 EUR"), ("P:r", "-2 EUR")],
+            )],
+            &WriteOptions {
+                insertion: Insertion::Chronological,
+                ..WriteOptions::default()
+            },
+            &[],
+            &scopes,
+        ));
+        // Written unprefixed, because it lands inside the region.
+        assert!(
+            out.contents
+                .contains("2026-01-07 mid\n    q   2 EUR\n    r  -2 EUR"),
+            "{}",
+            out.contents
+        );
+    }
+
+    #[test]
+    fn appending_past_a_closed_region_is_unaffected() {
+        let src = "apply account P\n\n2026-01-05 b\n    q  1 EUR\n\nend apply account\n";
+        let scopes = TargetScopes {
+            checkpoints: vec![
+                (0, Scope::default()),
+                (1, apply_scope("P")),
+                (5, Scope::default()),
+            ],
+            ..TargetScopes::default()
+        };
+        let out = ready(integrate_in(
+            src,
+            &[txn(
+                d(2026, 1, 6),
+                "after",
+                &[("full:name", "2 EUR"), ("other", "-2 EUR")],
+            )],
+            &WriteOptions::default(),
+            &[],
+            &scopes,
+        ));
+        assert!(
+            out.contents.contains("    full:name   2 EUR"),
+            "{}",
+            out.contents
+        );
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn dates_are_always_written_in_full_even_under_a_year_directive() {
+        let out = integrate(
+            "Y 2026\n\n01-05 a\n    x:y  1 EUR\n",
+            &[txn(d(2026, 1, 6), "b", &[("x:y", "1 EUR")])],
+            &OPTS,
+        );
+        assert!(out.contents.contains("2026-01-06 b"), "{}", out.contents);
     }
 
     #[test]

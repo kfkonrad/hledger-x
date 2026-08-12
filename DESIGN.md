@@ -3,9 +3,9 @@
 A Rust CLI for plain text accounting journals: ergonomic interactive data entry
 (a better `hledger add`) plus a formatter.
 
-Status: epics 1 (`fmt`) and 2 (`add`) are implemented. Epic 3 (deferred
-directives) is not started. Where the implementation deviates from what is
-written here, the deviation is recorded inline.
+Status: epics 1 (`fmt`), 2 (`add`) and 3 (the remaining directives) are all
+implemented. Where the implementation deviates from what is written here, the
+deviation is recorded inline.
 
 ## Name and CLI surface
 
@@ -743,7 +743,9 @@ unbalanced transaction so that balancing succeeds iff the directive applied:
 Implementation: a scope stack. On entering an included file, push a *copy* of
 the current scope. On exit, pop and discard. A directive mutates only the top.
 
-Epic 3 adds `Y`, `apply account`, `alias` to this model.
+Epic 3 added `Y`, `apply account` and `alias` to this model, each verified to
+behave exactly as `decimal-mark` does — inherited into includes, discarded on
+return. See § Epic 3 for the per-directive tables.
 
 #### Model 2 — declarations (`account`, `commodity`)
 
@@ -776,7 +778,7 @@ Note the direct contradiction with model 1 — round-1 test A and round-2 test A
 have identical layout (include at top, use later in parent) and opposite
 results. That is what proves the two models are distinct.
 
-Epic 3 adds `payee`, `tag` to this model.
+Epic 3 added `payee` and `tag` to this model.
 
 #### Consequence for the new-account guard
 
@@ -1206,6 +1208,11 @@ Interactions:
 | `commodity` | valid commodities; display style — decimal mark, digit grouping, decimal places, symbol placement and spacing | declaration — in effect from its own line onward, across includes |
 | `decimal-mark` | parsing and rendering of typed input | parse state — file-scoped, inherited by includes |
 | `D` | default commodity (`fmt --explicit` writes it out; `add` takes its default from the configuration instead); display style for its own commodity; the decimal mark for reading an amount in any commodity that declares none | declaration — in effect from its own line onward, across includes |
+| `payee` | description completion pool; the set the payee check tests against | declaration — journal-wide, position-sensitive |
+| `tag` | completion after a `;` in any field | declaration — journal-wide, position-sensitive |
+| `Y` / `year` | default year for partial dates on read; never used on write | parse state — file-scoped, inherited by includes |
+| `apply account` | account-name resolution both directions | parse state — a stack, file-scoped, inherited by includes |
+| `alias` | account-name resolution both directions | parse state — a list, file-scoped, inherited by includes |
 | `include` | file graph, nested, globs | — |
 
 None of them count inside a `comment` block — see § `comment` blocks are
@@ -1225,49 +1232,218 @@ hledger never reads.
 
 ---
 
-# Epic 3 — deferred directives
+# Epic 3 — the remaining directives
 
-Deliberately out of scope until the core is right. Recorded so they are not
-lost.
+`payee`, `tag`, `Y`/`year`, `apply account`, `alias`. Deferred through epics 1
+and 2 so the core could be got right first; all five are now implemented, with
+full support for `apply account` and `alias` (settled with the user
+2026-08-12 — the alternative, detection-and-refuse, was rejected).
 
-## `payee` directive
+Everything below was verified against hledger 1.99 by the technique in § How
+to verify hledger behaviour, each with a control. One control initially
+"passed" for the wrong reason and is called out where it happened.
+
+## `payee` directive, and `payee | note`
+
+A description is not one string. hledger splits it at the **first** `|` into a
+payee and a note, trimming both; a description with no `|` is its own payee
+*and* its own note. Verified against 1.99's `payees` / `notes` commands:
+
+| Description | payee | note |
+| --- | --- | --- |
+| `Deutsche Bahn \| ticket` | `Deutsche Bahn` | `ticket` |
+| `   Rewe   \|   groceries  ` | `Rewe` | `groceries` |
+| `a \| b \| c` | `a` | `b \| c` |
+| `Plain` | `Plain` | `Plain` |
+
+**`hledger check payees` tests the payee half**, and the control proves it
+matters: declaring `payee Deutsche Bahn | ticket` and then writing exactly
+that description *fails*, with hledger reporting `payee "Deutsche Bahn" has
+not been declared` and underlining only the payee.
+
+So everywhere hledger-x treats a description as an **identity** it uses the
+payee: the strict check, the "new to this journal" note, the near-miss hint,
+the transaction template, and the account ranking conditioned on it. Only the
+file gets the whole string, verbatim as typed — hledger-x never rewrites a
+description, not even to normalize the spacing around the `|`.
+
+Keying the **template** on the payee rather than the description is the part
+with teeth. Notes are frequently unique to one transaction — an invoice
+number, a trip — so a template keyed on the whole description would simply
+never match, and the pre-fill would silently do nothing for exactly the people
+who use notes.
 
 Declared payees join the description completion pool and make the near-miss
-warning trustworthy (a payee can then be known-good even if it appears in no
-transaction yet). Until then, description candidates come only from
-transactions actually present in the journal.
+warning trustworthy: a payee is known-good even if it appears in no
+transaction yet. Without it, description candidates come only from
+transactions actually present. The pool the *near-miss* searches is payees
+only, so `bahn` is answered with `Deutsche Bahn` and not with some longer
+description that happens to contain it; the pool the *field* completes from
+holds whole descriptions, since re-entering one wholesale is the point.
+
+Behaviour **mirrors accounts exactly** (settled with the user):
+
+- **not strict** (default) — a description that is neither declared nor ever
+  used is accepted with a passing note plus a near-miss: `"bahn" is new to
+  this journal — did you mean "Deutsche Bahn"?`. This is the direct fix for
+  motivation #1 (§ Motivation), where hledger's `add` matches `bahn` against
+  `Deutsche Bahn` to pick defaults and then writes the literal `bahn`,
+  quietly forking the payee.
+- **strict** — asks before using an undeclared payee, mirroring
+  `hledger check payees`, exactly as the account and commodity checks do.
 
 ## `tag` directive
 
-Declared tags drive completion inside `; comments`. Requires comment entry to
-be a first-class field with its own completer, which epic 2 does not have.
+Declared tags drive completion inside `; comments`, which requires a way to
+enter a comment at all — epic 2 had none.
+
+**Comments are the tail of a field, not a field of their own.** Typing a `;`
+in the description or an amount makes the rest of that buffer the comment,
+exactly as the journal line reads:
+
+```
+description> Rewe ; trip: berlin
+amount 1>     18.20 EUR ; receipt: yes
+```
+
+Dedicated comment fields were built first and rejected on use (2026-08-12):
+one per transaction and one per posting, visited in the Enter flow, made the
+overwhelmingly common case — no comment at all — two keystrokes longer on
+every entry. The inline form costs nothing when unused, needs no new key to
+remember, and teaches journal syntax rather than a tool-specific flow. It also
+keeps working in `plain.rs` and in scripted input, where a modifier key has
+nowhere to go.
+
+Consequences worth keeping straight:
+
+- A field's *stored* value and its *buffer* differ: `stash` splits on the `;`,
+  and navigating back re-joins them, so what you typed is what you see.
+- A posting's comment belongs to its **line**, so it can be typed on either
+  the account or the amount. The amount field owns it — being the end of the
+  line, it is the one place clearing it makes sense; the account field can
+  only add one, which the amount field then carries and displays.
+- A `;` in the account field is therefore never part of the account name.
+  Writing one there would produce a silently corrupt posting line.
+- Past a `;`, completion switches from the field's own pool to **tag names**,
+  and stops again after the `:` that ends one — a tag's value is free text,
+  and offering candidates for it would be guessing.
 
 ## `Y` / `year` directive
 
-Sets the default year for dates in a file. Affects both parsing (a `01-15` date
-in that file means the declared year) and writing (dates we emit into such a
-file may legally omit the year, and the `fmt` convention for that must be
-matched). Epic 2 assumes full `YYYY-MM-DD` dates throughout.
+Sets the default year for dates in a file. Both spellings (`Y 2019`,
+`year 2019`) work. Parse state — model 1.
+
+| Test | Layout | Result |
+| --- | --- | --- |
+| Y1 | `Y 2019`, then `01-15` | `2019-01-15` |
+| Y2 | control, no `Y`, then `01-15` | `2026-01-15` — **the current year** |
+| Y3 | `Y` in parent, partial date in include *and* in parent after it | applied in both |
+| Y4 | `Y` inside an include, partial date in parent after it | **did not apply** — discarded on return |
+| Y5 | second `Y` later in the same file | rebinds from there forward |
+| Y6 | full `YYYY-MM-DD` date under a `Y` | unaffected |
+
+Y2 is the control that matters and it nearly went unnoticed: the first run
+used `Y 2026`, which is the current year, so the control produced the same
+output as the test and proved nothing. Re-run with `Y 2019` it separates
+cleanly. **A partial date is therefore always resolvable** — to the declared
+year, or to the current year when nothing is declared — so partial-dated
+transactions stop being skipped-with-a-warning as they were in epic 2.
+
+**Writing: hledger-x always emits a full `YYYY-MM-DD` date**, even into a file
+where `Y` would let it omit the year. Explicit over implicit, and a full date
+cannot be silently rebound by someone later editing the `Y` line above it.
+There is no `fmt` convention to match here after all — `fmt` passes
+transaction header lines through untouched.
 
 ## `apply account` and `alias`
 
-Not used by the user, so not required for core functionality. Epics 1 and 2
-ignore them entirely — no parsing, no detection.
+The trap: inside an `apply account assets:bank` block, the text in the file is
+the *remainder* of the account name, not the full name. Writing the
+fully-qualified name there silently produces
+`assets:bank:assets:bank:checking`. `alias` is the same problem mirrored.
 
-The trap they represent: inside an `apply account assets:bank` block, the text
-written to the file is the *remainder* of the account name, not the full name.
-Writing the fully-qualified name there silently produces
-`assets:bank:assets:bank:checking`. `alias` has the same shape of problem in the
-opposite direction.
+**This is reachable today, in two ways** — it is not hypothetical:
 
-The first step of this epic is therefore **detection** — refuse to insert into a
-region where either is active, with a clear error — followed by full support.
-Full support means resolving both directions (display the resolved account name
-in completion and the live preview, write the unresolved remainder to the file)
-and tracking lexical scope across the include graph: `apply account` is scoped
-to the rest of the file or until `end apply account`, `alias` until
-`end aliases`, and both propagate into included files under the scope-stack
-model above.
+- `insertion = append` into a file whose region is never closed. Unclosed
+  regions are legal: both `apply account` with no `end apply account` and
+  `alias` with no `end aliases` parse fine and run to end of file.
+- `insertion = chronological` landing *inside a closed region*, because the
+  insertion point is chosen by date alone and is directive-blind.
+
+`sort = true` rescues neither. `fmt`'s sort treats directives as barriers so
+sorting never moves a transaction across one, but the splice happens first and
+the barrier then pins the transaction in whichever run it already landed in.
+
+### `apply account`
+
+Parse state — model 1, holding a **stack**.
+
+| Test | Layout | Result |
+| --- | --- | --- |
+| AA1 | `apply account a` then `apply account b`, nested | stack — `a:b:checking` |
+| AA2 | the same, then one `end apply account` | pops one level — `a:checking` |
+| AA3 | prefix written with a trailing colon | joined blindly — `assets::checking` |
+| AA4 | `account checking` inside the block | declares **`assets:checking`** |
+| AA4c | control, `account assets:checking` inside the block | **fails** `check accounts` |
+| AA5 | unclosed block | runs to end of file |
+| C/D | into an include / out of one | inherited in, discarded on return |
+
+AA4 is the surprise: `apply account` prefixes `account` *declarations*, not
+only postings. Declaring the resolved name inside a block is the error.
+
+### `alias`
+
+Parse state — model 1, holding a **list**. Two forms: `alias OLD=NEW` and
+`alias /REGEX/=REPLACEMENT`. `end aliases` clears them all. Case-sensitive.
+
+`alias OLD=NEW` matches the account name only as the **whole name or a
+segment-bounded leading prefix** — `bank` and `bank:sub` match
+`alias bank=X`; `mybank`, `bankish` and `a:bank` do not.
+
+**Aliases are applied in reverse declaration order**, each to the running
+result — the most recently declared alias goes first. This is the one piece of
+epic 3 that no amount of reading would have produced, and it took five tests
+to corner:
+
+| Test | Aliases | Input | Result |
+| --- | --- | --- | --- |
+| AL11 | `/x/=ONE`, `/ONE/=TWO` | `x` | `ONE` — rules out forward chaining |
+| AL14 | `/a/=A`, `/b/=B` | `a:b` | `A:B` — rules out "last match on the original wins" |
+| AL13 | `/x/=ONE`, `/x/=TWO` | `xx` | `TWOTWO` |
+| AL16 | `/C/=D`, `/B/=C`, `/A/=B` | `A` | **`D`** — a full chain, declared backwards |
+| AL17 | `/A/=B`, `/B/=C`, `/C/=D` | `A` | **`B`** — the same chain forwards, one hop |
+
+AL16 and AL17 are the decisive pair: the identical chain gives `D` written
+backwards and `B` written forwards. AL11 and AL14 individually look
+contradictory and only reconcile under the reverse-order rule.
+
+### Order of the two, and what resolution covers
+
+`apply account` is applied **first**; aliases then see the fully prefixed
+name. Verified: under `apply account TOP`, `alias sub=REPLACED` does not fire
+on a posting written `sub` (AL8), while `alias TOP:sub=REPLACED` does (AL9).
+Aliases apply to `account` directives as well as postings (AL5).
+
+### Reading and writing
+
+**On read**, account names are resolved as hledger resolves them, so the
+completion pool, the frecency index, the near-miss hints and the live preview
+all hold real account names rather than bare remainders like `checking`. A
+half-name looks entirely plausible in a completion menu, which is what makes
+skipping this the wrong economy.
+
+**On write**, the spelling that goes into the file is found by *search and
+verify*, never by inverting the transformation. Candidate spellings — the name
+as-is, the apply-prefix stripped, a non-regex alias inverted — are each run
+back through the forward resolver, and the first one that resolves to the name
+the user actually chose is written. If none does, hledger-x refuses and says
+so, naming the directive and its line.
+
+That asymmetry is deliberate and follows the same principle as amount
+restyling: a regex alias is not generally invertible, so rather than guess at
+an inverse we generate candidates and check them against the one resolver we
+know is correct. Nothing is ever written that has not been verified to read
+back as the intended account.
 
 ---
 

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 
 use super::parser::{Journal, Transaction};
+use crate::lex::split_payee_note;
 
 /// Default half-life for the frecency decay, in days.
 pub const DEFAULT_HALF_LIFE_DAYS: f64 = 90.0;
@@ -38,15 +39,27 @@ pub struct Entry {
 /// The four frecency indices, plus the commodity pool for the amount field.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
-    /// description → entry. Description completion.
+    /// description → entry. Description completion, over descriptions as
+    /// written — `payee | note` and all, since that is what gets typed here.
     pub descriptions: HashMap<String, Entry>,
+    /// payee → entry. The payee half only; what the payee checks and the
+    /// near-miss hint rank against.
+    pub payees: HashMap<String, Entry>,
     /// account → entry. Account completion, unconditioned.
     pub accounts: HashMap<String, Entry>,
-    /// (description, account) → entry. Account completion conditioned on the
-    /// description already entered.
-    pub by_description: HashMap<(String, String), Entry>,
-    /// description → index into the journal's transactions of the most
-    /// recent transaction with that description. Posting pre-fill.
+    /// (payee, account) → entry. Account completion conditioned on the payee
+    /// already entered.
+    ///
+    /// Keyed on the **payee**, not the whole description: a note is often
+    /// unique to one transaction (an invoice number, a trip), and keying on
+    /// it would mean the conditioning never fires.
+    pub by_payee: HashMap<(String, String), Entry>,
+    /// payee → index into the journal's transactions of the most recent
+    /// transaction with that payee. Posting pre-fill.
+    ///
+    /// Keyed on the payee for the same reason as `by_payee`, and it matters
+    /// more here: a template that never matches is a feature that silently
+    /// does nothing.
     pub templates: HashMap<String, usize>,
     /// commodity → entry. Completion in the amount field.
     pub commodities: HashMap<String, Entry>,
@@ -59,6 +72,8 @@ impl Index {
         let mut idx = Self::default();
         for (i, txn) in journal.transactions.iter().enumerate() {
             let weight = decay(today, txn.date, half_life_days);
+            let (payee, _note) = split_payee_note(&txn.description);
+            let payee = payee.to_owned();
             if !txn.description.is_empty() {
                 bump(
                     &mut idx.descriptions,
@@ -66,9 +81,10 @@ impl Index {
                     txn.date,
                     weight,
                 );
+                bump(&mut idx.payees, payee.clone(), txn.date, weight);
                 // Later transactions win ties: strictly-greater keeps the
                 // earlier one only when it is genuinely newer.
-                let slot = idx.templates.entry(txn.description.clone()).or_insert(i);
+                let slot = idx.templates.entry(payee.clone()).or_insert(i);
                 let newest = journal.transactions.get(*slot).map(|t| t.date);
                 if newest.is_none_or(|d| txn.date >= d) {
                     *slot = i;
@@ -78,8 +94,8 @@ impl Index {
                 bump(&mut idx.accounts, p.account.clone(), txn.date, weight);
                 if !txn.description.is_empty() {
                     bump(
-                        &mut idx.by_description,
-                        (txn.description.clone(), p.account.clone()),
+                        &mut idx.by_payee,
+                        (payee.clone(), p.account.clone()),
                         txn.date,
                         weight,
                     );
@@ -109,15 +125,17 @@ impl Index {
         half_life_days: f64,
     ) {
         let weight = decay(today, date, half_life_days);
+        let (payee, _note) = split_payee_note(description);
         if !description.is_empty() {
             bump(&mut self.descriptions, description.to_owned(), date, weight);
+            bump(&mut self.payees, payee.to_owned(), date, weight);
         }
         for (account, commodity) in postings {
             bump(&mut self.accounts, account.clone(), date, weight);
             if !description.is_empty() {
                 bump(
-                    &mut self.by_description,
-                    (description.to_owned(), account.clone()),
+                    &mut self.by_payee,
+                    (payee.to_owned(), account.clone()),
                     date,
                     weight,
                 );
@@ -128,26 +146,33 @@ impl Index {
         }
     }
 
-    /// The template transaction for `description`, if any.
+    /// The template transaction for a payee, if any. Callers holding a whole
+    /// description should pass its payee half.
     #[must_use]
-    pub fn template<'a>(&self, journal: &'a Journal, description: &str) -> Option<&'a Transaction> {
-        journal.transactions.get(*self.templates.get(description)?)
+    pub fn template<'a>(&self, journal: &'a Journal, payee: &str) -> Option<&'a Transaction> {
+        journal.transactions.get(*self.templates.get(payee)?)
     }
 
-    /// Descriptions ranked by score, best first.
+    /// Descriptions ranked by score, best first — as written, notes included.
     #[must_use]
     pub fn ranked_descriptions(&self) -> Vec<&str> {
         ranked(&self.descriptions)
     }
 
-    /// Accounts ranked by score, best first. With a description, accounts
-    /// seen under that description rank first (by their conditioned score),
-    /// then all remaining accounts by unconditioned score.
+    /// Payees ranked by score, best first.
     #[must_use]
-    pub fn ranked_accounts(&self, description: Option<&str>) -> Vec<&str> {
-        let conditioned: Vec<&str> = description.map_or_else(Vec::new, |desc| {
+    pub fn ranked_payees(&self) -> Vec<&str> {
+        ranked(&self.payees)
+    }
+
+    /// Accounts ranked by score, best first. With a payee, accounts seen
+    /// under that payee rank first (by their conditioned score), then all
+    /// remaining accounts by unconditioned score.
+    #[must_use]
+    pub fn ranked_accounts(&self, payee: Option<&str>) -> Vec<&str> {
+        let conditioned: Vec<&str> = payee.map_or_else(Vec::new, |desc| {
             let mut v: Vec<(&str, &Entry)> = self
-                .by_description
+                .by_payee
                 .iter()
                 .filter(|((d, _), _)| d == desc)
                 .map(|((_, a), e)| (a.as_str(), e))
@@ -226,12 +251,14 @@ mod tests {
         Transaction {
             date,
             description: desc.into(),
+            comment: None,
             postings: accounts
                 .iter()
                 .map(|(a, amt, c)| RawPosting {
                     account: (*a).into(),
                     amount: (*amt).into(),
                     commodity: c.map(Into::into),
+                    comment: None,
                 })
                 .collect(),
             file: 0,
@@ -359,6 +386,75 @@ mod tests {
 
         // Unconditioned: the dominant account leads.
         assert_eq!(idx.ranked_accounts(None)[0], "assets:bank");
+    }
+
+    #[test]
+    fn templates_key_on_the_payee_so_a_unique_note_does_not_defeat_them() {
+        // The case that matters: every transaction carries a distinct note,
+        // so keying on the whole description would mean no template ever
+        // matches and the pre-fill silently does nothing.
+        let j = journal(vec![
+            txn(
+                d(2026, 8, 1),
+                "Deutsche Bahn | ticket to Koeln",
+                &[("expenses:travel:train", "31 EUR", None)],
+            ),
+            txn(
+                d(2026, 8, 5),
+                "Deutsche Bahn | ticket to Hamburg",
+                &[("expenses:travel:long", "49 EUR", None)],
+            ),
+        ]);
+        let idx = Index::build(&j, TODAY(), 90.0);
+        let tpl = idx.template(&j, "Deutsche Bahn").unwrap();
+        // Most recent wins, as always.
+        assert_eq!(tpl.postings[0].account, "expenses:travel:long");
+        // The whole description is not a key.
+        assert!(idx
+            .template(&j, "Deutsche Bahn | ticket to Koeln")
+            .is_none());
+    }
+
+    #[test]
+    fn account_conditioning_keys_on_the_payee_too() {
+        let j = journal(vec![
+            txn(
+                d(2026, 8, 1),
+                "Salary | july",
+                &[("assets:bank", "1 EUR", None)],
+            ),
+            txn(
+                d(2026, 8, 2),
+                "Salary | august",
+                &[("assets:bank", "1 EUR", None)],
+            ),
+            txn(
+                d(2026, 8, 5),
+                "Rewe | big shop",
+                &[("expenses:groceries", "1 EUR", None)],
+            ),
+        ]);
+        let idx = Index::build(&j, TODAY(), 90.0);
+        // Conditioning on the payee finds both Salary transactions' account
+        // first, even though neither note repeats.
+        assert_eq!(idx.ranked_accounts(Some("Salary"))[0], "assets:bank");
+        assert_eq!(idx.ranked_accounts(Some("Rewe"))[0], "expenses:groceries");
+    }
+
+    #[test]
+    fn descriptions_and_payees_are_indexed_separately() {
+        let j = journal(vec![
+            txn(d(2026, 8, 1), "Rewe | big shop", &[("a", "1 EUR", None)]),
+            txn(d(2026, 8, 2), "Rewe | small shop", &[("a", "1 EUR", None)]),
+        ]);
+        let idx = Index::build(&j, TODAY(), 90.0);
+        // Descriptions stay whole — that is what gets typed and re-used.
+        let mut descs = idx.ranked_descriptions();
+        descs.sort_unstable();
+        assert_eq!(descs, vec!["Rewe | big shop", "Rewe | small shop"]);
+        // Payees collapse to the one counterparty.
+        assert_eq!(idx.ranked_payees(), vec!["Rewe"]);
+        assert_eq!(idx.payees["Rewe"].count, 2);
     }
 
     #[test]

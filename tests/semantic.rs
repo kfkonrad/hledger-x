@@ -16,6 +16,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hledger_x::add::parser::parse_journal;
+use hledger_x::add::write::{
+    integrate_in, Insertion, Integration, NewTransaction, Posting, TargetScopes, WriteOptions,
+};
 use hledger_x::fmt::{format, format_opts_scanned, format_sorted, Options};
 
 fn hledger_print(path: &Path) -> Option<String> {
@@ -195,6 +199,295 @@ fn restyling_preserves_hledger_semantics_with_underscore_group_marks() {
         return;
     }
     check_restyle_fixtures(&tmp, UNDERSCORE_FIXTURES);
+}
+
+/// Journals exercising the epic 3 directives. Each must produce exactly the
+/// dates and *resolved* account names that `hledger print` produces — this is
+/// the cross-check behind `DESIGN.md` § Epic 3, run against a real hledger
+/// rather than against the notes taken while probing it.
+const RESOLUTION_FIXTURES: &[(&str, &str)] = &[
+    (
+        "apply-account-nested",
+        "apply account a\napply account b\n2026-01-05 x\n    checking   1 EUR\n    savings   -1 EUR\nend apply account\n2026-01-06 y\n    checking   1 EUR\n    savings   -1 EUR\n",
+    ),
+    (
+        "apply-account-unclosed",
+        "apply account assets:bank\n2026-01-05 x\n    checking   1 EUR\n    savings   -1 EUR\n",
+    ),
+    (
+        "alias-exact-and-prefix",
+        "alias bank=assets:checking\n2026-01-05 x\n    bank        1 EUR\n    bank:sub    1 EUR\n    mybank     -2 EUR\n",
+    ),
+    (
+        "alias-end-aliases",
+        "alias a=b\n2026-01-05 x\n    a    1 EUR\n    z   -1 EUR\nend aliases\n2026-01-06 y\n    a    1 EUR\n    z   -1 EUR\n",
+    ),
+    (
+        "alias-reverse-order-chain-backwards",
+        // DESIGN AL16: declared backwards, the chain runs all the way to D.
+        "alias /C/=D\nalias /B/=C\nalias /A/=B\n2026-01-05 t\n    A     1 EUR\n    q    -1 EUR\n",
+    ),
+    (
+        "alias-reverse-order-chain-forwards",
+        // DESIGN AL17: the same chain forwards stops after one hop.
+        "alias /A/=B\nalias /B/=C\nalias /C/=D\n2026-01-05 t\n    A     1 EUR\n    q    -1 EUR\n",
+    ),
+    (
+        "alias-composes-across-segments",
+        // DESIGN AL14.
+        "alias /a/=A\nalias /b/=B\n2026-01-05 t\n    a:b    1 EUR\n    q     -1 EUR\n",
+    ),
+    (
+        "alias-no-forward-chaining",
+        // DESIGN AL11.
+        "alias /x/=ONE\nalias /ONE/=TWO\n2026-01-05 t\n    x     1 EUR\n    q    -1 EUR\n",
+    ),
+    (
+        "apply-account-then-alias",
+        // DESIGN AL8/AL9: aliases see the prefixed name.
+        "apply account TOP\nalias TOP:sub=REPLACED\n2026-01-05 x\n    sub    1 EUR\n    q     -1 EUR\n",
+    ),
+    (
+        "year-directive-and-partial-dates",
+        "Y 2019\n01-15 first\n    a   1 EUR\n    b  -1 EUR\nY 2021\n03-03 second\n    a   1 EUR\n    b  -1 EUR\n2024-06-06 full\n    a   1 EUR\n    b  -1 EUR\n",
+    ),
+    (
+        "scope-discarded-on-include-return",
+        "include opener.journal\n2026-01-06 after\n    checking   1 EUR\n    savings   -1 EUR\n",
+    ),
+];
+
+/// `(date, [account, ...])` per transaction, read out of `hledger print`.
+fn print_shape(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(char::is_whitespace) {
+            let body = line.trim();
+            if body.is_empty() || body.starts_with(';') {
+                continue;
+            }
+            // `hledger print` separates account from amount by 2+ spaces.
+            let account = body
+                .split_once("  ")
+                .map_or(body, |(a, _)| a)
+                .trim()
+                .to_owned();
+            if let Some(last) = out.last_mut() {
+                last.1.push(account);
+            }
+        } else if !line.trim().is_empty() {
+            let date = line
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            out.push((date, Vec::new()));
+        }
+    }
+    out
+}
+
+#[test]
+fn account_resolution_matches_hledger() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-resolution"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+    // The include target used by `scope-discarded-on-include-return`.
+    fs::write(
+        tmp.join("opener.journal"),
+        "apply account a\n2026-01-05 inside\n    checking   1 EUR\n    savings   -1 EUR\n",
+    )
+    .unwrap();
+
+    for (name, src) in RESOLUTION_FIXTURES {
+        let path = tmp.join(format!("{name}.journal"));
+        fs::write(&path, src).unwrap();
+        let printed =
+            hledger_print(&path).unwrap_or_else(|| panic!("{name}: hledger rejected the fixture"));
+        let expected = print_shape(&printed);
+
+        let journal = hledger_x::add::parser::parse_journal(&path)
+            .unwrap_or_else(|e| panic!("{name}: hledger-x failed to parse: {e}"));
+        let ours: Vec<(String, Vec<String>)> = journal
+            .transactions
+            .iter()
+            .map(|t| {
+                (
+                    t.date.format("%Y-%m-%d").to_string(),
+                    t.postings.iter().map(|p| p.account.clone()).collect(),
+                )
+            })
+            .collect();
+
+        assert_eq!(ours, expected, "{name}: resolution disagrees with hledger");
+        assert!(!expected.is_empty(), "{name}: fixture produced nothing");
+    }
+}
+
+/// `payee | note` splitting, cross-checked against hledger's own `payees` and
+/// `notes` commands rather than against the notes taken while probing them.
+#[test]
+fn payee_and_note_splitting_matches_hledger() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-payees"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+
+    // Spacing, no pipe, several pipes, empty halves.
+    let src = "\
+2026-01-01 Deutsche Bahn|ticket
+    a   1 EUR
+    b  -1 EUR
+
+2026-01-02   Rewe   |   groceries
+    a   1 EUR
+    b  -1 EUR
+
+2026-01-03 Plain
+    a   1 EUR
+    b  -1 EUR
+
+2026-01-04 a | b | c
+    a   1 EUR
+    b  -1 EUR
+
+2026-01-05 Trailing |
+    a   1 EUR
+    b  -1 EUR
+";
+    let path = tmp.join("payees.journal");
+    fs::write(&path, src).unwrap();
+
+    let listing = |what: &str| -> Vec<String> {
+        let out = Command::new("hledger")
+            .args([what, "-f"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "hledger {what} failed");
+        let mut v: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    let journal = hledger_x::add::parser::parse_journal(&path).unwrap();
+    let split = |want_payee: bool| -> Vec<String> {
+        let mut v: Vec<String> = journal
+            .transactions
+            .iter()
+            .map(|t| {
+                let (payee, note) = hledger_x::lex::split_payee_note(&t.description);
+                if want_payee { payee } else { note }.to_owned()
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    assert_eq!(split(true), listing("payees"), "payees disagree");
+    assert_eq!(split(false), listing("notes"), "notes disagree");
+}
+
+/// The write-side invariant, and the whole point of `spell`: a transaction
+/// entered as `assets:bank:checking` and written into an `apply account
+/// assets:bank` region must come back out of `hledger print` as
+/// `assets:bank:checking` — not `assets:bank:assets:bank:checking`.
+#[test]
+fn a_transaction_written_into_a_directive_region_reads_back_as_entered() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-writeback"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+
+    // (label, journal, insertion) — an unclosed region caught by `append`,
+    // and a closed one caught only by `chronological`.
+    let cases: &[(&str, &str, Insertion)] = &[
+        (
+            "unclosed-append",
+            "apply account assets:bank\n\n2026-01-05 a\n    checking   1 EUR\n    savings   -1 EUR\n",
+            Insertion::Append,
+        ),
+        (
+            "closed-chronological",
+            "2026-01-01 first\n    assets:bank:checking   1 EUR\n    assets:bank:savings   -1 EUR\n\napply account assets:bank\n\n2026-01-05 a\n    checking   1 EUR\n    savings   -1 EUR\n\nend apply account\n\n2026-01-20 last\n    assets:bank:checking   1 EUR\n    assets:bank:savings   -1 EUR\n",
+            Insertion::Chronological,
+        ),
+        (
+            "alias-region",
+            "alias bank=assets:bank\n\n2026-01-05 a\n    bank:checking   1 EUR\n    bank:savings   -1 EUR\n",
+            Insertion::Append,
+        ),
+    ];
+
+    for (label, src, insertion) in cases {
+        let path = tmp.join(format!("{label}.journal"));
+        fs::write(&path, src).unwrap();
+        let journal = parse_journal(&path).unwrap();
+        let scopes = journal
+            .file(&path)
+            .map(TargetScopes::of)
+            .unwrap_or_default();
+
+        // Entered through the UI as fully-resolved names, which is what the
+        // completion pool offers.
+        let new = NewTransaction {
+            date: chrono::NaiveDate::from_ymd_opt(2026, 1, 10).unwrap(),
+            description: "entered".into(),
+            comment: String::new(),
+            postings: vec![
+                Posting::new("assets:bank:checking", "7 EUR"),
+                Posting::new("assets:bank:savings", "-7 EUR"),
+            ],
+        };
+        let opts = WriteOptions {
+            insertion: *insertion,
+            ..WriteOptions::default()
+        };
+        let out = match integrate_in(src, &[new], &opts, &journal.inherited_styles(0), &scopes) {
+            Integration::Ready(out) => out,
+            Integration::Refused(reasons) => {
+                panic!("{label}: refused: {}", reasons.join("; "))
+            }
+        };
+
+        let after = tmp.join(format!("{label}.after.journal"));
+        fs::write(&after, &out.contents).unwrap();
+        let printed = hledger_print(&after)
+            .unwrap_or_else(|| panic!("{label}: hledger rejected the output:\n{}", out.contents));
+
+        let entered: Vec<Vec<String>> = print_shape(&printed)
+            .into_iter()
+            .filter(|(date, _)| date == "2026-01-10")
+            .map(|(_, accounts)| accounts)
+            .collect();
+        assert_eq!(
+            entered,
+            vec![vec![
+                "assets:bank:checking".to_owned(),
+                "assets:bank:savings".to_owned()
+            ]],
+            "{label}: hledger read back a different account\n{}",
+            out.contents
+        );
+    }
 }
 
 #[test]

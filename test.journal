@@ -1,0 +1,158 @@
+; ============================================================================
+; hledger-x epic 3 playground
+;
+;   hledger-x add -f test.journal
+;
+; Things to try are marked [TRY] below. `hledger -f test.journal print` shows
+; you what hledger makes of all this, which is the thing hledger-x is trying
+; to agree with.
+;
+; A few [TRY]s want a `.hledger-x.toml`. Copy this file somewhere outside the
+; repository first and experiment there — the repository root already has a
+; `.hledger-x.toml` that the test suite relies on.
+; ============================================================================
+
+
+; ---------------------------------------------------------------------------
+; payee — declared payees are known-good even with no transactions yet
+;
+; [TRY] At the description prompt, type `bahn` and press Enter. You get
+;       "did you mean Deutsche Bahn?" instead of a silently forked payee.
+; [TRY] Type `Hof` and press Tab — completes to a payee that appears in no
+;       transaction at all.
+; [TRY] With `strict = true` under `[add]`, an undeclared payee asks before
+;       it is used — the same question accounts and commodities get.
+;
+; A description is `payee | note`, split at the first `|`. Only the payee half
+; is the transaction's identity.
+;
+; [TRY] Enter `Deutsche Bahn | ticket to Hamburg`. The payee is declared, so
+;       nothing complains however new the note is — and the postings are
+;       pre-filled from the 2025-12-19 transaction below, whose note is
+;       different. A template keyed on the whole description would never have
+;       matched.
+; [TRY] Enter `Rewe | big shop`, then `Rewe | small shop`. Both are one payee.
+; [TRY] Enter `Bahnhof Kiosk | coffee`. What comes back names the *payee* —
+;       `Bahnhof Kiosk` — not the whole string. (A passing note by default; a
+;       question if you turned `strict` on.)
+; ---------------------------------------------------------------------------
+payee Deutsche Bahn
+payee Hofpfisterei
+payee Rewe
+payee Transfer to savings
+
+; ---------------------------------------------------------------------------
+; tag — declared tags complete after a `;`
+;
+; [TRY] At the description prompt type `Rewe ; ` and press Tab: the tag pool
+;       appears. `tri` + Tab completes to `trip:`.
+; [TRY] Keep going: `Rewe ; trip: berlin, rec` + Tab. Completion resumes after
+;       the comma, but is silent inside a tag's value — that is free text.
+; [TRY] Comments work on amounts too: `18.20 EUR ; receipt: yes`.
+;       `client` below is never declared; it is picked up from the comment on
+;       the 2026-08-09 transaction.
+; ---------------------------------------------------------------------------
+tag trip
+tag receipt
+
+commodity 1,000.00 EUR
+
+account assets:bank:checking
+account assets:bank:savings
+account assets:cash
+account expenses:bakery
+account expenses:groceries
+account expenses:travel:train
+account liabilities:creditcard
+
+
+; ---------------------------------------------------------------------------
+; Y / year — partial dates below take the declared year
+;
+; These three transactions used to be skipped with a warning. They are now
+; parsed, so they feed completion and the transaction templates.
+;
+; [TRY] Description `Hofpfisterei` — its template comes from a 01-07 date that
+;       only exists because of the `Y 2026` above it.
+; [TRY] Note that anything hledger-x *writes* gets a full YYYY-MM-DD date,
+;       even here. Explicit beats implicit, and a full date cannot be
+;       silently rebound by editing a `Y` line above it.
+; ---------------------------------------------------------------------------
+Y 2025
+
+11-03 Rewe
+    expenses:groceries        23.45 EUR
+    assets:bank:checking     -23.45 EUR
+
+12-19 Deutsche Bahn | ticket to Hamburg  ; trip: hamburg, receipt: yes
+    expenses:travel:train     49.00 EUR
+    assets:bank:checking     -49.00 EUR
+
+Y 2026
+
+01-07 Hofpfisterei
+    expenses:bakery            4.20 EUR
+    assets:cash               -4.20 EUR
+
+
+; A full date still means exactly what it says.
+2026-08-01 Rewe
+    expenses:groceries        18.20 EUR
+    liabilities:creditcard   -18.20 EUR
+
+
+; ---------------------------------------------------------------------------
+; alias — `bahn` below is not an account, it is a rewrite of one
+;
+; [TRY] At an account prompt, type `trav` and Tab. You get
+;       `expenses:travel:train` — the account hledger sees — not the bare
+;       `bahn` this file spells it with. Before epic 3 the completion pool
+;       held the half-name.
+; ---------------------------------------------------------------------------
+alias bahn=expenses:travel:train
+
+2026-08-02 Deutsche Bahn  ; trip: koeln
+    bahn                      31.00 EUR
+    assets:bank:checking     -31.00 EUR
+
+end aliases
+
+
+; ---------------------------------------------------------------------------
+; apply account — everything in here is written as a *remainder*
+;
+; `savings` on the next transaction is really `assets:bank:savings`. Writing
+; the full name in this region would produce
+; `assets:bank:assets:bank:savings`, which is the trap epic 3 exists to close.
+;
+; [TRY] The region is closed, so a plain append never lands in it. To land
+;       inside it, put this in a .hledger-x.toml beside your copy:
+;
+;           [add]
+;           insertion = "chronological"
+;
+;       then enter a transaction dated 2026-08-05 (after the 08-04 below,
+;       before the 08-09 further down). Enter the accounts by their full
+;       names — `assets:bank:savings`, `assets:bank:checking` — and watch
+;       hledger-x write the remainders. `hledger -f test.journal print` will
+;       read back exactly the accounts you typed.
+; [TRY] With chronological insertion still on, try the same date with
+;       `expenses:groceries` and `assets:cash`. Neither can be spelled
+;       anywhere in this region, so hledger-x refuses: it names every account
+;       it cannot write and the directive and line responsible, leaves the
+;       file untouched, and keeps your entry in the recovery journal.
+; ---------------------------------------------------------------------------
+apply account assets:bank
+
+2026-08-04 Transfer to savings
+    savings                  100.00 EUR
+    checking                -100.00 EUR
+
+end apply account
+
+
+; Back outside the region: plain full names again. A plain `hledger-x add`
+; appends after this, where nothing is in effect.
+2026-08-09 Rewe  ; client: acme
+    expenses:groceries         9.99 EUR
+    assets:cash               -9.99 EUR

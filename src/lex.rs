@@ -186,6 +186,61 @@ pub fn is_digit_group(t: &str) -> bool {
     t.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// Split a transaction description into its payee and note halves.
+///
+/// hledger's separator is the **first** `|`, and both halves are trimmed. A
+/// description with no `|` is its own payee *and* its own note — verified
+/// against hledger 1.99's `payees` and `notes` commands, including
+/// `a | b | c` → payee `a`, note `b | c`.
+///
+/// The distinction is not cosmetic: `hledger check payees` tests the payee
+/// half, so declaring the whole description string does **not** satisfy it.
+#[must_use]
+pub fn split_payee_note(description: &str) -> (&str, &str) {
+    description.split_once('|').map_or_else(
+        || {
+            let d = description.trim();
+            (d, d)
+        },
+        |(payee, note)| (payee.trim(), note.trim()),
+    )
+}
+
+/// The argument of a top-level `keyword` directive line with only the inline
+/// comment stripped — no 2-space annotation cut.
+///
+/// [`directive_arg`]'s cut exists for `account a:b  ; type: Asset`, where the
+/// annotation is not introduced by a `;`. It is wrong for directives whose
+/// argument is free text that may itself contain a run of spaces: an `alias`
+/// mapping, a `payee` name. `None` when the line is not that directive.
+#[must_use]
+pub fn directive_rest<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(keyword)?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let (body, _comment) = split_comment(rest.trim_start_matches(char::is_whitespace));
+    let body = rstrip(body);
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
+/// Whether a line is exactly the given directive keyword, comment and
+/// surrounding whitespace aside — `end apply account`, `end aliases`.
+#[must_use]
+pub fn is_directive(line: &str, keyword: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false; // indented: a posting or subdirective, not a directive
+    }
+    let (body, _comment) = split_comment(line);
+    // Collapse internal whitespace runs so `end  apply account` still counts.
+    let normalized: Vec<&str> = body.split_whitespace().collect();
+    normalized.join(" ") == keyword
+}
+
 /// Split amount tokens into (number field, commodity, remaining tokens).
 ///
 /// The remainder is the cost/assertion tail, kept verbatim and never aligned.
@@ -435,6 +490,59 @@ mod tests {
         assert!(!is_number_like("AMD"));
         assert!(!is_number_like("-"));
         assert!(!is_number_like(""));
+    }
+
+    #[test]
+    fn descriptions_split_into_payee_and_note_at_the_first_pipe() {
+        // Every case checked against hledger 1.99's `payees` / `notes`.
+        assert_eq!(
+            split_payee_note("Deutsche Bahn | ticket to Koeln"),
+            ("Deutsche Bahn", "ticket to Koeln")
+        );
+        // Trimmed on both sides, however it is spaced.
+        assert_eq!(split_payee_note("Rewe|groceries"), ("Rewe", "groceries"));
+        assert_eq!(
+            split_payee_note("   Rewe   |   groceries  "),
+            ("Rewe", "groceries")
+        );
+        // The *first* pipe splits; the rest belongs to the note.
+        assert_eq!(split_payee_note("a | b | c"), ("a", "b | c"));
+        // No pipe: the description is both halves.
+        assert_eq!(split_payee_note("Plain"), ("Plain", "Plain"));
+        assert_eq!(split_payee_note(""), ("", ""));
+        // A payee with an empty note, and vice versa.
+        assert_eq!(split_payee_note("Rewe |"), ("Rewe", ""));
+        assert_eq!(split_payee_note("| just a note"), ("", "just a note"));
+    }
+
+    #[test]
+    fn directive_rest_keeps_internal_space_runs() {
+        // An alias mapping is free text; the 2-space cut would truncate it.
+        assert_eq!(directive_arg("alias my  bank=X", "alias"), Some("my"));
+        assert_eq!(
+            directive_rest("alias my  bank=X", "alias"),
+            Some("my  bank=X")
+        );
+        assert_eq!(
+            directive_rest("payee Deutsche Bahn  ; note", "payee"),
+            Some("Deutsche Bahn")
+        );
+        assert_eq!(directive_rest("payee", "payee"), None);
+        assert_eq!(directive_rest("payees x", "payee"), None);
+    }
+
+    #[test]
+    fn end_directives_are_matched_whole() {
+        assert!(is_directive("end apply account", "end apply account"));
+        assert!(is_directive(
+            "end apply account  ; done",
+            "end apply account"
+        ));
+        assert!(is_directive("end  apply   account", "end apply account"));
+        assert!(is_directive("end aliases", "end aliases"));
+        assert!(!is_directive("end apply account foo", "end apply account"));
+        assert!(!is_directive("  end aliases", "end aliases"));
+        assert!(!is_directive("end aliasesX", "end aliases"));
     }
 
     #[test]
