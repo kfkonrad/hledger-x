@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
+      - name: Install hledger
+        env:
+          HLEDGER_VERSION: 1.52.1
+        run: |
+          set -euxo pipefail
+          # The semantic-equivalence tests skip themselves when hledger is not
+          # on PATH; install it so they actually run. Official static release
+          # tarball, which also contains hledger-ui/hledger-web — only the
+          # `hledger` binary is extracted.
+          curl -fsSL "https://github.com/simonmichael/hledger/releases/download/${HLEDGER_VERSION}/hledger-linux-x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin hledger
+          sudo chmod +x /usr/local/bin/hledger
+          hledger --version
+      - name: cargo test
+        run: cargo test
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
+        with:
+          components: clippy
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings

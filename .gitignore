@@ -1,1 +1,5 @@
 /target
+
+# goreleaser output
+/dist
+.zig-cache/
