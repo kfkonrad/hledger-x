@@ -714,7 +714,7 @@ fn add_with_no_input_writes_nothing() {
 #[test]
 fn add_respects_local_config() {
     let dir = scratch("add_local_config");
-    write(&dir, ".hledger-x.toml", "insertion = \"chronological\"\n");
+    write(&dir, ".hledger-x.toml", "[add]\ninsertion = \"chronological\"\n");
     let journal = write(
         &dir,
         "main.journal",
@@ -820,7 +820,7 @@ fn add_writes_typed_amounts_in_the_declared_style() {
 #[test]
 fn add_appends_equity_conversion_postings_when_configured() {
     let dir = scratch("add_equity_conversion");
-    write(&dir, ".hledger-x.toml", "equity_conversion = true\n");
+    write(&dir, ".hledger-x.toml", "[add]\nequity_conversion = true\n");
     let journal = write(
         &dir,
         "main.journal",
@@ -932,7 +932,7 @@ fn an_unreadable_file_is_reported_in_english() {
 #[test]
 fn a_typo_in_the_config_names_the_setting_it_meant() {
     let dir = scratch("err_cfg_typo");
-    write(&dir, ".hledger-x.toml", "formatfile = true\n");
+    write(&dir, ".hledger-x.toml", "[add]\nformatfile = true\n");
     let out = run_in(&dir, &["fmt", "-"], "");
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(
@@ -945,13 +945,28 @@ fn a_typo_in_the_config_names_the_setting_it_meant() {
 }
 
 #[test]
-fn a_wrongly_typed_config_value_says_what_it_wanted() {
-    let dir = scratch("err_cfg_type");
-    write(&dir, ".hledger-x.toml", "sort = true\nstrict = \"yes\"\n");
+fn an_add_setting_outside_the_add_section_says_where_it_belongs() {
+    let dir = scratch("err_cfg_section");
+    write(&dir, ".hledger-x.toml", "strict = true\n");
     let out = run_in(&dir, &["fmt", "-"], "");
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(
-        out.stderr.contains("line 2") && out.stderr.contains("expected true or false"),
+        out.stderr.contains("unknown setting `strict`")
+            && out.stderr.contains("`strict` belongs in the [add] section"),
+        "{}",
+        out.stderr
+    );
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn a_wrongly_typed_config_value_says_what_it_wanted() {
+    let dir = scratch("err_cfg_type");
+    write(&dir, ".hledger-x.toml", "sort = true\n[add]\nstrict = \"yes\"\n");
+    let out = run_in(&dir, &["fmt", "-"], "");
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("line 3") && out.stderr.contains("expected true or false"),
         "{}",
         out.stderr
     );
@@ -971,7 +986,7 @@ fn add_reports_a_missing_journal_without_a_report_banner() {
 #[test]
 fn add_reports_a_bad_config_without_a_report_banner() {
     let dir = scratch("err_add_cfg");
-    write(&dir, ".hledger-x.toml", "half_life_days = 0\n");
+    write(&dir, ".hledger-x.toml", "[add]\nequity_conversion_account = \"\"\n");
     let out = run_add(&dir, &[], "");
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(out.stderr.starts_with("hledger-x add: "), "{}", out.stderr);

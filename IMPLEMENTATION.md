@@ -343,7 +343,8 @@ Four indices, one pass over the parsed transactions, each entry
 score = Σ over occurrences of  0.5 ^ (age_days / half_life)
 ```
 
-`half_life` configurable, default 90 days, relative to today at parse time.
+`half_life` is fixed at 90 days (`index::DEFAULT_HALF_LIFE_DAYS`), relative to
+today at parse time.
 
 **Pre-fill and ranking use different rules on purpose**: pre-fill takes the
 *most recent* match (predictability when text is placed in front of the user);

@@ -151,7 +151,7 @@ impl SessionCtx {
         target: PathBuf,
         target_map: &FileMap,
     ) -> Self {
-        let index = Index::build(&journal, today, config.half_life_days);
+        let index = Index::build(&journal, today, crate::add::index::DEFAULT_HALF_LIFE_DAYS);
 
         let mut amount_ctx = journal.amount_ctx();
         let target_file = journal.file(&target).cloned();
@@ -513,7 +513,7 @@ impl Session {
     /// the next transaction. Cheap enough to redo wholesale, which keeps
     /// undo correct for free.
     fn reindex(&mut self) {
-        let half_life = self.ctx.config.half_life_days;
+        let half_life = crate::add::index::DEFAULT_HALF_LIFE_DAYS;
         let today = self.ctx.today;
         let mut index = Index::build(&self.ctx.journal, today, half_life);
         for txn in &self.completed {

@@ -106,8 +106,16 @@ fn locate(src: &str, byte: usize) -> Option<(usize, &str)> {
 /// phrased in terms of the file — passes through untouched.
 fn humanize(msg: &str) -> (String, Option<String>) {
     if let Some((field, valid)) = parse_backticked(msg, "unknown field `", ", expected one of ") {
+        // A near-miss against the settings valid *here* wins: inside `[add]`,
+        // `formatfile` is a typo for a setting of that table, not a setting
+        // written in the wrong table.
         let hint = suggest(field, valid).map_or_else(
-            || format!("valid settings are {valid}"),
+            || {
+                misplaced(field).map_or_else(
+                    || format!("valid settings are {valid}"),
+                    |setting| format!("`{setting}` belongs in the [add] section"),
+                )
+            },
             |near| format!("did you mean `{near}`?"),
         );
         return (format!("unknown setting `{field}`"), Some(hint));
@@ -135,6 +143,17 @@ fn parse_backticked<'a>(msg: &'a str, prefix: &str, joiner: &str) -> Option<(&'a
     let rest = msg.strip_prefix(prefix)?;
     let (name, tail) = rest.split_once('`')?;
     Some((name, tail.strip_prefix(joiner)?))
+}
+
+/// The `[add]` setting an unknown top-level key is, written in the wrong
+/// place. Matched the same forgiving way as [`suggest`], so `formatFile` at
+/// the top level is pointed at the section rather than at itself.
+fn misplaced(field: &str) -> Option<&'static str> {
+    let target = squash(field);
+    crate::config::ADD_SETTINGS
+        .iter()
+        .copied()
+        .find(|s| squash(s) == target)
 }
 
 /// The valid setting a typo most likely meant. Deliberately narrow: it matches

@@ -467,8 +467,9 @@ single decay:
 score = Σ over occurrences of  0.5 ^ (age_days / half_life)
 ```
 
-`half_life` configurable, default 90 days, evaluated relative to today at parse
-time.
+`half_life` is fixed at 90 days, evaluated relative to today at parse time. It
+was configurable in the original plan; it is not a matter of taste the way the
+completion styles are, so it stays a constant (2026-08, with the user).
 
 **Pre-fill and ranking deliberately use different rules.** Pre-fill takes the
 *most recent* matching transaction, because predictability matters more than
@@ -774,6 +775,11 @@ Interactions:
 - `~/.config/hledger-x/config.toml`
 - overridden by a local `.hledger-x.toml`, discovered by **walking up from cwd**,
   the same way hledger discovers its own config.
+- `ledger_file` and `sort` sit at the top level, since both subcommands read
+  them; everything `add` alone governs lives in an `[add]` table. Overriding is
+  key-by-key into the table, not table-wholesale: a local `[add]` that sets one
+  setting leaves the rest of the user file's `[add]` standing. An `add` setting
+  written at the top level is an error that names the section it belongs in.
 
 ---
 

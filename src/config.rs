@@ -69,8 +69,6 @@ pub struct Config {
     /// names are accepted, with a passing note when they are new to the
     /// journal.
     pub strict: bool,
-    /// Frecency half-life in days.
-    pub half_life_days: f64,
     /// Completion style for the account field, matched segment by segment.
     pub account_completion: Completion,
     /// Completion style for the description field. Descriptions are plain
@@ -96,7 +94,6 @@ impl Default for Config {
             sort: false,
             insertion: Insertion::Append,
             strict: false,
-            half_life_days: crate::add::index::DEFAULT_HALF_LIFE_DAYS,
             account_completion: Completion::Substring,
             description_completion: Completion::Substring,
             default_commodity: None,
@@ -118,17 +115,36 @@ impl Config {
     }
 }
 
+/// The settings that live in the `[add]` table, for the hint given when one
+/// of them is written at the top level instead.
+pub const ADD_SETTINGS: &[&str] = &[
+    "format_file",
+    "insertion",
+    "strict",
+    "account_completion",
+    "description_completion",
+    "default_commodity",
+    "equity_conversion",
+    "equity_conversion_account",
+];
+
 /// The raw TOML shape: everything optional, unknown keys rejected so a typo
 /// does not silently disable a setting.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
     ledger_file: Option<PathBuf>,
-    format_file: Option<bool>,
     sort: Option<bool>,
+    add: Option<RawAdd>,
+}
+
+/// The `[add]` table: everything `add` alone governs.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAdd {
+    format_file: Option<bool>,
     insertion: Option<RawInsertion>,
     strict: Option<bool>,
-    half_life_days: Option<f64>,
     account_completion: Option<Completion>,
     description_completion: Option<Completion>,
     default_commodity: Option<String>,
@@ -203,12 +219,6 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
             "equity_conversion_account must not be empty".to_owned(),
         ));
     }
-    if !cfg.half_life_days.is_finite() || cfg.half_life_days <= 0.0 {
-        return Err(ConfigError(format!(
-            "half_life_days must be a positive number, got {}",
-            cfg.half_life_days
-        )));
-    }
     Ok(())
 }
 
@@ -249,11 +259,20 @@ fn apply_str(
     if let Some(v) = raw.ledger_file {
         cfg.ledger_file = Some(resolve_path(v, base));
     }
-    if let Some(v) = raw.format_file {
-        cfg.format_file = v;
-    }
     if let Some(v) = raw.sort {
         cfg.sort = v;
+    }
+    if let Some(add) = raw.add {
+        apply_add(cfg, add);
+    }
+    Ok(())
+}
+
+/// Fold the `[add]` table into the running configuration, key by key: a table
+/// that sets one setting leaves the others as the file before it left them.
+fn apply_add(cfg: &mut Config, raw: RawAdd) {
+    if let Some(v) = raw.format_file {
+        cfg.format_file = v;
     }
     if let Some(v) = raw.insertion {
         cfg.insertion = match v {
@@ -263,9 +282,6 @@ fn apply_str(
     }
     if let Some(v) = raw.strict {
         cfg.strict = v;
-    }
-    if let Some(v) = raw.half_life_days {
-        cfg.half_life_days = v;
     }
     if let Some(v) = raw.account_completion {
         cfg.account_completion = v;
@@ -286,7 +302,6 @@ fn apply_str(
     if let Some(v) = raw.equity_conversion_account {
         cfg.equity_conversion_account = v;
     }
-    Ok(())
 }
 
 /// `~/.config/hledger-x/config.toml` (respecting `$XDG_CONFIG_HOME`), if it
@@ -324,7 +339,6 @@ mod tests {
         assert!(!cfg.sort);
         assert_eq!(cfg.insertion, Insertion::Append);
         assert!(!cfg.strict);
-        assert!((cfg.half_life_days - 90.0).abs() < f64::EPSILON);
         assert_eq!(cfg.account_completion, Completion::Substring);
         assert_eq!(cfg.description_completion, Completion::Substring);
         assert_eq!(cfg.default_commodity, None);
@@ -361,7 +375,9 @@ mod tests {
     #[test]
     fn equity_conversion_keys_parse() {
         let cfg = load_str(
-            Some("equity_conversion = true\nequity_conversion_account = \"equity:trading\"\n"),
+            Some(
+                "[add]\nequity_conversion = true\nequity_conversion_account = \"equity:trading\"\n",
+            ),
             None,
         )
         .unwrap();
@@ -371,22 +387,25 @@ mod tests {
 
     #[test]
     fn an_empty_equity_conversion_account_is_rejected() {
-        assert!(load_str(Some("equity_conversion_account = \"\"\n"), None).is_err());
+        assert!(load_str(Some("[add]\nequity_conversion_account = \"\"\n"), None).is_err());
     }
 
     #[test]
     fn local_config_overrides_user_config_key_by_key() {
-        let user = "sort = true\nhalf_life_days = 30\n";
-        let local = "half_life_days = 10\n";
+        let user = "sort = true\n[add]\nstrict = true\ninsertion = \"chronological\"\n";
+        let local = "[add]\ninsertion = \"append\"\n";
         let cfg = load_str(Some(user), Some(local)).unwrap();
         assert!(cfg.sort); // untouched by local
-        assert!((cfg.half_life_days - 10.0).abs() < f64::EPSILON);
+        assert!(cfg.strict); // untouched by the local [add] table
+        assert_eq!(cfg.insertion, Insertion::Append);
     }
 
     #[test]
     fn enums_parse_from_lowercase() {
         let cfg = load_str(
-            Some("strict = true\ninsertion = \"chronological\"\naccount_completion = \"fuzzy\"\n"),
+            Some(
+                "[add]\nstrict = true\ninsertion = \"chronological\"\naccount_completion = \"fuzzy\"\n",
+            ),
             None,
         )
         .unwrap();
@@ -397,22 +416,23 @@ mod tests {
 
     #[test]
     fn no_format_plus_sort_is_rejected_at_load() {
-        let err = load_str(Some("format_file = false\nsort = true\n"), None).unwrap_err();
+        let err = load_str(Some("sort = true\n[add]\nformat_file = false\n"), None).unwrap_err();
         assert!(err.0.contains("incompatible"));
         // Even split across the two files.
-        let err = load_str(Some("format_file = false\n"), Some("sort = true\n")).unwrap_err();
+        let err = load_str(Some("[add]\nformat_file = false\n"), Some("sort = true\n")).unwrap_err();
         assert!(err.0.contains("incompatible"));
     }
 
     #[test]
     fn unknown_keys_are_rejected_not_ignored() {
-        let err = load_str(Some("formatfile = true\n"), None).unwrap_err();
+        let err = load_str(Some("[add]\nformatfile = true\n"), None).unwrap_err();
         assert!(err.0.contains("formatfile"));
     }
 
     #[test]
-    fn nonsense_half_life_is_rejected() {
-        assert!(load_str(Some("half_life_days = 0\n"), None).is_err());
-        assert!(load_str(Some("half_life_days = -3\n"), None).is_err());
+    fn an_add_setting_at_the_top_level_is_rejected() {
+        let err = load_str(Some("format_file = false\n"), None).unwrap_err();
+        assert!(err.0.contains("format_file"), "{}", err.0);
+        assert!(err.0.contains("[add]"), "{}", err.0);
     }
 }
