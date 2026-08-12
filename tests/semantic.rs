@@ -36,13 +36,26 @@ fn have_hledger() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// `_` as a digit group mark is newer than hledger 1.52.1, which rejects it
+/// outright in a `commodity`/`D` directive. hledger-x supports it either way —
+/// the `amount` and `fmt` unit tests cover it with no hledger involved — so
+/// only the cross-check against a real hledger has to be conditional. Probed
+/// rather than version-sniffed: the question is what this binary accepts.
+fn hledger_accepts_underscore_group_mark(tmp: &Path) -> bool {
+    let probe = tmp.join("underscore-probe.journal");
+    let src = "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1 EUR\n    b  -1 EUR\n";
+    fs::write(&probe, src).unwrap();
+    hledger_print(&probe).is_some()
+}
+
 /// Restyling fixtures: declared styles plus deliberately mis-styled amounts.
 /// Everything here restyles somewhere — the invariant is that `hledger
-/// print` cannot tell the difference.
+/// print` cannot tell the difference. Group marks here are ones every hledger
+/// accepts; `_` lives in [`UNDERSCORE_FIXTURES`].
 const RESTYLE_FIXTURES: &[(&str, &str)] = &[
     (
         "sides-and-grouping",
-        "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234EUR\n    b  EUR-1234\n",
+        "commodity 1,000.00 EUR\n\n2026-01-01 x\n    a  1234EUR\n    b  EUR-1234\n",
     ),
     (
         "comma-decimal-reinterpretation",
@@ -52,29 +65,40 @@ const RESTYLE_FIXTURES: &[(&str, &str)] = &[
     (
         "decimal-mark-directive",
         // The forced mark stays in the output; only the grouping normalizes.
-        "decimal-mark ,\ncommodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1000,5 EUR\n    b  -1000,5 EUR\n",
+        // The group mark must not be the forced decimal mark, hence the space.
+        "decimal-mark ,\ncommodity 1 000.00 EUR\n\n2026-01-01 x\n    a  1000,5 EUR\n    b  -1000,5 EUR\n",
     ),
     (
         "cost-and-assertion-tails",
-        "commodity 1_000.00 EUR\ncommodity 1,000.00 USD\n\n2026-01-01 x\n    a  10EUR @ 1.1USD\n    b  -11 USD = -11USD\n",
+        "commodity 1 000.00 EUR\ncommodity 1,000.00 USD\n\n2026-01-01 x\n    a  10EUR @ 1.1USD\n    b  -11 USD = -11USD\n",
     ),
     (
         "format-subdirective-and-d",
-        "commodity EUR\n    format 1.000,00 EUR\nD 1_000.00 GBP\n\n2026-01-01 x\n    a  1000EUR\n    b  -1000 EUR\n\n2026-01-02 y\n    a  10GBP\n    b  -10 GBP\n",
+        "commodity EUR\n    format 1.000,00 EUR\nD 1,000.00 GBP\n\n2026-01-01 x\n    a  1000EUR\n    b  -1000 EUR\n\n2026-01-02 y\n    a  10GBP\n    b  -10 GBP\n",
     ),
 ];
 
-#[test]
-fn restyling_preserves_hledger_semantics() {
-    if !have_hledger() {
-        eprintln!("hledger not on PATH; skipping semantic check");
-        return;
-    }
-    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-restyle"]
-        .iter()
-        .collect();
-    fs::create_dir_all(&tmp).unwrap();
-    for (name, src) in RESTYLE_FIXTURES {
+/// The same invariant for `_` group marks, run only against an hledger that
+/// understands them.
+const UNDERSCORE_FIXTURES: &[(&str, &str)] = &[
+    (
+        "underscore-sides-and-grouping",
+        "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234EUR\n    b  EUR-1234\n",
+    ),
+    (
+        "underscore-decimal-mark-directive",
+        "decimal-mark ,\ncommodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1000,5 EUR\n    b  -1000,5 EUR\n",
+    ),
+    (
+        "underscore-d-directive",
+        "D 1_000.00 GBP\n\n2026-01-01 x\n    a  1234GBP\n    b  -1234 GBP\n",
+    ),
+];
+
+/// Format each fixture and assert `hledger print` cannot tell before from
+/// after.
+fn check_restyle_fixtures(tmp: &Path, fixtures: &[(&str, &str)]) {
+    for (name, src) in fixtures {
         let before_path = tmp.join(format!("{name}.before.journal"));
         fs::write(&before_path, src).unwrap();
         let before = hledger_print(&before_path)
@@ -88,6 +112,36 @@ fn restyling_preserves_hledger_semantics() {
             .unwrap_or_else(|| panic!("{name}: hledger rejected the output"));
         assert_eq!(after, before, "{name}: print output changed");
     }
+}
+
+#[test]
+fn restyling_preserves_hledger_semantics() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-restyle"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+    check_restyle_fixtures(&tmp, RESTYLE_FIXTURES);
+}
+
+#[test]
+fn restyling_preserves_hledger_semantics_with_underscore_group_marks() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-underscore"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+    if !hledger_accepts_underscore_group_mark(&tmp) {
+        eprintln!("this hledger rejects `_` group marks; skipping");
+        return;
+    }
+    check_restyle_fixtures(&tmp, UNDERSCORE_FIXTURES);
 }
 
 #[test]

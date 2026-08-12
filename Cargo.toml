@@ -15,30 +15,19 @@ name = "hledger_x"
 path = "src/lib.rs"
 
 [dependencies]
-# DATES AND SMART-DATE RESOLUTION
 chrono = "0.4.45"
-# COMMAND LINE PARSING
 clap = { version = "4.5.53", features = ["derive"] }
-# SIMPLE PRETTY ERROR HANDLING
 color-eyre = "0.6.5"
-# RAW-MODE TERMINAL UI
 crossterm = "0.29.0"
-# INCLUDE-DIRECTIVE GLOB EXPANSION
 glob = "0.3.4"
-# EXACT DECIMAL AMOUNTS, NEVER FLOATS
 rust_decimal = "1.42.1"
-# CONFIG (DE)SERIALIZATION
 serde = { version = "1.0.229", features = ["derive"] }
-# UNIFIED DIFFS FOR `fmt --diff`
 similar = { version = "3.1.2", default-features = false, features = ["text"] }
 toml = "1.1.4"
 
 [lints.clippy]
-# UM, ACTUALLY
 pedantic = { level = "deny", priority = -1 }
-# DEVELOPING LINTS
 nursery = { level = "deny", priority = -1 }
-# DENY PANICS
 unwrap_used = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
@@ -55,3 +44,10 @@ as_conversions = "deny"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 'z'   # Optimize for size.
+lto = true        # Enable Link Time Optimisation
+codegen-units = 1 # Reduced to increase optimisations.
+panic = 'abort'   # Abort on panic
+strip = "symbols" # Strip symbols from binary
