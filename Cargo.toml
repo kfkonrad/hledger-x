@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Plain text accounting tooling: a journal formatter and interactive data entry"
 license = "MIT"
-publish = false
 
 [[bin]]
 name = "hledger-x"
