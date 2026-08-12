@@ -6,5 +6,6 @@
 
 pub mod index;
 pub mod parser;
+pub mod scope;
 pub mod ui;
 pub mod write;

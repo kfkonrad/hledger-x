@@ -19,7 +19,7 @@ use rust_decimal::Decimal;
 
 use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
-use super::write::NewTransaction;
+use super::write::{comment_suffix, NewTransaction, Posting};
 use crate::amount::{imbalance, parse_amount, render_amount_like, AmountCtx};
 use crate::config::{Completion, Config};
 use crate::fmt::posting::{parse_posting, render};
@@ -54,19 +54,29 @@ impl Field {
         }
     }
 
-    fn from_ordinal(n: usize) -> Self {
+    const fn from_ordinal(n: usize) -> Self {
         match n {
             0 => Self::Date,
             1 => Self::Description,
             _ => {
                 let i = n.saturating_sub(2).saturating_div(2);
-                if n.checked_rem(2) == Some(0) {
+                // Even ordinals are accounts, odd ones amounts.
+                if n & 1 == 0 {
                     Self::Account(i)
                 } else {
                     Self::Amount(i)
                 }
             }
         }
+    }
+
+    /// Whether this field's buffer can carry a trailing `; comment`.
+    ///
+    /// Every field of a journal line can, which is the point — the comment is
+    /// not a separate prompt, it is the tail of the line you are already
+    /// typing.
+    const fn takes_comment(self) -> bool {
+        !matches!(self, Self::Date)
     }
 
     /// The prompt label shown to the user.
@@ -78,6 +88,33 @@ impl Field {
             Self::Account(i) => format!("account {}", i.saturating_add(1)),
             Self::Amount(i) => format!("amount {}", i.saturating_add(1)),
         }
+    }
+}
+
+/// Split a field buffer into its value and the comment a `;` introduces.
+///
+/// This is what makes comments cost nothing: `Rewe ; trip: berlin` in the
+/// description field is a description and a comment, exactly as the journal
+/// line reads, with no extra prompt for the overwhelmingly common case of no
+/// comment at all. The returned comment has no `;` and is trimmed; `None`
+/// means the buffer carried no comment.
+fn split_field_comment(buffer: &str) -> (&str, Option<&str>) {
+    let (body, comment) = crate::lex::split_comment(buffer);
+    (
+        body.trim(),
+        comment.map(|c| c.trim_start().trim_start_matches(';').trim()),
+    )
+}
+
+/// The inverse: put a field's value and comment back into one buffer, so
+/// navigating back to a field shows what was typed there.
+fn join_field_comment(value: &str, comment: &str) -> String {
+    if comment.trim().is_empty() {
+        value.to_owned()
+    } else if value.is_empty() {
+        format!("; {}", comment.trim())
+    } else {
+        format!("{value} ; {}", comment.trim())
     }
 }
 
@@ -136,6 +173,19 @@ pub struct SessionCtx {
     pub declared_commodities_visible: HashSet<String>,
     /// Every commodity seen in a posting.
     pub used_commodities: HashSet<String>,
+    /// Payee declarations visible at the insertion point — what `hledger
+    /// check payees` would accept there.
+    pub declared_payees_visible: HashSet<String>,
+    /// Every *payee* used by a transaction anywhere in the tree — the payee
+    /// half of its description. A payee in here is not new, even if
+    /// undeclared.
+    pub used_payees: HashSet<String>,
+    /// Declared payees (full pool, for completion).
+    pub declared_payees: Vec<String>,
+    /// Declared tag names (full pool, for completion inside comments).
+    pub declared_tags: Vec<String>,
+    /// Tag names seen in comments anywhere in the tree.
+    pub used_tags: Vec<String>,
     /// Declared accounts (full pool — offering a name is harmless even when
     /// it is declared below the insertion point).
     pub declared_accounts: Vec<String>,
@@ -177,16 +227,39 @@ impl SessionCtx {
             .filter(|c| c.pos < insertion_pos)
             .map(|c| c.name.clone())
             .collect();
+        let declared_payees_visible: HashSet<String> = journal
+            .payees_visible_at(insertion_pos)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
         let mut used_accounts = HashSet::new();
         let mut used_commodities = HashSet::new();
+        let mut used_payees = HashSet::new();
+        let mut used_tags: Vec<String> = Vec::new();
         for t in &journal.transactions {
+            if !t.description.is_empty() {
+                let (payee, _note) = crate::lex::split_payee_note(&t.description);
+                used_payees.insert(payee.to_owned());
+            }
+            for name in tags_in(t.comment.as_deref()) {
+                if !used_tags.contains(&name) {
+                    used_tags.push(name);
+                }
+            }
             for p in &t.postings {
                 used_accounts.insert(p.account.clone());
                 if let Some(c) = &p.commodity {
                     used_commodities.insert(c.clone());
                 }
+                for name in tags_in(p.comment.as_deref()) {
+                    if !used_tags.contains(&name) {
+                        used_tags.push(name);
+                    }
+                }
             }
         }
+        let declared_payees: Vec<String> = journal.payees.iter().map(|d| d.name.clone()).collect();
+        let declared_tags: Vec<String> = journal.tags.iter().map(|d| d.name.clone()).collect();
         let declared_accounts: Vec<String> =
             journal.accounts.iter().map(|d| d.name.clone()).collect();
         let strict = config.strict;
@@ -213,19 +286,77 @@ impl SessionCtx {
             used_accounts,
             declared_commodities_visible,
             used_commodities,
+            declared_payees_visible,
+            used_payees,
+            declared_payees,
+            declared_tags,
+            used_tags,
             declared_accounts,
             strict,
             default_commodity,
         }
     }
 
+    /// Ranked description candidates for the description field: whole
+    /// descriptions as the journal writes them — `payee | note` included,
+    /// since re-entering one wholesale is the point — then declared payees
+    /// that appear in no transaction yet.
+    #[must_use]
+    pub fn description_pool(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .index
+            .ranked_descriptions()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        for p in &self.declared_payees {
+            if !out.iter().any(|x| x == p) {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+
+    /// Ranked *payee* candidates — the payee halves the journal uses, plus
+    /// every declared payee. This is what the near-miss hint searches, so
+    /// that `bahn` is answered with `Deutsche Bahn` and not with some whole
+    /// description that happens to contain it.
+    #[must_use]
+    pub fn payee_pool(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .index
+            .ranked_payees()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        for p in &self.declared_payees {
+            if !out.iter().any(|x| x == p) {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+
+    /// The tag completion pool: declared tags first, then tags seen in
+    /// comments anywhere in the tree.
+    #[must_use]
+    pub fn tag_pool(&self) -> Vec<String> {
+        let mut out = self.declared_tags.clone();
+        for t in &self.used_tags {
+            if !out.iter().any(|x| x == t) {
+                out.push(t.clone());
+            }
+        }
+        out
+    }
+
     /// Ranked account candidates, conditioned on a description, with
     /// declared-but-unused accounts appended.
     #[must_use]
-    pub fn account_pool(&self, description: Option<&str>) -> Vec<String> {
+    pub fn account_pool(&self, payee: Option<&str>) -> Vec<String> {
         let mut out: Vec<String> = self
             .index
-            .ranked_accounts(description)
+            .ranked_accounts(payee)
             .into_iter()
             .map(ToOwned::to_owned)
             .collect();
@@ -263,8 +394,10 @@ pub struct Draft {
     pub date: Option<NaiveDate>,
     /// Accepted description.
     pub description: String,
-    /// Committed postings: (account, raw amount text).
-    pub postings: Vec<(String, String)>,
+    /// The transaction's comment text, without the leading `;`.
+    pub comment: String,
+    /// Committed postings.
+    pub postings: Vec<Posting>,
     /// The current field.
     pub field: Field,
     /// The current field's edit buffer.
@@ -276,7 +409,8 @@ pub struct Draft {
     /// editing keys keep it for editing).
     pub pristine: bool,
     /// Template postings pre-filling this draft, from the description's most
-    /// recent transaction.
+    /// recent transaction. Comments are deliberately not pre-filled: they
+    /// describe the occasion, not the shape of the transaction.
     template: Vec<(String, String)>,
     /// Highest field reached, as an ordinal — the navigation frontier.
     frontier: usize,
@@ -379,42 +513,70 @@ impl Draft {
         self.postings.len()
     }
 
+    /// The payee half of the description — everything before the first `|`,
+    /// or the whole thing when there is none. This is the transaction's
+    /// identity: what the payee checks test and what the template keys on.
+    #[must_use]
+    pub fn payee(&self) -> &str {
+        crate::lex::split_payee_note(&self.description).0
+    }
+
+    /// The note half — everything after the first `|`. Equal to the payee
+    /// when the description carries no `|`, as in hledger.
+    #[must_use]
+    pub fn note(&self) -> &str {
+        crate::lex::split_payee_note(&self.description).1
+    }
+
     /// Save the buffer into the current field's slot without validation
     /// (used when navigating away).
+    /// A posting's comment belongs to the *line*, so it can be typed on
+    /// either of the line's two fields. The amount field owns it — it is the
+    /// end of the line, and the one place clearing it makes sense; the
+    /// account field can only add one, which the amount field then carries.
     fn stash(&mut self) {
-        let text = self.buffer.trim().to_owned();
+        let (value, comment) = split_field_comment(&self.buffer);
+        let value = value.to_owned();
         match self.field {
-            Field::Date => self.date_input = text,
-            Field::Description => self.description = text,
+            Field::Date => self.date_input = value,
+            Field::Description => {
+                self.description = value;
+                self.comment = comment.unwrap_or_default().to_owned();
+            }
             Field::Account(i) => {
                 ensure_len(&mut self.postings, i.saturating_add(1));
                 if let Some(p) = self.postings.get_mut(i) {
-                    p.0 = text;
+                    p.account = value;
+                    if let Some(c) = comment {
+                        c.clone_into(&mut p.comment);
+                    }
                 }
             }
             Field::Amount(i) => {
                 ensure_len(&mut self.postings, i.saturating_add(1));
                 if let Some(p) = self.postings.get_mut(i) {
-                    p.1 = text;
+                    p.amount = value;
+                    comment.unwrap_or_default().clone_into(&mut p.comment);
                 }
             }
         }
     }
 
-    /// The stored text of a field (for loading on navigation).
+    /// The stored text of a field (for loading on navigation), comment and
+    /// all, so navigating back shows what was typed.
     fn stored(&self, field: Field) -> String {
         match field {
             Field::Date => self.date_input.clone(),
-            Field::Description => self.description.clone(),
+            Field::Description => join_field_comment(&self.description, &self.comment),
             Field::Account(i) => self
                 .postings
                 .get(i)
-                .map(|p| p.0.clone())
+                .map(|p| p.account.clone())
                 .unwrap_or_default(),
             Field::Amount(i) => self
                 .postings
                 .get(i)
-                .map(|p| p.1.clone())
+                .map(|p| join_field_comment(&p.amount, &p.comment))
                 .unwrap_or_default(),
         }
     }
@@ -453,13 +615,13 @@ impl Draft {
 
     /// The amounts committed so far, as raw strings.
     fn committed_amounts(&self) -> Vec<&str> {
-        self.postings.iter().map(|(_, a)| a.as_str()).collect()
+        self.postings.iter().map(|p| p.amount.as_str()).collect()
     }
 }
 
-fn ensure_len(v: &mut Vec<(String, String)>, n: usize) {
+fn ensure_len(v: &mut Vec<Posting>, n: usize) {
     while v.len() < n {
-        v.push((String::new(), String::new()));
+        v.push(Posting::default());
     }
 }
 
@@ -476,18 +638,17 @@ struct CompletionQuery {
     style: Completion,
     shape: complete::Shape,
     text: String,
+    /// Literal text preceding the completed part, including any separator.
     head: String,
+    /// Literal text appended after it — a tag name's `:`.
+    tail: String,
     pool: Vec<String>,
 }
 
 impl CompletionQuery {
     /// Put a completed candidate back into buffer terms.
     fn rejoin(&self, candidate: &str) -> String {
-        if self.head.is_empty() {
-            candidate.to_owned()
-        } else {
-            format!("{} {candidate}", self.head)
-        }
+        format!("{}{candidate}{}", self.head, self.tail)
     }
 }
 
@@ -504,6 +665,10 @@ pub struct Session {
     /// be asked about it again in the same sitting. Undo does not retract
     /// them: the acceptance was deliberate either way.
     entered_accounts: Vec<String>,
+    /// Descriptions committed to during this session, for the same reason:
+    /// having accepted a new payee once, do not ask again in the same
+    /// sitting.
+    entered_payees: Vec<String>,
 }
 
 impl Session {
@@ -515,6 +680,7 @@ impl Session {
             completed: Vec::new(),
             draft: Draft::new(),
             entered_accounts: Vec::new(),
+            entered_payees: Vec::new(),
         };
         s.reset_draft();
         s
@@ -525,8 +691,8 @@ impl Session {
     /// freshest thing the user could want.
     #[must_use]
     pub fn account_pool(&self) -> Vec<String> {
-        let desc = (!self.draft.description.is_empty()).then_some(self.draft.description.as_str());
-        let mut pool = self.ctx.account_pool(desc);
+        let payee = self.draft.payee();
+        let mut pool = self.ctx.account_pool((!payee.is_empty()).then_some(payee));
         for a in self.entered_accounts.iter().rev() {
             if !pool.iter().any(|x| x == a) {
                 pool.insert(0, a.clone());
@@ -543,6 +709,38 @@ impl Session {
             || self.entered_accounts.iter().any(|a| a == account)
     }
 
+    /// Whether `payee` is already known — the same three sources.
+    fn payee_known(&self, payee: &str) -> bool {
+        self.ctx.declared_payees_visible.contains(payee)
+            || self.ctx.used_payees.contains(payee)
+            || self.entered_payees.iter().any(|p| p == payee)
+    }
+
+    /// A close existing payee, for "did you mean". Descriptions are plain
+    /// text, so this is edit distance only — there are no segments to match.
+    #[must_use]
+    pub fn near_payee(&self, name: &str) -> Option<String> {
+        let pool = self.ctx.payee_pool();
+        let lower = name.to_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        // Containment is checked *first*, and deliberately so: `bahn` sits at
+        // edit distance 9 from `Deutsche Bahn` — further than several
+        // unrelated payees — so ranking by distance alone would answer with
+        // whichever short name happened to be nearest and miss the one case
+        // this hint exists for. The pool is frecency-ordered, so the first
+        // containing candidate is the likeliest.
+        if let Some(hit) = pool.iter().find(|c| c.to_lowercase().contains(&lower)) {
+            return Some(hit.clone());
+        }
+        let (d, candidate) = pool
+            .iter()
+            .map(|c| (levenshtein(&lower, &c.to_lowercase()), c))
+            .min_by(|(da, ca), (db, cb)| da.cmp(db).then_with(|| ca.cmp(cb)))?;
+        (d <= name.chars().count().saturating_div(2).max(2)).then(|| candidate.clone())
+    }
+
     /// Rebuild the indices over the journal plus everything completed so
     /// far, so a description or commodity entered this session completes in
     /// the next transaction. Cheap enough to redo wholesale, which keeps
@@ -555,11 +753,11 @@ impl Session {
             let postings: Vec<(String, Option<String>)> = txn
                 .postings
                 .iter()
-                .map(|(account, amount)| {
-                    let commodity = parse_amount(amount, &self.ctx.amount_ctx)
+                .map(|p| {
+                    let commodity = parse_amount(&p.amount, &self.ctx.amount_ctx)
                         .map(|a| a.commodity)
                         .filter(|c| !c.is_empty());
-                    (account.clone(), commodity)
+                    (p.account.clone(), commodity)
                 })
                 .collect();
             index.bump_session(txn.date, &txn.description, &postings, today, half_life);
@@ -618,7 +816,7 @@ impl Session {
             .draft
             .postings
             .get(i)
-            .map(|(a, _)| a.as_str())
+            .map(|p| p.account.as_str())
             .unwrap_or_default();
         let template_match = self
             .draft
@@ -647,7 +845,7 @@ impl Session {
             .iter()
             .enumerate()
             .filter(|(j, _)| *j != i)
-            .map(|(_, (_, a))| a.as_str())
+            .map(|(_, p)| p.amount.as_str())
             .collect();
         let sums = imbalance(&amounts, &self.ctx.amount_ctx)?;
         let [(commodity, value)] = sums.as_slice() else {
@@ -682,6 +880,25 @@ impl Session {
             .collect()
     }
 
+    /// Tag-name completion for the comment tail of the buffer, when there is
+    /// one. Only the tag *name* completes: a value is free text, and offering
+    /// candidates for it would be guessing.
+    fn tag_query(&self) -> Option<CompletionQuery> {
+        let at = self.draft.buffer.find(';')?;
+        let head = self.draft.buffer.get(..=at)?;
+        let rest = self.draft.buffer.get(at.saturating_add(1)..)?;
+        let (tag_head, partial) = split_tag_query(rest)?;
+        Some(CompletionQuery {
+            style: self.ctx.config.description_completion,
+            shape: complete::Shape::Plain,
+            text: partial.to_owned(),
+            head: format!("{head}{tag_head}"),
+            // Completing a tag name commits to it being a tag.
+            tail: ":".to_owned(),
+            pool: self.ctx.tag_pool(),
+        })
+    }
+
     /// What Tab should put in the buffer, or `None` when completion makes no
     /// progress and the menu should open instead.
     #[must_use]
@@ -695,6 +912,13 @@ impl Session {
 
     /// The completion problem posed by the current field.
     fn completion_query(&self) -> Option<CompletionQuery> {
+        // Past a `;` the buffer is comment text whatever field it belongs to,
+        // and what completes there is a tag name.
+        if self.draft.field.takes_comment() {
+            if let Some(q) = self.tag_query() {
+                return Some(q);
+            }
+        }
         let query = self.draft.buffer.trim();
         match self.draft.field {
             Field::Date => None,
@@ -705,19 +929,15 @@ impl Session {
                 shape: complete::Shape::Plain,
                 text: query.to_owned(),
                 head: String::new(),
-                pool: self
-                    .ctx
-                    .index
-                    .ranked_descriptions()
-                    .into_iter()
-                    .map(ToOwned::to_owned)
-                    .collect(),
+                tail: String::new(),
+                pool: self.ctx.description_pool(),
             }),
             Field::Account(_) => Some(CompletionQuery {
                 style: self.ctx.config.account_completion,
                 shape: complete::Shape::Account,
                 text: query.to_owned(),
                 head: String::new(),
+                tail: String::new(),
                 pool: self.account_pool(),
             }),
             Field::Amount(_) => {
@@ -740,7 +960,12 @@ impl Session {
                     style: Completion::Prefix,
                     shape: complete::Shape::Plain,
                     text: tail.to_owned(),
-                    head: head.to_owned(),
+                    head: if head.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{head} ")
+                    },
+                    tail: String::new(),
                     pool,
                 })
             }
@@ -751,7 +976,7 @@ impl Session {
     pub fn submit(&mut self) -> Submit {
         match self.draft.field {
             Field::Date => self.submit_date(),
-            Field::Description => self.submit_description(),
+            Field::Description => self.submit_description(false),
             Field::Account(i) => self.submit_account(i, false),
             Field::Amount(i) => self.submit_amount(i, false),
         }
@@ -761,10 +986,17 @@ impl Session {
     /// [`Submit::Confirm`] question with yes.
     pub fn submit_confirmed(&mut self) -> Submit {
         match self.draft.field {
+            Field::Description => self.submit_description(true),
             Field::Account(i) => self.submit_account(i, true),
             Field::Amount(i) => self.submit_amount(i, true),
-            Field::Date | Field::Description => Submit::Invalid("nothing to confirm".to_owned()),
+            Field::Date => Submit::Invalid("nothing to confirm".to_owned()),
         }
+    }
+
+    /// The current buffer split into the field's value and its comment.
+    fn buffer_parts(&self) -> (String, String) {
+        let (value, comment) = split_field_comment(&self.draft.buffer);
+        (value.to_owned(), comment.unwrap_or_default().to_owned())
     }
 
     fn submit_date(&mut self) -> Submit {
@@ -795,22 +1027,63 @@ impl Session {
         Submit::Advanced
     }
 
-    fn submit_description(&mut self) -> Submit {
-        let text = self.draft.buffer.trim().to_owned();
+    fn submit_description(&mut self, confirmed: bool) -> Submit {
+        let (text, comment) = self.buffer_parts();
+        self.draft.comment = comment;
+        // The description is `payee | note`; everything that treats it as an
+        // *identity* — the checks, the near-miss, the template — uses the
+        // payee half, exactly as hledger does. Only the file gets the whole
+        // string.
+        let (payee, _note) = crate::lex::split_payee_note(&text);
+        let payee = payee.to_owned();
+        // The payee checks mirror the account ones exactly: `strict` asks
+        // before using an undeclared payee (as `hledger check payees` would),
+        // otherwise a name new to the journal gets a passing note. This is
+        // the fix for hledger `add` matching `bahn` against `Deutsche Bahn`
+        // to pick defaults and then writing the literal `bahn`.
+        let mut note = None;
+        if !confirmed && !payee.is_empty() {
+            if self.ctx.strict && !self.ctx.declared_payees_visible.contains(&payee) {
+                let hint = self
+                    .near_payee(&payee)
+                    .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
+                return Submit::Confirm {
+                    question: format!("{payee} is not a declared payee — use it anyway?{hint}"),
+                };
+            }
+            if !self.payee_known(&payee) {
+                let hint = self
+                    .near_payee(&payee)
+                    .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
+                note = Some(format!("{payee} is new to this journal{hint}"));
+            }
+        }
         self.draft.description.clone_from(&text);
-        // Load the template once, from the description's most recent
-        // transaction. Predictability: most recent, not highest scoring.
+        if !payee.is_empty() && !self.entered_payees.iter().any(|p| p == &payee) {
+            self.entered_payees.push(payee.clone());
+        }
+        // Load the template once, from the payee's most recent transaction.
+        // Predictability: most recent, not highest scoring.
         if self.draft.postings.is_empty() && self.draft.template.is_empty() {
-            if let Some(tpl) = self.ctx.index.template(&self.ctx.journal, &text) {
+            if let Some(tpl) = self.ctx.index.template(&self.ctx.journal, &payee) {
                 self.draft.template = template_postings(tpl);
             }
         }
         self.advance_to(Field::Account(0));
-        Submit::Advanced
+        note.map_or(Submit::Advanced, Submit::AdvancedWithNote)
     }
 
     fn submit_account(&mut self, i: usize, confirmed: bool) -> Submit {
-        let mut text = self.draft.buffer.trim().to_owned();
+        // A `;` here is a comment for this posting's line, not part of the
+        // account name — writing it into the name would produce a corrupt
+        // posting line.
+        let (mut text, comment) = self.buffer_parts();
+        if !comment.is_empty() {
+            ensure_len(&mut self.draft.postings, i.saturating_add(1));
+            if let Some(p) = self.draft.postings.get_mut(i) {
+                p.comment = comment;
+            }
+        }
         if text.is_empty() {
             // Enter on an empty account accepts the suggested one, the way it
             // does at the date and amount prompts. With nothing suggested —
@@ -864,13 +1137,19 @@ impl Session {
         }
         ensure_len(&mut self.draft.postings, i.saturating_add(1));
         if let Some(p) = self.draft.postings.get_mut(i) {
-            text.clone_into(&mut p.0);
+            text.clone_into(&mut p.account);
         }
         self.advance_to(Field::Amount(i));
     }
 
     fn submit_amount(&mut self, i: usize, confirmed: bool) -> Submit {
-        let mut text = self.draft.buffer.trim().to_owned();
+        // The amount field owns this posting's comment: it is the end of the
+        // line, so what is typed here is the whole truth about it.
+        let (mut text, comment) = self.buffer_parts();
+        ensure_len(&mut self.draft.postings, i.saturating_add(1));
+        if let Some(p) = self.draft.postings.get_mut(i) {
+            p.comment = comment;
+        }
         if text.is_empty() {
             let Some(suggested) = self.suggestion() else {
                 return Submit::Invalid(if i == 0 {
@@ -897,7 +1176,7 @@ impl Session {
             {
                 ensure_len(&mut self.draft.postings, i.saturating_add(1));
                 if let Some(p) = self.draft.postings.get_mut(i) {
-                    p.1.clone_from(&suggested);
+                    p.amount.clone_from(&suggested);
                 }
                 self.draft.set_buffer(&suggested);
                 self.draft.postings.truncate(i.saturating_add(1));
@@ -965,9 +1244,16 @@ impl Session {
     /// Commit an amount and advance to the next account prompt.
     fn accept_amount(&mut self, i: usize, text: &str) {
         // Put the (possibly commodity-completed) text back in the buffer:
-        // advancing stashes the buffer into this field's slot.
-        self.draft.set_buffer(text);
+        // advancing stashes the buffer into this field's slot, so the comment
+        // has to travel with it or stashing would drop it.
         ensure_len(&mut self.draft.postings, i.saturating_add(1));
+        let comment = self
+            .draft
+            .postings
+            .get(i)
+            .map(|p| p.comment.clone())
+            .unwrap_or_default();
+        self.draft.set_buffer(&join_field_comment(text, &comment));
         self.advance_to(Field::Account(i.saturating_add(1)));
     }
 
@@ -988,7 +1274,7 @@ impl Session {
             .get(i.saturating_add(1)..)
             .is_some_and(|rest| {
                 rest.iter()
-                    .any(|(a, amt)| !a.trim().is_empty() || !amt.trim().is_empty())
+                    .any(|p| !p.account.trim().is_empty() || !p.amount.trim().is_empty())
             })
     }
 
@@ -1000,7 +1286,7 @@ impl Session {
             .draft
             .postings
             .last()
-            .is_some_and(|(a, _)| a.trim().is_empty())
+            .is_some_and(|p| p.account.trim().is_empty())
         {
             self.draft.postings.pop();
         }
@@ -1017,7 +1303,11 @@ impl Session {
         // Refuse to write a transaction that provably does not balance.
         // Unknown imbalance (unparseable or elided amounts) passes — entry
         // tool, not validator.
-        let has_bare = self.draft.postings.iter().any(|(_, a)| a.trim().is_empty());
+        let has_bare = self
+            .draft
+            .postings
+            .iter()
+            .any(|p| p.amount.trim().is_empty());
         if !has_bare {
             let amounts = self.draft.committed_amounts();
             if let Some(sums) = imbalance(&amounts, &self.ctx.amount_ctx) {
@@ -1040,6 +1330,7 @@ impl Session {
         let txn = NewTransaction {
             date,
             description: self.draft.description.clone(),
+            comment: self.draft.comment.clone(),
             postings,
         };
         Submit::Done(Box::new(txn))
@@ -1057,7 +1348,7 @@ impl Session {
     ///
     /// Returned unchanged when `equity_conversion` is off, when nothing is
     /// converted, or when any amount does not parse.
-    fn with_equity_conversions(&self, postings: Vec<(String, String)>) -> Vec<(String, String)> {
+    fn with_equity_conversions(&self, postings: Vec<Posting>) -> Vec<Posting> {
         if !self.ctx.config.equity_conversion.is_on() {
             return postings;
         }
@@ -1066,10 +1357,10 @@ impl Session {
             return postings;
         };
         let account = &self.ctx.config.equity_conversion_account;
-        let mut out: Vec<(String, String)> = Vec::new();
-        let mut sections: Vec<Vec<(String, String)>> = Vec::new();
+        let mut out: Vec<Posting> = Vec::new();
+        let mut sections: Vec<Vec<Posting>> = Vec::new();
         for group in &layout.groups {
-            let mut section: Vec<(String, String)> = group
+            let mut section: Vec<Posting> = group
                 .postings
                 .iter()
                 .filter_map(|i| postings.get(*i).cloned())
@@ -1078,11 +1369,11 @@ impl Session {
                 group
                     .equity
                     .iter()
-                    .map(|amount| (account.clone(), amount.clone())),
+                    .map(|amount| Posting::new(account, amount)),
             );
             sections.push(section);
         }
-        let trailing: Vec<(String, String)> = layout
+        let trailing: Vec<Posting> = layout
             .unassigned
             .iter()
             .filter_map(|i| postings.get(*i).cloned())
@@ -1092,7 +1383,7 @@ impl Session {
         }
         for (n, section) in sections.into_iter().enumerate() {
             if n > 0 {
-                out.push((GROUP_SEPARATOR.to_owned(), String::new()));
+                out.push(Posting::new(GROUP_SEPARATOR, ""));
             }
             out.extend(section);
         }
@@ -1196,13 +1487,14 @@ impl Session {
         let rendered_postings: Vec<String> = draft
             .postings
             .iter()
-            .filter(|(a, _)| !a.trim().is_empty())
-            .map(|(a, amt)| {
-                if amt.trim().is_empty() {
-                    format!("    {a}")
+            .filter(|p| !p.account.trim().is_empty())
+            .map(|p| {
+                let body = if p.amount.trim().is_empty() {
+                    format!("    {}", p.account)
                 } else {
-                    format!("    {a}  {}", amt.trim())
-                }
+                    format!("    {}  {}", p.account, p.amount.trim())
+                };
+                format!("{body}{}", comment_suffix(&p.comment))
             })
             .collect();
         for line in &rendered_postings {
@@ -1214,9 +1506,10 @@ impl Session {
                 num_w = num_w.max(num.chars().count());
             }
         }
-        let mut out = vec![format!("{date_text} {}", draft.description)
+        let header = format!("{date_text} {}", draft.description)
             .trim_end()
-            .to_owned()];
+            .to_owned();
+        let mut out = vec![format!("{header}{}", comment_suffix(&draft.comment))];
         for line in &rendered_postings {
             out.push(render(acc_w, num_w, &parse_posting(line)));
         }
@@ -1251,6 +1544,53 @@ impl Session {
         self.reset_draft();
         t
     }
+}
+
+/// Where tag-name completion applies in a comment buffer.
+///
+/// hledger comment tags are `name: value`, comma-separated. Only a name
+/// completes, so this returns `(text before the name, the partial name)` when
+/// the cursor is in name position, and `None` once a `:` has been typed —
+/// after that the user is writing a value, which is free text.
+fn split_tag_query(buffer: &str) -> Option<(&str, &str)> {
+    // The tag being typed starts after the last comma.
+    let start = buffer.rfind(',').map_or(0, |i| i.saturating_add(1));
+    let current = buffer.get(start..)?;
+    // A `:` means the name is settled and this is its value.
+    if current.contains(':') {
+        return None;
+    }
+    let name = current.trim_start();
+    // Tag names are single words; a space means this is prose, not a tag.
+    if name.contains(char::is_whitespace) {
+        return None;
+    }
+    let split = buffer.len().saturating_sub(name.len());
+    Some((buffer.get(..split)?, name))
+}
+
+/// The tag names in a comment.
+///
+/// hledger's comment tag syntax is `name: value`, comma-separated; the name is
+/// the word before a `:`. Only names are collected — values are free text and
+/// completing them would be guessing.
+fn tags_in(comment: Option<&str>) -> Vec<String> {
+    let Some(text) = comment else {
+        return Vec::new();
+    };
+    let body = text.trim_start().trim_start_matches(';');
+    let mut out = Vec::new();
+    for part in body.split(',') {
+        let Some((name, _value)) = part.split_once(':') else {
+            continue;
+        };
+        // A tag name is the last whitespace-separated word before the colon.
+        let name = name.split_whitespace().next_back().unwrap_or_default();
+        if !name.is_empty() && !out.iter().any(|x| x == name) {
+            out.push(name.to_owned());
+        }
+    }
+    out
 }
 
 /// The template postings of a historical transaction: (account, raw amount).
@@ -1413,7 +1753,7 @@ mod tests {
         // Grouped and spaced per the declaration, and filled out to its two
         // decimal places — the same form the generated balancing amount
         // would take, so the two sides of the transaction match.
-        assert_eq!(s.draft.postings[0].1, "1_234.00 EUR");
+        assert_eq!(s.draft.postings[0].amount, "1_234.00 EUR");
         // Undeclared commodities stay as typed.
         type_in(&mut s, "liabilities:cc");
         s.submit();
@@ -1422,7 +1762,7 @@ mod tests {
             s.submit(),
             Submit::AdvancedWithNote("USD is a commodity new to this journal".to_owned())
         );
-        assert_eq!(s.draft.postings[1].1, "-10USD");
+        assert_eq!(s.draft.postings[1].amount, "-10USD");
     }
 
     #[test]
@@ -1458,7 +1798,7 @@ mod tests {
             s.submit();
             type_in(&mut s, typed);
             s.submit();
-            assert_eq!(s.draft.postings[0].1, written, "typed {typed:?}");
+            assert_eq!(s.draft.postings[0].amount, written, "typed {typed:?}");
         }
     }
 
@@ -1524,10 +1864,326 @@ mod tests {
         assert_eq!(
             txn.postings,
             vec![
-                ("expenses:groceries".to_owned(), "18.20 EUR".to_owned()),
-                ("assets:bank:checking".to_owned(), "-18.20 EUR".to_owned()),
+                Posting::new("expenses:groceries", "18.20 EUR"),
+                Posting::new("assets:bank:checking", "-18.20 EUR"),
             ]
         );
+    }
+
+    // ---- epic 3: inline `; comment` ----
+
+    /// A comment is the tail of the line you are already typing, never a
+    /// prompt of its own — entering no comment costs nothing.
+    #[test]
+    fn a_trailing_semicolon_makes_the_rest_of_the_field_a_comment() {
+        let (mut s, _t) = session(JOURNAL);
+        assert_eq!(s.submit(), Submit::Advanced); // date
+
+        type_in(&mut s, "Rewe ; trip: berlin");
+        assert_eq!(s.submit(), Submit::Advanced);
+        // Straight to the first posting: no comment prompt in between.
+        assert_eq!(s.draft.field, Field::Account(0));
+        assert_eq!(s.draft.description, "Rewe");
+        assert_eq!(s.draft.comment, "trip: berlin");
+
+        assert_eq!(s.submit(), Submit::Advanced); // template account
+        type_in(&mut s, "18.20 EUR ; receipt: yes");
+        assert_eq!(s.submit(), Submit::Advanced);
+        assert_eq!(s.draft.field, Field::Account(1));
+        assert_eq!(s.draft.postings[0].amount, "18.20 EUR");
+        assert_eq!(s.draft.postings[0].comment, "receipt: yes");
+
+        assert_eq!(s.submit(), Submit::Advanced); // template account 2
+                                                  // The empty amount still balances and finishes outright.
+        let Submit::Done(txn) = s.submit() else {
+            panic!("expected Done");
+        };
+        assert_eq!(txn.comment, "trip: berlin");
+        assert_eq!(txn.postings[0].comment, "receipt: yes");
+        assert_eq!(txn.postings[1].comment, "");
+        assert_eq!(txn.postings[1].amount, "-18.20 EUR");
+    }
+
+    #[test]
+    fn entering_no_comment_costs_no_keystrokes() {
+        // The whole point of the inline form: the field count is exactly what
+        // it was before comments existed.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit(); // date
+        type_in(&mut s, "Rewe");
+        s.submit(); // description
+        assert_eq!(s.draft.field, Field::Account(0));
+        s.submit(); // account 1 (template)
+        assert_eq!(s.draft.field, Field::Amount(0));
+        type_in(&mut s, "18.20 EUR");
+        s.submit();
+        assert_eq!(s.draft.field, Field::Account(1));
+        s.submit(); // account 2 (template)
+        assert!(matches!(s.submit(), Submit::Done(_)));
+    }
+
+    #[test]
+    fn a_comment_survives_navigating_away_and_back() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe ; trip: berlin");
+        s.submit();
+        assert!(s.draft.nav_up());
+        assert_eq!(s.draft.field, Field::Description);
+        // Re-joined for editing, exactly as typed.
+        assert_eq!(s.draft.buffer, "Rewe ; trip: berlin");
+        // …and deleting it there clears it.
+        type_in(&mut s, "Rewe");
+        s.submit();
+        assert_eq!(s.draft.comment, "");
+    }
+
+    #[test]
+    fn a_comment_typed_on_the_account_belongs_to_that_posting() {
+        // A `;` in an account field would otherwise end up inside the account
+        // name and produce a corrupt posting line.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        type_in(&mut s, "expenses:household ; gift: yes");
+        s.submit();
+        assert_eq!(s.draft.postings[0].account, "expenses:household");
+        assert_eq!(s.draft.postings[0].comment, "gift: yes");
+        // The amount field carries it, being the end of the line.
+        assert_eq!(s.draft.buffer, "; gift: yes");
+    }
+
+    #[test]
+    fn comments_are_rendered_into_the_written_lines() {
+        let txn = NewTransaction {
+            date: d(2026, 8, 10),
+            description: "Rewe".into(),
+            comment: "trip: berlin".into(),
+            postings: vec![
+                Posting {
+                    account: "expenses:groceries".into(),
+                    amount: "18.20 EUR".into(),
+                    comment: "receipt: yes".into(),
+                },
+                Posting::new("assets:bank:checking", "-18.20 EUR"),
+            ],
+        };
+        assert_eq!(
+            txn.raw_lines(),
+            vec![
+                "2026-08-10 Rewe  ; trip: berlin".to_owned(),
+                "    expenses:groceries  18.20 EUR  ; receipt: yes".to_owned(),
+                "    assets:bank:checking  -18.20 EUR".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_preview_shows_comments_as_they_will_be_written() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe ; trip: berlin");
+        s.submit();
+        s.submit(); // template account
+        type_in(&mut s, "18.20 EUR ; receipt: yes");
+        let preview = s.preview_lines();
+        assert_eq!(preview[0], "2026-08-10 Rewe  ; trip: berlin");
+        assert!(preview[1].ends_with("  ; receipt: yes"), "{}", preview[1]);
+    }
+
+    // ---- epic 3: tag completion inside comments ----
+
+    #[test]
+    fn tag_names_complete_inside_a_comment() {
+        let src = "tag project\ntag receipt\n\n2026-08-01 x  ; client: acme\n    a:b   1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        // Still on the description field — the `;` is what switches
+        // completion over to tag names.
+        type_in(&mut s, "x ; ");
+        let all = s.candidates();
+        assert!(all.contains(&"x ; project:".to_owned()), "{all:?}");
+        assert!(all.contains(&"x ; client:".to_owned()), "{all:?}");
+
+        type_in(&mut s, "x ; proj");
+        assert_eq!(s.complete_buffer().as_deref(), Some("x ; project:"));
+    }
+
+    #[test]
+    fn a_tag_value_does_not_complete_but_the_next_name_does() {
+        let src = "tag project\ntag receipt\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        // Past the colon this is a value: free text, nothing to offer.
+        type_in(&mut s, "x ; project: ac");
+        assert!(s.candidates().is_empty());
+        // After a comma a new tag name starts, and completion resumes.
+        type_in(&mut s, "x ; project: acme, rec");
+        assert_eq!(
+            s.complete_buffer().as_deref(),
+            Some("x ; project: acme, receipt:")
+        );
+    }
+
+    #[test]
+    fn tag_names_are_read_out_of_posting_comments_too() {
+        let src = "2026-08-01 x\n    a:b   1 EUR  ; receipt: 12\n    c:d  -1 EUR\n";
+        let (s, _t) = session(src);
+        assert_eq!(s.ctx.tag_pool(), vec!["receipt".to_owned()]);
+    }
+
+    // ---- epic 3: the payee note and strict check ----
+
+    #[test]
+    fn a_description_new_to_the_journal_gets_a_note_with_a_near_miss() {
+        // Motivation #1: hledger's `add` matches `bahn` against
+        // `Deutsche Bahn` to pick defaults and then writes the literal
+        // `bahn`, forking the payee silently.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "bahn");
+        let Submit::AdvancedWithNote(note) = s.submit() else {
+            panic!("expected a note for a description new to the journal");
+        };
+        assert!(note.contains("bahn is new to this journal"), "{note}");
+        assert!(note.contains("did you mean Deutsche Bahn"), "{note}");
+    }
+
+    #[test]
+    fn a_description_already_in_the_journal_passes_quietly() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn a_declared_payee_is_known_even_with_no_transactions() {
+        // The point of the `payee` directive: known-good with no history, so
+        // the near-miss hint can be trusted.
+        let (mut s, _t) = session("payee Hofpfisterei\n");
+        s.submit();
+        type_in(&mut s, "Hofpfisterei");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn strict_mode_asks_before_using_an_undeclared_payee() {
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with("payee Deutsche Bahn\n", cfg);
+        s.submit();
+        type_in(&mut s, "bahn");
+        let Submit::Confirm { question } = s.submit() else {
+            panic!("expected Confirm");
+        };
+        assert!(question.contains("not a declared payee"), "{question}");
+        assert!(question.contains("use it anyway"), "{question}");
+        assert!(
+            question.contains("did you mean Deutsche Bahn"),
+            "{question}"
+        );
+        // Confirming proceeds, and the answer is not asked again this
+        // session.
+        assert_eq!(s.submit_confirmed(), Submit::Advanced);
+        assert!(s.payee_known("bahn"));
+    }
+
+    // ---- epic 3: payee | note ----
+
+    #[test]
+    fn the_payee_check_tests_the_payee_half_not_the_whole_description() {
+        // hledger's own behaviour, verified: `payee Deutsche Bahn` satisfies
+        // `check payees` for `Deutsche Bahn | ticket`, and declaring the
+        // whole string instead does *not*.
+        let cfg = Config {
+            strict: true,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with("payee Deutsche Bahn\n", cfg.clone());
+        s.submit();
+        type_in(&mut s, "Deutsche Bahn | ticket to Koeln");
+        assert_eq!(s.submit(), Submit::Advanced);
+        assert_eq!(s.draft.description, "Deutsche Bahn | ticket to Koeln");
+        assert_eq!(s.draft.payee(), "Deutsche Bahn");
+        assert_eq!(s.draft.note(), "ticket to Koeln");
+
+        // The control: declaring the whole description leaves the payee
+        // undeclared, exactly as hledger reports it.
+        let (mut s, _t) = session_with("payee Deutsche Bahn | ticket to Koeln\n", cfg);
+        s.submit();
+        type_in(&mut s, "Deutsche Bahn | ticket to Koeln");
+        let Submit::Confirm { question } = s.submit() else {
+            panic!("expected Confirm");
+        };
+        assert!(
+            question.starts_with("Deutsche Bahn is not a declared payee"),
+            "{question}"
+        );
+    }
+
+    #[test]
+    fn the_new_payee_note_names_the_payee_not_the_description() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Bahnhof Kiosk | coffee");
+        let Submit::AdvancedWithNote(note) = s.submit() else {
+            panic!("expected a note");
+        };
+        assert!(note.starts_with("Bahnhof Kiosk is new"), "{note}");
+        // …and the near-miss answers with a payee, never a whole description.
+        assert!(!note.contains('|'), "{note}");
+    }
+
+    #[test]
+    fn a_note_does_not_make_a_known_payee_look_new() {
+        // `Rewe` is used in JOURNAL; adding a note must not turn it into an
+        // unknown payee.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe | big shop");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn the_template_and_account_pool_follow_the_payee_through_a_note() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        // JOURNAL's most recent Rewe has no note; this one does, and the
+        // template must still be found.
+        type_in(&mut s, "Rewe | big shop");
+        s.submit();
+        assert_eq!(s.draft.field, Field::Account(0));
+        // The template account is offered as a ghost, not typed into the
+        // buffer.
+        assert!(s.draft.buffer.is_empty());
+        assert_eq!(s.suggestion().as_deref(), Some("expenses:groceries"));
+        // Account ranking is conditioned on the payee.
+        assert_eq!(s.account_pool()[0], "expenses:groceries");
+    }
+
+    #[test]
+    fn a_note_and_a_comment_coexist_on_one_description() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe | big shop ; trip: berlin");
+        s.submit();
+        assert_eq!(s.draft.description, "Rewe | big shop");
+        assert_eq!(s.draft.payee(), "Rewe");
+        assert_eq!(s.draft.note(), "big shop");
+        assert_eq!(s.draft.comment, "trip: berlin");
+    }
+
+    #[test]
+    fn declared_payees_join_the_description_completion_pool() {
+        let src = "payee Hofpfisterei\n\n2026-08-01 Rewe\n    a:b   1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session(src);
+        s.submit();
+        type_in(&mut s, "Hof");
+        assert_eq!(s.complete_buffer().as_deref(), Some("Hofpfisterei"));
     }
 
     /// Enter the IVPN-shaped conversion transaction and finish it.
@@ -1571,13 +2227,10 @@ mod tests {
         assert_eq!(
             txn.postings,
             vec![
-                (
-                    "expenses:subscriptions:services".to_owned(),
-                    "10 USD @@ 9.06 EUR".to_owned()
-                ),
-                ("assets:bank:checking".to_owned(), "-9.06 EUR".to_owned()),
-                ("equity:conversion".to_owned(), "-10 USD".to_owned()),
-                ("equity:conversion".to_owned(), "9.06 EUR".to_owned()),
+                Posting::new("expenses:subscriptions:services", "10 USD @@ 9.06 EUR"),
+                Posting::new("assets:bank:checking", "-9.06 EUR"),
+                Posting::new("equity:conversion", "-10 USD"),
+                Posting::new("equity:conversion", "9.06 EUR"),
             ]
         );
     }
@@ -1589,11 +2242,11 @@ mod tests {
             ..Config::default()
         };
         let (mut s, _t) = session_with(JOURNAL, config);
-        s.draft.postings = postings
-            .iter()
-            .map(|(a, m)| ((*a).to_owned(), (*m).to_owned()))
-            .collect();
+        s.draft.postings = postings.iter().map(|(a, m)| Posting::new(a, m)).collect();
         s.with_equity_conversions(s.draft.postings.clone())
+            .into_iter()
+            .map(|p| (p.account, p.amount))
+            .collect()
     }
 
     #[test]
@@ -1662,7 +2315,9 @@ mod tests {
         let Submit::Done(txn) = conversion_txn(config) else {
             panic!("expected Done");
         };
-        assert!(txn.postings[2..].iter().all(|(a, _)| a == "equity:trading"));
+        assert!(txn.postings[2..]
+            .iter()
+            .all(|p| p.account == "equity:trading"));
     }
 
     #[test]
@@ -1734,7 +2389,7 @@ mod tests {
             panic!("expected Done, got {r:?}");
         };
         // Never elided — the balancing amount is written out.
-        assert_eq!(txn.postings[1].1, "-10 EUR");
+        assert_eq!(txn.postings[1].amount, "-10 EUR");
         assert_eq!(txn.postings.len(), 2);
     }
 
@@ -1787,11 +2442,12 @@ mod tests {
         let (mut s, _t) = session(JOURNAL);
         type_in(&mut s, "q");
         assert_eq!(s.submit(), Submit::Quit);
-        // Anywhere else `q` is just text.
+        // Anywhere else `q` is just text — a description new to the journal,
+        // so it is accepted with the passing note.
         type_in(&mut s, "today");
         s.submit();
         type_in(&mut s, "q");
-        assert_eq!(s.submit(), Submit::Advanced);
+        assert!(matches!(s.submit(), Submit::AdvancedWithNote(_)));
         assert_eq!(s.draft.description, "q");
     }
 
@@ -1875,7 +2531,7 @@ mod tests {
 
     #[test]
     fn strict_mode_asks_before_using_undeclared_accounts() {
-        let src = "account expenses:travel:train\naccount expenses:groceries\n";
+        let src = "payee X\naccount expenses:travel:train\naccount expenses:groceries\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -1903,7 +2559,7 @@ mod tests {
 
     #[test]
     fn strict_mode_asks_before_using_undeclared_commodities() {
-        let src = "account a:b\naccount c:d\ncommodity 1.00 EUR\n";
+        let src = "payee X\naccount a:b\naccount c:d\ncommodity 1.00 EUR\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -1934,7 +2590,7 @@ mod tests {
 
     #[test]
     fn strict_mode_checks_tail_commodities_too() {
-        let src = "account a:b\naccount c:d\ncommodity 1.00 EUR\n";
+        let src = "payee X\naccount a:b\naccount c:d\ncommodity 1.00 EUR\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -1965,7 +2621,7 @@ mod tests {
 
     #[test]
     fn strict_mode_never_questions_unitless_amounts() {
-        let src = "account a:b\naccount c:d\ncommodity 1.00 EUR\n";
+        let src = "payee X\naccount a:b\naccount c:d\ncommodity 1.00 EUR\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -2089,7 +2745,7 @@ mod tests {
 
     #[test]
     fn strict_mode_asks_about_a_session_account_only_once() {
-        let src = "account a:b\n";
+        let src = "payee X\naccount a:b\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -2257,7 +2913,8 @@ mod tests {
         s.complete(NewTransaction {
             date: d(2026, 8, 10),
             description: "X".into(),
-            postings: vec![("a".into(), "1 EUR".into()), ("b".into(), "-1 EUR".into())],
+            comment: String::new(),
+            postings: vec![Posting::new("a", "1 EUR"), Posting::new("b", "-1 EUR")],
         });
         type_in(&mut s, "u");
         assert_eq!(s.submit(), Submit::Undo);
@@ -2297,7 +2954,7 @@ mod tests {
         type_in(&mut s, "12.50"); // bare number
         s.submit();
         // The commodity is materialized in the built transaction…
-        assert_eq!(s.draft.postings[0].1, "12.50 EUR");
+        assert_eq!(s.draft.postings[0].amount, "12.50 EUR");
         type_in(&mut s, "c:d");
         s.submit();
         // …so the balancing suggestion matches.
@@ -2306,8 +2963,8 @@ mod tests {
         let Submit::Done(txn) = r else {
             panic!("expected Done, got {r:?}");
         };
-        assert_eq!(txn.postings[0].1, "12.50 EUR");
-        assert_eq!(txn.postings[1].1, "-12.50 EUR");
+        assert_eq!(txn.postings[0].amount, "12.50 EUR");
+        assert_eq!(txn.postings[1].amount, "-12.50 EUR");
     }
 
     #[test]
@@ -2320,7 +2977,7 @@ mod tests {
         s.submit();
         type_in(&mut s, "12.50");
         s.submit();
-        assert_eq!(s.draft.postings[0].1, "12.50");
+        assert_eq!(s.draft.postings[0].amount, "12.50");
     }
 
     #[test]
@@ -2334,7 +2991,7 @@ mod tests {
         s.submit_confirmed();
         type_in(&mut s, "-12.50");
         s.submit();
-        assert_eq!(s.draft.postings[0].1, "$-12.50");
+        assert_eq!(s.draft.postings[0].amount, "$-12.50");
     }
 
     #[test]
@@ -2348,7 +3005,7 @@ mod tests {
         s.submit_confirmed();
         type_in(&mut s, "5 USD @ 1.10");
         s.submit();
-        assert_eq!(s.draft.postings[0].1, "5 USD @ 1.10");
+        assert_eq!(s.draft.postings[0].amount, "5 USD @ 1.10");
     }
 
     #[test]
@@ -2377,7 +3034,7 @@ mod tests {
         // Enter on the empty prompt takes the suggestion, as it does at the
         // date and amount prompts.
         assert_eq!(s.submit(), Submit::Advanced);
-        assert_eq!(s.draft.postings[0].0, "expenses:groceries");
+        assert_eq!(s.draft.postings[0].account, "expenses:groceries");
         assert_eq!(s.draft.field, Field::Amount(0));
 
         // Tab / → instead put it in the buffer for editing — which is what

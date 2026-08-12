@@ -10,17 +10,42 @@ The name is load-bearing: `x` is not an hledger built-in, so with `hledger-x` on
 `PATH` hledger dispatches `hledger x add` / `hledger x fmt` to it (verified
 against hledger 1.99). Renaming the binary breaks that.
 
-**Status: epics 1 (`fmt`) and 2 (`add`) are implemented and green.** Epic 3
-(deferred directives: `payee`, `tag`, `Y`, `apply account`, `alias`) is next;
-see the epic 3 sections of `DESIGN.md` and `IMPLEMENTATION.md`. Read
-`DESIGN.md` for what and why, `IMPLEMENTATION.md` for how. One deliberate
+**Status: epics 1 (`fmt`), 2 (`add`) and 3 (the remaining directives —
+`payee`, `tag`, `Y`, `apply account`, `alias`) are implemented and green.**
+Read `DESIGN.md` for what and why, `IMPLEMENTATION.md` for how. One deliberate
 deviation from the plan: `ui` is built directly on `crossterm`, not
 `reedline` — the design sanctioned this fallback, and the live preview block
 plus field-navigation keys fight reedline's line-editor repaint model. `ui`
 splits into submodules (`dates`, `complete`, `plain`, `term`); everything
 except `term` is terminal-free and unit-tested. The `add` navigation scheme and
-the two-fields-per-posting split were both signed off by the user on 2026-08-12
-after using the shipped tool; `DESIGN.md` has no open questions left.
+the account/amount split were signed off by the user on 2026-08-12 after using
+the shipped tool; `DESIGN.md` has no open questions left.
+
+Epic 3 decisions, all settled with the user on 2026-08-12: `apply
+account`/`alias` get **full support** (not detect-and-refuse); the payee checks
+**mirror the account ones exactly** — a passing note by default, a confirmation
+under `strict`; and comments are entered **inline**, as the `; …` tail of the
+description or amount field.
+
+That last one was decided *after* building the alternative: dedicated comment
+fields in the Enter flow were implemented, tried, and rejected because they
+lengthened the common no-comment path. Do not reintroduce them. The field
+count must stay date → description → account → amount.
+
+Four epic 3 facts that are easy to get wrong and are pinned by tests:
+
+- **Aliases apply in reverse declaration order**, each to the running result.
+  Four plausible rules each fit part of the evidence; only this one fits all
+  of it (`DESIGN.md` § Epic 3, tests AL11/AL13/AL14/AL16/AL17).
+- **`apply account` prefixes `account` declarations**, not only postings.
+- **A description is `payee | note`**, split at the first `|`. Anything using a
+  description as an identity — the payee checks, the near-miss, the template,
+  the account conditioning — must use the payee half; only the file gets the
+  whole string.
+- Writing an account into a directive region is **search-and-verify**, never
+  inversion: candidate spellings are run back through the forward resolver and
+  only a verified round-trip is written. `spell` returning `None` is a
+  refusal, and the write path must keep it one.
 
 ## Start here
 
@@ -31,7 +56,8 @@ after using the shipped tool; `DESIGN.md` has no open questions left.
    test strategy.
 
 Epic 2's build order is `parser.rs` → `index.rs` → `amount.rs` → `write.rs` →
-`ui/`; keep the first four free of any terminal dependency.
+`ui/`; keep the first four free of any terminal dependency. Epic 3 added
+`scope.rs` at the front of that chain, likewise terminal-free.
 
 ## How to work here
 
@@ -139,8 +165,14 @@ style choice.
    every one it generates, and `fmt --explicit` writes out the ones already
    in the journal.
 5. **`add` is an entry tool, not a validator.** It must never refuse to run
-   because the journal contains something it does not understand.
+   because the journal contains something it does not understand. (It may
+   refuse to *write* — see 7 — but that is a different thing.)
 6. **Exact decimals only.** Never floating point for amounts.
+7. **An account name is only written once it has been verified to read back.**
+   Under `apply account`/`alias` the text in the file is not the account
+   hledger sees. Candidate spellings are always checked by resolving them
+   forwards; if none round-trips, hledger-x refuses and says which directive
+   is responsible. Never invert a rewrite and trust the result.
 
 ## User preferences established in design
 
@@ -148,4 +180,8 @@ style choice.
 - Warn and proceed rather than block, except where writing would be wrong.
 - Configurability where behaviour is a matter of taste, with a sane default.
 - The user enters transactions once a day or two, in small batches.
-- The user does **not** use `apply account` or `alias` (epic 3 material).
+- The user does **not** use `apply account` or `alias` in their own journals.
+  Both are fully supported anyway (settled 2026-08-12), which means their
+  behaviour cannot be validated against real usage — the hledger differential
+  tests in `tests/semantic.rs` are the only safety net there. Extend them
+  rather than reasoning about these two directives from first principles.

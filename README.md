@@ -175,24 +175,26 @@ hledger-x add -f 2025/main.journal --to 2025/inbox.journal # -f and --to can be 
 ```
 
 `add` reads the journal from `-f`/`--file`, the `ledger_file` configuration or `$LEDGER_FILE` (in that order of
-precedence) and all included files to provide completions for descriptions, commodities and accounts as well as format
-amounts correctly when `commodity`/`decimal-mark`/`D` directives specify formatting.
+precedence) and all included files to provide completions for descriptions, payees, tags, commodities and accounts as
+well as format amounts correctly when `commodity`/`decimal-mark`/`D` directives specify formatting.
 
 Note that for `hledger-x add` the `-f` flag may only be used once while `hledger-x fmt` supports it multiple times.
 
 #### Completion
 
 `hledger-x add` offers completions and pre-fills transactions from the most recent transaction of the same descriptions.
-This works like so:
+The fields, in the order you visit them:
 
 - Date: The current date is suggested as a greyed out text. Press enter to accept or enter a partial date where
   `hledger-x` will fill in the current year or month if left out.
-- Description: Use `Tab` to get completions for descriptions. This determines which accounts and amounts will be
-  suggested later.
-- Account: Pre-filled with the account of the previous transaction with that description. See completions subsection for
-  how to configure completion behavior. Entering an empty account (no account) closes the transaction.
-- Amount: pre-filled but greyed out, press `→` or `Tab` to accept or type an amount to override. If the amount is left
-  empty `hledger-x` will calculate the balance and close the transaction.
+- Description: Use `Tab` to get completions for descriptions and declared `payee`s. A payee that is neither declared
+  nor used anywhere in your journal is accepted with a note and a "did you mean …?" — so typing `bahn` when you meant
+  `Deutsche Bahn` no longer quietly forks the payee. See below on how `payee | note` is handled.
+- Account: the account of the previous transaction with that payee is suggested as greyed out text. `Enter`, `Tab` or
+  `→` accept it; typing replaces it. See completions subsection for how to configure completion behavior. `Ctrl-U`
+  dismisses the suggestion, and an empty account (nothing suggested, nothing typed) closes the transaction.
+- Amount: suggested as greyed out text the same way — from the template, or the calculated balancing amount on the last
+  posting. `Enter`, `Tab` or `→` accept it, and accepting the balancing amount also closes the transaction.
 
 An amount you enter is filled out to the decimal places its commodity declares: with `commodity 1_000.00 EUR`, both
 `4 EUR` and `4.0 EUR` are written as `4.00 EUR` — the same form the calculated balancing amount takes. The declared
@@ -203,21 +205,90 @@ left alone entirely.
 A price or balance assertion is filled out the same way, against its own commodity's declared style, so
 `10 EUR @ 1.1 USD` is written as `10.00 EUR @ 1.10 USD`.
 
+#### Payees and notes
+
+hledger splits a description at the first `|` into a payee and a note, and `hledger-x` follows it. Everything that
+treats a description as an *identity* uses the payee half:
+
+| | uses |
+|---|---|
+| the "new to this journal" note, and its "did you mean …?" | payee |
+| the `strict` check, matching `hledger check payees` | payee |
+| the transaction template that pre-fills your postings | payee |
+| account ranking, conditioned on what you entered | payee |
+| description completion (`Tab`) | whole descriptions, plus declared payees |
+| what gets written to the file | whole description, verbatim as typed |
+
+So `payee Deutsche Bahn` covers `Deutsche Bahn | ticket to Köln`, and a distinct note on every entry — an invoice
+number, a trip — does not stop the template from matching. `hledger-x` never rewrites a description, not even to
+normalise the spacing around the `|`.
+
+#### Comments and tags
+
+Comments are not a separate prompt. Type a `;` anywhere in the description or an amount and the rest of the field is
+the comment, exactly as the journal line reads — so entering no comment, which is the usual case, costs nothing:
+
+```txt
+description> Rewe ; trip: berlin
+amount 1>     18.20 EUR ; receipt: yes
+```
+
+writes
+
+```txt
+2026-08-12 Rewe  ; trip: berlin
+    expenses:groceries    18.20 EUR  ; receipt: yes
+    assets:bank:checking -18.20 EUR
+```
+
+Past the `;`, `Tab` completes tag names — from `tag` directives and from tags already used in your journal — and appends
+the `:`. A tag's value is free text and is not completed. A posting's comment belongs to its line, so it can be typed on
+either the account or the amount; the amount is where it ends up being shown and edited.
+
+Comments are never pre-filled from the previous transaction — they describe the occasion, not the shape of the entry.
+
 #### Navigating `hledger-x add`
 
 | Key                                                                | Action                                                           |
 |--------------------------------------------------------------------|------------------------------------------------------------------|
-| `Enter`                                                            | accept the field as typed                                        |
+| `Enter`                                                            | accept the field as typed, or the grey suggestion if it is empty |
 | `↑` / `↓`                                                          | move between fields                                              |
 | `Tab` / `Shift-Tab`                                                | complete, then open and cycle the menu                           |
-| `Tab` / `→`                                                        | pick up the grey suggestion                                      |
-| `Ctrl-U`                                                           | clear the buffer                                                 |
+| `Tab` / `→`                                                        | pick up the grey suggestion to edit it                           |
+| `Ctrl-U`                                                           | clear the buffer, or dismiss an account suggestion               |
 | `Ctrl-W`                                                           | delete one word, or one `:`-segment on accounts                  |
 | `Ctrl-E`                                                           | open the current transaction draft in `$VISUAL`/`$EDITOR`        |
 | `Ctrl-C`                                                           | abort the current transaction                                    |
 | `Ctrl-D`, or `q`+`Enter` at the date prompt                        | quit                                                             |
 | `u`+`Enter` at the date prompt                                     | undo the last completed transaction                              |
-| `y`/`n` at the strict mode's account/commodity confirmation prompt | accept/don't accept new account/commodity when using strict mode |
+| `y`/`n` at the strict mode's confirmation prompt                   | accept/don't accept a new payee/account/commodity in strict mode |
+
+#### Journal directives
+
+`add` honours the directives that change what a transaction *means*, so what it
+writes reads back as what you entered:
+
+| Directive                | Effect                                                                            |
+|--------------------------|-----------------------------------------------------------------------------------|
+| `account`                | completion pool; the set `strict` checks against                                   |
+| `commodity`, `D`, `decimal-mark` | amount display style — decimal mark, grouping, decimal places, symbol side |
+| `payee`                  | description completion pool; the set `strict` checks descriptions against          |
+| `tag`                    | tag-name completion inside comments                                                |
+| `Y` / `year`             | resolves partial dates like `01-15` when reading                                   |
+| `apply account`, `alias` | account names are resolved on read and written back in the form the region needs   |
+| `include`                | followed, nested, globs expanded                                                   |
+
+Inside an `apply account assets:bank` region, a posting written `checking` *is*
+`assets:bank:checking`. `add` shows you the full name everywhere and writes the
+remainder into the file, so hledger reads back the account you picked. This
+applies to `insertion = "chronological"` landing inside a region as much as to
+appending at the end of one. If an account cannot be written where it would go
+— the region rewrites every spelling of it — `add` says so and writes nothing,
+rather than silently entering a different account; your entries stay in the
+recovery journal.
+
+Dates are always written in full `YYYY-MM-DD` form, even where a `Y` directive
+would let the year be omitted.
 
 #### Recovery
 
@@ -239,7 +310,7 @@ sort = false                         # sort transactions by date
 [add]
 format_file = true                   # rewrite the whole file, formatted, on write
 insertion = "append"                 # or "chronological"
-strict = false                       # ask before using new accounts/commodities
+strict = false                       # ask before using new payees/accounts/commodities
 account_completion = "substring"     # prefix | substring | fuzzy
 description_completion = "substring" # prefix | substring | fuzzy
 # default_commodity = ""             # fill in this commodity (e.g. USD, EUR, $, ¥) on bare amounts

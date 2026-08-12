@@ -659,6 +659,7 @@ mod tests {
     use super::*;
     use crate::add::parser::{parse_journal, FileMap};
     use crate::add::ui::SessionCtx;
+    use crate::add::write::Posting;
     use crate::config::Config;
     use chrono::NaiveDate;
     use std::fs;
@@ -685,9 +686,10 @@ mod tests {
         s.complete(NewTransaction {
             date: NaiveDate::from_ymd_opt(2026, 8, 10).unwrap(),
             description: description.to_owned(),
+            comment: String::new(),
             postings: vec![
-                ("expenses:groceries".to_owned(), "1 EUR".to_owned()),
-                ("assets:bank:checking".to_owned(), "-1 EUR".to_owned()),
+                Posting::new("expenses:groceries", "1 EUR"),
+                Posting::new("assets:bank:checking", "-1 EUR"),
             ],
         });
     }

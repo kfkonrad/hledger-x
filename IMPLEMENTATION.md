@@ -22,6 +22,7 @@ src/
   add/             (epic 2)
     mod.rs
     parser.rs      include walk, directive extraction, scope stack
+    scope.rs       apply account / alias resolution both directions (epic 3)
     index.rs       frecency indices
     ui/            field state machine, completion, live preview
       mod.rs       Draft/Session state machine, pre-fill, suggestions
@@ -381,11 +382,24 @@ struct Declaration { name: String, kind: DeclKind, stream_pos: usize }
 ```
 
 `decimal-mark` and `D` are model 1. `account` and `commodity` are model 2.
-Epic 3 adds `Y`/`apply account`/`alias` to model 1 and `payee`/`tag` to model 2.
+Epic 3 added `Y`, `apply account` and `alias` to model 1 — so `ParseState`
+also carries a year and a [`scope::Scope`] — and `payee`/`tag` to model 2.
+
+`SourceFile` records **parse-state checkpoints** as well as the state at eof:
+`(0-based line, state)` pairs, ascending. `insertion = append` only ever needs
+eof, but `insertion = chronological` can land mid-file, inside an
+`apply account` region that closes further down, so the write path has to be
+able to ask about an arbitrary line.
 
 **Transactions are parsed lexically, not semantically.** Extract date,
 description, and for each posting the `split_account_amount` pair — the amount
 side stays opaque text. Never interpret a historical number.
+
+Account names are the one exception, added in epic 3: they are **resolved**
+through the scope in effect (`apply account`, then aliases), because under
+those directives the text in the file is not the account hledger sees, and an
+index full of bare remainders would poison completion invisibly. Dates are
+resolved too, against the `Y` directive in effect.
 
 Leniency: unknown directives ignored; unparseable transactions skipped with one
 warning; existing imbalance ignored; periodic (`~`) and auto (`=`) transactions
@@ -399,17 +413,47 @@ skipped (already excluded by `opens_txn` requiring a leading digit).
   `acc_w`/`num_w` from `fmt`. Sort barriers are not recorded: the write path
   calls `fmt`'s own sort, which recomputes them.
 
+## `scope.rs`
+
+Account-name rewriting, both directions. Terminal-free and unit-tested against
+the hledger runs recorded in `DESIGN.md` § Epic 3; `tests/semantic.rs` then
+cross-checks the whole thing against a real hledger.
+
+- `Scope` holds the `apply account` stack and the alias list, and is part of
+  `ParseState` — so it is inherited into includes and discarded on return for
+  free, which is exactly hledger's behaviour.
+- `resolve(name)` — prefix first, then aliases in **reverse declaration
+  order**, each applied to the running result. That ordering is the one thing
+  here no amount of reading would have produced; see the AL16/AL17 pair.
+- `spell(target)` — the inverse, by **search and verify**: generate candidate
+  spellings (identity, prefix stripped, exact aliases inverted, literal regex
+  patterns substituted back) and run each through `resolve`, returning only one
+  that round-trips. A regex alias is not generally invertible, so candidates
+  are hints and `resolve` is the only authority. `None` is a refusal, and the
+  write path turns it into an error rather than a guess.
+
+The identity candidate is tried first, so the explicit resolved name is what
+gets written whenever it reads back correctly — the alias is undone only when
+it must be.
+
 ## `index.rs`
 
-Four indices, one pass over the parsed transactions, each entry
+Five indices, one pass over the parsed transactions, each entry
 `{ count, last_date, score }`:
 
 | Index | Key | Used for |
 | --- | --- | --- |
-| descriptions | description | description completion |
+| descriptions | description, as written | description completion |
+| payees | payee half | the payee checks and the near-miss hint |
 | accounts | account | account completion, unconditioned |
-| by_description | (description, account) | account completion conditioned on the entered description |
-| templates | description → most recent transaction | posting pre-fill |
+| by_payee | (payee, account) | account completion conditioned on the entered payee |
+| templates | payee → most recent transaction | posting pre-fill |
+
+**Descriptions are `payee | note`** (`lex::split_payee_note`). Whatever is used
+as an *identity* keys on the payee; only completion of the field itself works
+over whole descriptions. Keying `templates` on the description instead would
+make the pre-fill a no-op for anyone who puts a unique note on each entry —
+see `DESIGN.md` § `payee` directive.
 
 ```
 score = Σ over occurrences of  0.5 ^ (age_days / half_life)
@@ -454,6 +498,22 @@ not depend on it. (The two fields are permanent — the single-line alternative
 was settled against on 2026-08-12; see `DESIGN.md` § Posting entry. This is
 plain modularity now, not preparation for a merge.)
 
+**Comments add no fields.** A `;` in a buffer splits it into value and comment
+(`split_field_comment` / `join_field_comment`), so the field count is exactly
+what it was before epic 3. The pieces that have to agree:
+
+- `Draft::stash` splits, `Draft::stored` re-joins. Both, or navigating back to
+  a field loses or duplicates the comment.
+- `accept_amount` re-joins before putting text back in the buffer, because
+  advancing stashes that buffer.
+- A posting's comment is owned by the amount field and may only be *added* by
+  the account field — see `DESIGN.md` § `tag` directive for why.
+- `completion_query` checks for a `;` before dispatching on the field, so tag
+  completion works in every field that can carry a comment.
+
+Comments are **not** pre-filled from the template: they describe the occasion,
+not the shape of the transaction.
+
 The live preview is rendered by `fmt` against the **file's** widths, not the
 transaction's own, so it is byte-accurate and visibly shifts when an entry will
 reflow the file.
@@ -479,16 +539,33 @@ Keys, no-confirmation save, and undo: see `DESIGN.md`.
   sorted, warn and proceed.
 - Write target is the main file; an override must be reachable through the
   include graph or it is an error.
+- Dates are always written in full `YYYY-MM-DD`, `Y` directive or not.
+- `integrate_in` takes the target's `TargetScopes` and returns `Integration`:
+  `Ready` or `Refused`. Placement is an **incremental** walk — each transaction
+  is positioned against the file as the previous ones left it, which is what
+  makes chronological insertion of out-of-order transactions come out sorted —
+  with a parallel buffer-line → original-line map, since the scope is only
+  known for original lines. `integrate` / `integrate_with` keep their old
+  infallible signatures by passing an empty scope, which can never refuse.
 
 ---
 
-# Epic 3 — deferred directives
+# Epic 3 — the remaining directives
 
-`payee`, `tag`, `Y`/`year`, `apply account`, `alias`. See `DESIGN.md` for what
-each requires. Epics 1 and 2 ignore `apply account`/`alias` entirely — no
-parsing, no detection — at the user's explicit direction. Epic 3 starts by
-adding detection (refuse to insert into a region where either is active) before
-attempting full support.
+`payee`, `tag`, `Y`/`year`, `apply account`, `alias`, all implemented; see
+`DESIGN.md` § Epic 3 for the verified semantics and the tables behind them.
+Full support for `apply account`/`alias` was chosen over detect-and-refuse
+(settled with the user, 2026-08-12).
+
+Build order was `scope.rs` → `parser.rs` → `write.rs` → `ui/`, and the two
+things worth knowing before touching any of it:
+
+1. **Aliases apply in reverse declaration order.** Four earlier hypotheses fit
+   subsets of the evidence; only this one fits all of it. `tests/semantic.rs`
+   pins it against a real hledger, in both directions.
+2. **Writing is search-and-verify, never inversion.** Nothing reaches the file
+   that has not been resolved forwards and checked to read back as the account
+   the user picked.
 
 ---
 

@@ -177,6 +177,7 @@ mod tests {
     use super::*;
     use crate::add::parser::{parse_journal, FileMap};
     use crate::add::ui::SessionCtx;
+    use crate::add::write::Posting;
     use crate::config::Config;
     use chrono::NaiveDate;
     use std::fs;
@@ -224,17 +225,16 @@ mod tests {
     #[test]
     fn a_full_transaction_via_pipes() {
         // date(accept today), desc, account(accept template), amount,
-        // account 2 (accept), amount (accept balancing), empty account =
-        // finish; EOF ends.
-        let input = "\n Rewe\n\n18.20 EUR\n\n\n.\n";
+        // account 2 (accept), amount (accept balancing) finishes; EOF ends.
+        let input = "\n Rewe\n\n18.20 EUR\n\n\n";
         let (done, out, _t) = run_session(JOURNAL, input);
         assert_eq!(done.len(), 1, "output was:\n{out}");
         assert_eq!(done[0].description, "Rewe");
         assert_eq!(
             done[0].postings,
             vec![
-                ("expenses:groceries".to_owned(), "18.20 EUR".to_owned()),
-                ("assets:bank:checking".to_owned(), "-18.20 EUR".to_owned()),
+                Posting::new("expenses:groceries", "18.20 EUR"),
+                Posting::new("assets:bank:checking", "-18.20 EUR"),
             ]
         );
         // The finished transaction is echoed, formatted.
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn eof_mid_draft_still_returns_completed_transactions() {
-        let input = "\nRewe\n\n18.20 EUR\n\n\n.\n\nEdeka\n";
+        let input = "\nRewe\n\n18.20 EUR\n\n\n\nEdeka\n";
         let (done, _out, _t) = run_session(JOURNAL, input);
         assert_eq!(done.len(), 1);
     }
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn strict_confirmation_via_pipe() {
-        let src = "account expenses:groceries\naccount assets:cash\ncommodity 1.00 EUR\n";
+        let src = "payee X\naccount expenses:groceries\naccount assets:cash\ncommodity 1.00 EUR\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -271,14 +271,14 @@ mod tests {
         assert!(out.contains("not a declared account"), "{out}");
         assert!(out.contains("use it anyway"), "{out}");
         assert!(out.contains("did you mean expenses:groceries"), "{out}");
-        assert_eq!(done[0].postings[0].0, "expenses:grocerys");
+        assert_eq!(done[0].postings[0].account, "expenses:grocerys");
         // The empty amount was written out explicitly, in the declared style.
-        assert_eq!(done[0].postings[1].1, "-5.00 EUR");
+        assert_eq!(done[0].postings[1].amount, "-5.00 EUR");
     }
 
     #[test]
     fn declining_an_undeclared_account_stays_on_the_field() {
-        let src = "account expenses:groceries\n";
+        let src = "payee X\naccount expenses:groceries\n";
         let cfg = Config {
             strict: true,
             ..Config::default()
@@ -300,7 +300,8 @@ mod tests {
             .record(&NewTransaction {
                 date: today(),
                 description: "Ghost".into(),
-                postings: vec![("a".into(), "1 EUR".into()), ("b".into(), "-1 EUR".into())],
+                comment: String::new(),
+                postings: vec![Posting::new("a", "1 EUR"), Posting::new("b", "-1 EUR")],
             })
             .unwrap();
 

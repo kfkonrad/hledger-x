@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 use hledger_x::add::parser::{parse_journal, FileMap, ParseError};
 use hledger_x::add::ui::{plain, term, Session, SessionCtx};
-use hledger_x::add::write::{integrate_with, Recovery};
+use hledger_x::add::write::{integrate_in, Integration, Recovery, TargetScopes};
 use hledger_x::amount::AmountCtx;
 use hledger_x::config::Config;
 use hledger_x::errors::{display_path, io_reason};
@@ -259,6 +259,20 @@ fn add(args: &AddArgs) -> Result<(), Failure> {
     );
     let target_src = fs::read_to_string(&target).map_err(|e| Failure::io(&target, &e))?;
     let map = FileMap::build_with(&target_src, &styles);
+    // `apply account` / `alias` regions in the write target decide how account
+    // names are spelled where they land. Say so up front rather than after the
+    // user has typed a batch of transactions.
+    let scopes = journal
+        .file(&target)
+        .map(TargetScopes::of)
+        .unwrap_or_default();
+    if scopes.any_active() {
+        eprintln!(
+            "note: {} has `apply account` or `alias` regions; \
+             account names are written as those directives require",
+            display_path(&target)
+        );
+    }
 
     let today = chrono::Local::now().date_naive();
     let ctx = SessionCtx::new(journal, config.clone(), today, target.clone(), &map);
@@ -287,33 +301,58 @@ fn add(args: &AddArgs) -> Result<(), Failure> {
         return Ok(());
     }
 
+    save(&completed, &target, &config, &styles, &scopes, &recovery)
+}
+
+/// Integrate the session's transactions into the target file and write it.
+fn save(
+    completed: &[hledger_x::add::write::NewTransaction],
+    target: &Path,
+    config: &Config,
+    styles: &[(usize, AmountCtx)],
+    scopes: &TargetScopes,
+    recovery: &Recovery,
+) -> Result<(), Failure> {
     // Re-read the target in case something else wrote to it mid-session.
-    let src = fs::read_to_string(&target).map_err(|e| {
+    let src = fs::read_to_string(target).map_err(|e| {
         Failure::error(format!(
             "{}: {}{}",
-            display_path(&target),
+            display_path(target),
             io_reason(&e),
-            kept_safe(&recovery)
+            kept_safe(recovery)
         ))
     })?;
-    let result = integrate_with(&src, &completed, &config.write_options(), &styles);
+    let result = match integrate_in(&src, completed, &config.write_options(), styles, scopes) {
+        Integration::Ready(out) => out,
+        // Writing the name as-is would silently enter a different account, so
+        // this is one of the few places where blocking beats proceeding. The
+        // recovery journal keeps the work.
+        Integration::Refused(reasons) => {
+            return Err(Failure::error(format!(
+                "{}: {}{}",
+                display_path(target),
+                reasons.join("\n  "),
+                kept_safe(recovery)
+            )));
+        }
+    };
     for w in &result.warnings {
         eprintln!("warning: {w}");
     }
-    fs::write(&target, &result.contents).map_err(|e| {
+    fs::write(target, &result.contents).map_err(|e| {
         Failure::error(format!(
             "{}: could not save your {}: {}{}",
-            display_path(&target),
+            display_path(target),
             plural(completed.len(), "transaction"),
             io_reason(&e),
-            kept_safe(&recovery)
+            kept_safe(recovery)
         ))
     })?;
     recovery.clear();
     eprintln!(
         "wrote {} to {}",
         plural(completed.len(), "transaction"),
-        display_path(&target)
+        display_path(target)
     );
     Ok(())
 }
