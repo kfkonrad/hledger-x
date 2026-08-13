@@ -92,7 +92,13 @@ style choice.
    `DESIGN.md` § Amount restyling). `fmt` never interprets anything else.
    `add` depends on `fmt`; `fmt` must never depend on `add` (shared amount
    machinery lives in the crate-level `amount` module).
-2. **Amounts are only ever rewritten value-preservingly.** An amount is
+2. **Amounts are only ever rewritten value-preservingly**, and **precision is
+   `fmt`'s to preserve but `add`'s to complete.** `fmt` keeps an existing
+   amount's decimal places exactly (changing them changes `hledger print`
+   output — verified, and the semantic test catches it); `add` pads an amount
+   the user just typed up to the commodity's declared places, never down.
+   `amount::Places` names the two policies so a shared helper cannot silently
+   apply the wrong one. An amount is
    re-rendered only when its commodity has a *declared* style, via exact
    decimals, and only into a form hledger reads back to the same value (the
    `decimal-mark` in effect stays in the output for that reason). Unitless

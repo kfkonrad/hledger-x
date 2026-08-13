@@ -809,10 +809,11 @@ fn add_writes_typed_amounts_in_the_declared_style() {
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
     assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
     let text = fs::read_to_string(&journal).unwrap();
-    // The typed amount is restyled with its precision kept; the generated
-    // balancing amount pads to the style's decimal places.
+    // Both sides take the declared style, decimal places included: the
+    // amount that was typed and the balancing amount that was generated end
+    // up in the same form.
     assert!(
-        text.contains("1_234 EUR") && text.contains("-1_234.00 EUR"),
+        text.contains("1_234.00 EUR") && text.contains("-1_234.00 EUR"),
         "file was:\n{text}"
     );
 }

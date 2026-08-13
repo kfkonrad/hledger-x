@@ -11,6 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   buffer, so typing replaces it rather than appending to it
 - `add`: `Enter`, `Tab` and `→` all accept a ghost suggestion at every prompt. Previously `Enter` accepted the date and
   description ghosts but not the amount ghost
+- `add`: a calculated balancing amount no longer carries trailing zeros left over from the arithmetic that produced it —
+  `10.00 EUR @ 1.105 USD` balances with `-11.05 USD`, not `-11.05000 USD`
+
+### Changed
+- `add`: an amount you enter is filled out to its commodity's declared decimal places — with `commodity 1_000.00 EUR`,
+  `4 EUR` is written as `4.00 EUR`. The declared places are a floor, never a ceiling, so `4.001 EUR` is kept as typed.
+  Applies to the face amount, an `@`/`@@` price and a `=` assertion alike, each against its own commodity. `fmt` still
+  never touches the precision of text already in the journal
 
 ## [0.1.0] - 2026-08-12
 
