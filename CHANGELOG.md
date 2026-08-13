@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Fixed
+- `add`: an account pre-filled from a transaction template is shown as grey ghost text instead of being written into the
+  buffer, so typing replaces it rather than appending to it
+- `add`: `Enter`, `Tab` and `→` all accept a ghost suggestion at every prompt. Previously `Enter` accepted the date and
+  description ghosts but not the amount ghost
+
 ## [0.1.0] - 2026-08-12
 
 Initial release.
