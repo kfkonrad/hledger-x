@@ -26,14 +26,20 @@ pub fn run<R: BufRead, W: Write>(
     replay_recovery(session, recovery, out)?;
     loop {
         let field = session.draft.field;
-        let prefill = session.draft.buffer.clone();
+        // What Enter would take: the text already in the buffer, or the ghost
+        // suggestion offered for an empty one.
+        let offered = if session.draft.buffer.is_empty() {
+            session.suggestion().unwrap_or_default()
+        } else {
+            session.draft.buffer.clone()
+        };
         let hint = session
             .hint()
             .map_or_else(String::new, |h| format!(" ({h})"));
-        if prefill.is_empty() {
+        if offered.is_empty() {
             write!(out, "{}{hint}: ", field.label())?;
         } else {
-            write!(out, "{} [{prefill}]{hint}: ", field.label())?;
+            write!(out, "{} [{offered}]{hint}: ", field.label())?;
         }
         out.flush()?;
         let mut line = String::new();
@@ -42,8 +48,12 @@ pub fn run<R: BufRead, W: Write>(
         }
         let line = line.trim_end_matches(['\n', '\r']);
         match line {
-            "" => {} // keep the pre-fill
-            "." => session.draft.set_buffer(""),
+            "" => {} // accept whatever is offered
+            // `.` is this frontend's Ctrl-U: refuse what is offered.
+            "." => {
+                session.draft.set_buffer("");
+                session.draft.dismiss_suggestion();
+            }
             other => session.draft.set_buffer(other),
         }
         match session.submit() {
@@ -250,9 +260,8 @@ mod tests {
             ..Config::default()
         };
         // date, desc, undeclared account → y, amount, second account
-        // (declared), `.` clears the pre-fill: the empty amount balances
-        // and finishes.
-        let input = "\nX\nexpenses:grocerys\ny\n5 EUR\nassets:cash\n.\n";
+        // (declared), empty amount writes the balancing amount and finishes.
+        let input = "\nX\nexpenses:grocerys\ny\n5 EUR\nassets:cash\n\n";
         let (done, out, _t) = run_session_with(src, cfg, input);
         assert_eq!(done.len(), 1, "{out}");
         assert!(out.contains("not a declared account"), "{out}");

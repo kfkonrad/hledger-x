@@ -265,7 +265,16 @@ impl Ui {
             }
             KeyCode::Char('d') => return Ok(Flow::Quit),
             KeyCode::Char('u') => {
-                session.draft.set_buffer("");
+                // Clear what is typed. On an already-empty account prompt
+                // there is nothing to clear, so it refuses the suggested
+                // account instead — the only way to reach "finish the
+                // transaction" while an account is being offered. Elsewhere
+                // an empty buffer means Ctrl-U has nothing to do.
+                if session.draft.buffer.is_empty() {
+                    session.draft.dismiss_suggestion();
+                } else {
+                    session.draft.set_buffer("");
+                }
                 self.menu = None;
             }
             KeyCode::Char('w') => {
@@ -743,12 +752,59 @@ mod tests {
         assert_eq!(ui.menu.as_ref().map(|m| m.selected), Some(1));
     }
 
+    /// What the user actually sees. The prompt paints the buffer un-dimmed
+    /// and the suggestion dimmed, so a suggested account must reach the
+    /// screen inside a dim span and *not* inside the buffer span.
+    #[test]
+    fn a_suggested_account_is_painted_dim_and_not_into_the_buffer() {
+        let (mut s, _t) = session();
+        let mut ui = ui();
+        at_account(&mut s);
+        let mut out: Vec<u8> = Vec::new();
+        ui.draw(&s, &mut out).unwrap();
+        let painted = String::from_utf8_lossy(&out).into_owned();
+
+        let dim = "\u{1b}[2m";
+        let reset = "\u{1b}[0m";
+        let prompt_at = painted.find("account 1").expect("prompt should be painted");
+        let tail = painted.get(prompt_at..).unwrap();
+        // The account text appears, and the span it sits in starts dim.
+        let account_at = tail
+            .find("expenses:groceries")
+            .expect("the suggested account should be painted");
+        let before = tail.get(..account_at).unwrap();
+        let last_dim = before.rfind(dim);
+        let last_reset = before.rfind(reset);
+        assert!(
+            last_dim.is_some() && last_dim > last_reset,
+            "the suggested account is painted un-dimmed:\n{}",
+            painted.escape_debug()
+        );
+    }
+
+    #[test]
+    fn tab_picks_up_a_suggested_account_rather_than_opening_the_list() {
+        let (mut s, _t) = session();
+        let mut ui = ui();
+        at_account(&mut s);
+        // "Rewe" has history, so account 1 is suggested; Tab puts it in the
+        // buffer to edit, exactly as it does with the date and amount ghosts.
+        assert_eq!(s.suggestion().as_deref(), Some("expenses:groceries"));
+        ui.navigate(&mut s, KeyCode::Tab);
+        assert_eq!(s.draft.buffer, "expenses:groceries");
+        assert!(ui.menu.is_none());
+    }
+
     #[test]
     fn tab_on_an_empty_account_opens_the_whole_list() {
         let (mut s, _t) = session();
         let mut ui = ui();
-        at_account(&mut s);
-        s.draft.set_buffer("");
+        // A description with no history suggests nothing, so Tab browses the
+        // whole pool — which is how history is reached.
+        s.submit();
+        s.draft.set_buffer("Brand New Payee");
+        s.submit();
+        assert_eq!(s.suggestion(), None);
         ui.navigate(&mut s, KeyCode::Tab);
         assert!(s.draft.buffer.is_empty());
         assert!(ui.menu.is_some());

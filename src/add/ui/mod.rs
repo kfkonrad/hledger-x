@@ -270,6 +270,16 @@ pub struct Draft {
     template: Vec<(String, String)>,
     /// Highest field reached, as an ordinal — the navigation frontier.
     frontier: usize,
+    /// The suggested account has been refused. Cleared on every move, so it
+    /// only ever applies to the prompt it was asked for.
+    ///
+    /// **Accounts only, on purpose.** Refusing means something there and
+    /// nowhere else: an empty account prompt has two readings — accept the
+    /// suggestion, or finish the transaction — and this is how you reach the
+    /// second while the first is on offer. At the date and amount prompts an
+    /// empty Enter does the same thing whether or not a ghost is showing, so
+    /// hiding the ghost there would change the display and nothing else.
+    account_refused: bool,
 }
 
 impl Draft {
@@ -346,6 +356,13 @@ impl Draft {
         self.buffer.remove(byte);
     }
 
+    /// Refuse the suggested account, so that Enter finishes the transaction
+    /// instead of accepting it. No effect on the other prompts — see
+    /// [`Self::account_refused`].
+    pub const fn dismiss_suggestion(&mut self) {
+        self.account_refused = true;
+    }
+
     /// Number of postings committed so far.
     #[must_use]
     pub const fn committed_postings(&self) -> usize {
@@ -388,6 +405,7 @@ impl Draft {
     /// The loaded text is pristine: typing replaces it.
     fn goto(&mut self, field: Field) {
         self.stash();
+        self.account_refused = false;
         self.field = field;
         self.frontier = self.frontier.max(field.ordinal());
         let text = self.stored(field);
@@ -537,23 +555,6 @@ impl Session {
         self.draft = Draft::new();
     }
 
-    /// The pre-fill for the current field, used when its stored text is
-    /// empty. (Loading an already-stored field on navigation wins.) Only
-    /// accounts pre-fill; dates and amounts are ghost-suggested instead —
-    /// see [`Self::suggestion`].
-    #[must_use]
-    pub fn prefill(&self) -> String {
-        match self.draft.field {
-            Field::Date | Field::Description | Field::Amount(_) => String::new(),
-            Field::Account(i) => self
-                .draft
-                .template
-                .get(i)
-                .map(|(a, _)| a.clone())
-                .unwrap_or_default(),
-        }
-    }
-
     /// The ghost suggestion for the current (empty) field, shown dimmed
     /// after the cursor. Tab or `→` copies it into the buffer for editing;
     /// Enter submits the empty buffer instead — which itself means the
@@ -576,7 +577,20 @@ impl Session {
                 let s = self.amount_prefill(i);
                 (!s.is_empty()).then_some(s)
             }
-            Field::Description | Field::Account(_) => None,
+            // The template's account for this posting. It used to be
+            // written into the buffer as pre-filled text, which read as
+            // something already entered while behaving like a suggestion:
+            // white, yet wiped wholesale by the first keystroke. Ghosting it
+            // makes appearance and behaviour agree — dim text is a proposal,
+            // buffer text is yours.
+            Field::Account(i) if !self.draft.account_refused => self
+                .draft
+                .template
+                .get(i)
+                .map(|(a, _)| a.clone())
+                .filter(|a| !a.is_empty()),
+            // A refused account, and the description, suggest nothing.
+            Field::Account(_) | Field::Description => None,
         }
     }
 
@@ -772,9 +786,23 @@ impl Session {
     }
 
     fn submit_account(&mut self, i: usize, confirmed: bool) -> Submit {
-        let text = self.draft.buffer.trim().to_owned();
+        let mut text = self.draft.buffer.trim().to_owned();
         if text.is_empty() {
-            return self.finish(i);
+            // Enter on an empty account accepts the suggested one, the way it
+            // does at the date and amount prompts. With nothing suggested —
+            // the template is exhausted, or the suggestion was dismissed —
+            // an empty account is the end of the transaction.
+            match self.suggestion() {
+                Some(suggested) => {
+                    // Into the buffer, not just into `text`: advancing stashes
+                    // the buffer into this field's slot, so an accepted
+                    // suggestion that stayed out of it would be stashed away
+                    // again as empty.
+                    self.draft.set_buffer(&suggested);
+                    text = suggested;
+                }
+                None => return self.finish(i),
+            }
         }
         // Strict mode mirrors `hledger check accounts`: only declarations
         // visible at the insertion point count. hledger-x never declares
@@ -820,9 +848,39 @@ impl Session {
     fn submit_amount(&mut self, i: usize, confirmed: bool) -> Submit {
         let mut text = self.draft.buffer.trim().to_owned();
         if text.is_empty() {
-            // An empty amount means: this is the last posting — fill it with
-            // the balancing amount, explicitly, and finish.
-            return self.finish_via_empty_amount(i);
+            let Some(suggested) = self.suggestion() else {
+                return Submit::Invalid(if i == 0 {
+                    "an amount is required on the first posting".to_owned()
+                } else {
+                    "an amount is needed here — the balancing amount cannot be worked out yet"
+                        .to_owned()
+                });
+            };
+            // Enter accepts the ghost, as at every prompt. One deliberate
+            // extra: when that ghost is the *balancing* amount and no later
+            // posting is waiting, accepting it also ends the transaction —
+            // the shortcut that keeps a routine entry at one keystroke per
+            // field. A template amount never finishes; only arithmetic that
+            // has nothing left to balance does.
+            //
+            // The strict commodity check is skipped here for the same reason
+            // the equity conversion postings skip it: hledger-x generated
+            // this amount rather than the user typing it, and its commodity
+            // is the negation of one already vetted on the posting it
+            // balances.
+            if !self.has_later_postings(i)
+                && self.balancing_prefill(i).as_deref() == Some(suggested.as_str())
+            {
+                ensure_len(&mut self.draft.postings, i.saturating_add(1));
+                if let Some(p) = self.draft.postings.get_mut(i) {
+                    p.1.clone_from(&suggested);
+                }
+                self.draft.set_buffer(&suggested);
+                self.draft.postings.truncate(i.saturating_add(1));
+                return self.complete_draft();
+            }
+            self.draft.set_buffer(&suggested);
+            text = suggested;
         }
         let Some(parsed) = parse_amount(&text, &self.ctx.amount_ctx) else {
             return Submit::Invalid(format!("cannot parse amount {text:?}"));
@@ -891,38 +949,26 @@ impl Session {
         self.advance_to(Field::Account(i.saturating_add(1)));
     }
 
-    /// An empty amount submits the balancing amount — written explicitly —
-    /// and ends the transaction. The first posting must carry an amount.
-    fn finish_via_empty_amount(&mut self, i: usize) -> Submit {
-        if i == 0 {
-            return Submit::Invalid("an amount is required on the first posting".to_owned());
-        }
-        let has_later = self
-            .draft
+
+    /// Whether an empty Enter at amount `i` would write the balancing
+    /// amount and end the transaction, rather than merely accept a ghost.
+    #[must_use]
+    pub fn balancing_finishes(&self, i: usize) -> bool {
+        !self.has_later_postings(i)
+            && self.balancing_prefill(i).is_some()
+            && self.balancing_prefill(i) == self.suggestion()
+    }
+
+    /// Whether any posting after `i` has been started. The balancing
+    /// shortcut must not finish over the top of one.
+    fn has_later_postings(&self, i: usize) -> bool {
+        self.draft
             .postings
             .get(i.saturating_add(1)..)
             .is_some_and(|rest| {
                 rest.iter()
                     .any(|(a, amt)| !a.trim().is_empty() || !amt.trim().is_empty())
-            });
-        if has_later {
-            return Submit::Invalid(
-                "an empty amount only finishes on the last posting — later postings exist"
-                    .to_owned(),
-            );
-        }
-        let Some(balancing) = self.balancing_prefill(i) else {
-            return Submit::Invalid(
-                "cannot compute the balancing amount here — enter it explicitly".to_owned(),
-            );
-        };
-        ensure_len(&mut self.draft.postings, i.saturating_add(1));
-        if let Some(p) = self.draft.postings.get_mut(i) {
-            p.1.clone_from(&balancing);
-        }
-        self.draft.set_buffer(&balancing);
-        self.draft.postings.truncate(i.saturating_add(1));
-        self.complete_draft()
+            })
     }
 
     /// Finish the transaction at an empty account prompt for posting `i`.
@@ -998,15 +1044,11 @@ impl Session {
             .collect()
     }
 
-    /// Move to `field`, loading its stored text or, when empty, its
-    /// pre-fill.
+    /// Move to `field`, loading whatever text it already holds. Proposals
+    /// are never loaded — they are offered as ghosts, see
+    /// [`Self::suggestion`].
     fn advance_to(&mut self, field: Field) {
         self.draft.goto(field);
-        if self.draft.buffer.is_empty() {
-            let fill = self.prefill();
-            self.draft.set_buffer(&fill);
-            self.draft.pristine = !fill.is_empty();
-        }
     }
 
     /// A close existing account name, for "did you mean".
@@ -1036,18 +1078,32 @@ impl Session {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         let empty = self.draft.buffer.trim().is_empty();
+        // One rule, said the same way everywhere: a ghost is accepted by
+        // Enter and edited with Tab or →. The only field that adds anything
+        // is the account, where refusing the ghost is how you finish the
+        // transaction — that difference is forced by the account prompt
+        // meaning two things, and is the only one.
+        if empty && self.suggestion().is_some() {
+            return Some(match self.draft.field {
+                Field::Account(_) => {
+                    "Enter accepts · Tab or → edits it · Ctrl-U dismisses it".to_owned()
+                }
+                // Say which Enter this is: on the balancing amount it also
+                // ends the transaction, and a hint that promised only
+                // "accepts" would be lying about the one prompt that does
+                // something extra.
+                Field::Amount(i) if self.balancing_finishes(i) => {
+                    "Enter writes it and finishes · Tab or → edits it".to_owned()
+                }
+                _ => "Enter accepts · Tab or → edits it".to_owned(),
+            });
+        }
         match self.draft.field {
             Field::Date => Some(
                 "Enter accepts · u undoes the last transaction · q saves and quits".to_owned(),
             ),
             Field::Account(i) if i >= 1 && empty => {
                 Some("Enter on the empty account finishes the transaction".to_owned())
-            }
-            Field::Amount(i) if i >= 1 && empty => Some(
-                "Enter on the empty amount writes the balancing amount and finishes".to_owned(),
-            ),
-            Field::Amount(0) if empty && self.suggestion().is_some() => {
-                Some("Tab or → picks up the suggestion".to_owned())
             }
             _ => None,
         }
@@ -1301,9 +1357,11 @@ mod tests {
 
         type_in(&mut s, "Rewe");
         assert_eq!(s.submit(), Submit::Advanced);
-        // Template from the most recent Rewe: account 1 pre-filled.
+        // Template from the most recent Rewe: account 1 suggested, not
+        // entered. Enter accepts it.
         assert_eq!(s.draft.field, Field::Account(0));
-        assert_eq!(s.draft.buffer, "expenses:groceries");
+        assert_eq!(s.draft.buffer, "");
+        assert_eq!(s.suggestion().as_deref(), Some("expenses:groceries"));
         assert_eq!(s.submit(), Submit::Advanced);
         // Template amount ghost-suggested, never pre-filled.
         assert_eq!(s.draft.field, Field::Amount(0));
@@ -1311,15 +1369,17 @@ mod tests {
         assert_eq!(s.suggestion().as_deref(), Some("12.00 EUR"));
         type_in(&mut s, "18.20 EUR");
         assert_eq!(s.submit(), Submit::Advanced);
-        // Account 2 from template.
-        assert_eq!(s.draft.buffer, "assets:bank:checking");
+        // Account 2 from template, likewise suggested.
+        assert_eq!(s.draft.buffer, "");
+        assert_eq!(s.suggestion().as_deref(), Some("assets:bank:checking"));
         assert_eq!(s.submit(), Submit::Advanced);
         // Balancing amount suggested: negated running sum, not the template.
-        // Enter on the empty amount writes it explicitly and finishes.
+        // Enter accepts it, as at every prompt; the transaction then ends at
+        // the account prompt after it, which suggests nothing.
         assert_eq!(s.draft.buffer, "");
         assert_eq!(s.suggestion().as_deref(), Some("-18.20 EUR"));
         let Submit::Done(txn) = s.submit() else {
-            panic!("expected Done, got {:?}", s.submit());
+            panic!("expected the transaction to finish");
         };
         assert_eq!(txn.date, d(2026, 8, 10));
         assert_eq!(txn.description, "Rewe");
@@ -1452,7 +1512,15 @@ mod tests {
         s.submit();
         type_in(&mut s, "assets:bank:checking");
         s.submit();
-        type_in(&mut s, ""); // empty amount: balance explicitly and finish
+        // The balancing ghost is the one deliberate exception: accepting it
+        // also ends the transaction, and the hint says so.
+        type_in(&mut s, "");
+        assert_eq!(s.suggestion().as_deref(), Some("-10 EUR"));
+        assert!(s.balancing_finishes(1));
+        assert_eq!(
+            s.hint().as_deref(),
+            Some("Enter writes it and finishes · Tab or → edits it")
+        );
         let r = s.submit();
         let Submit::Done(txn) = r else {
             panic!("expected Done, got {r:?}");
@@ -1470,7 +1538,12 @@ mod tests {
         s.submit();
         type_in(&mut s, "expenses:groceries");
         s.submit();
+        // Nothing is suggested for the first amount of a transaction with
+        // no template, and there is nothing to balance against either, so
+        // Enter cannot invent one.
         type_in(&mut s, "");
+        assert_eq!(s.suggestion(), None);
+        assert!(!s.balancing_finishes(0));
         let r = s.submit();
         let Submit::Invalid(msg) = r else {
             panic!("expected Invalid, got {r:?}");
@@ -2016,8 +2089,7 @@ mod tests {
         assert_eq!(s.draft.postings[0].1, "12.50 EUR");
         type_in(&mut s, "c:d");
         s.submit();
-        // …so the balancing suggestion matches and the empty amount
-        // finishes the transaction.
+        // …so the balancing suggestion matches.
         assert_eq!(s.suggestion().as_deref(), Some("-12.50 EUR"));
         let r = s.submit();
         let Submit::Done(txn) = r else {
@@ -2069,31 +2141,86 @@ mod tests {
     }
 
     #[test]
-    fn typing_over_a_pristine_prefill_replaces_it() {
+    fn a_suggested_account_is_a_ghost_not_buffer_text() {
         let (mut s, _t) = session(JOURNAL);
         s.submit();
         type_in(&mut s, "Rewe");
         s.submit();
-        // Account 1 arrives pre-filled and pristine; typing starts fresh.
-        assert_eq!(s.draft.buffer, "expenses:groceries");
-        assert!(s.draft.pristine);
+        // The template's account is *offered*, not entered: the buffer is
+        // empty and the account shows as a dim suggestion. Rendering it as
+        // buffer text made it look committed while a keystroke wiped it.
+        assert_eq!(s.draft.buffer, "");
+        assert_eq!(s.suggestion().as_deref(), Some("expenses:groceries"));
+        // Typing therefore just types — nothing to destroy.
         s.draft.insert('l');
         assert_eq!(s.draft.buffer, "l");
-        assert!(!s.draft.pristine);
+        assert_eq!(s.suggestion(), None);
     }
 
     #[test]
-    fn backspace_on_a_pristine_prefill_keeps_the_text_for_editing() {
+    fn enter_accepts_the_suggested_account_and_tab_picks_it_up_to_edit() {
         let (mut s, _t) = session(JOURNAL);
         s.submit();
         type_in(&mut s, "Rewe");
         s.submit();
-        // goto loads pristine; backspace switches to editing.
-        assert!(s.draft.pristine);
+        // Enter on the empty prompt takes the suggestion, as it does at the
+        // date and amount prompts.
+        assert_eq!(s.submit(), Submit::Advanced);
+        assert_eq!(s.draft.postings[0].0, "expenses:groceries");
+        assert_eq!(s.draft.field, Field::Amount(0));
+
+        // Tab / → instead put it in the buffer for editing — which is what
+        // the frontends do with `suggestion()`.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        let suggested = s.suggestion().unwrap();
+        s.draft.set_buffer(&suggested);
         s.draft.backspace();
         assert_eq!(s.draft.buffer, "expenses:grocerie");
-        s.draft.insert('s');
-        assert_eq!(s.draft.buffer, "expenses:groceries");
+    }
+
+    #[test]
+    fn dismissing_the_suggested_account_lets_enter_finish_the_transaction() {
+        // Using fewer postings than the template needs a way to refuse the
+        // suggestion: Ctrl-U in the terminal, `.` over a pipe.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "18.20 EUR");
+        s.submit();
+        type_in(&mut s, "assets:bank:checking");
+        s.submit();
+        type_in(&mut s, "-18.20 EUR");
+        s.submit();
+        // Account 3: the template is exhausted, so nothing is suggested and
+        // Enter finishes.
+        assert_eq!(s.draft.field, Field::Account(2));
+        assert_eq!(s.suggestion(), None);
+        assert!(matches!(s.submit(), Submit::Done(_)));
+    }
+
+    #[test]
+    fn a_dismissed_suggestion_comes_back_on_the_next_field() {
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rewe");
+        s.submit();
+        assert!(s.suggestion().is_some());
+        s.draft.dismiss_suggestion();
+        assert_eq!(s.suggestion(), None);
+        // Dismissal is per field: Enter now finishes rather than accepting,
+        // and moving on starts clean.
+        type_in(&mut s, "expenses:groceries");
+        s.submit();
+        type_in(&mut s, "1 EUR");
+        s.submit();
+        assert_eq!(s.draft.field, Field::Account(1));
+        assert_eq!(s.suggestion().as_deref(), Some("assets:bank:checking"));
     }
 
     #[test]
