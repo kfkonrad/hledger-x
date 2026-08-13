@@ -504,7 +504,12 @@ pub fn render_amount(value: Decimal, commodity: &str, ctx: &AmountCtx) -> String
         },
         |s| effective_style(s, ctx),
     );
-    let places = style.decimal_places.max(value.scale());
+    // `value` is computed, so its scale is an artefact of the arithmetic that
+    // produced it: 10.00 × 1.105 lands at scale 5 and would print
+    // `11.05000`. Trailing zeros carry no information here — unlike in text a
+    // person typed, where they are a deliberate statement of precision and
+    // are preserved — so the floor is applied to the normalized scale.
+    let places = style.decimal_places.max(value.normalize().scale());
     render_styled(value, commodity, &style, places)
 }
 
@@ -550,12 +555,16 @@ fn render_styled(value: Decimal, commodity: &str, style: &DisplayStyle, places: 
 /// declared style, or text that does not parse.
 #[must_use]
 pub fn restyle_face_text(field: &str, ctx: &AmountCtx) -> Option<String> {
+    restyle_face_text_with(field, ctx, Places::AsWritten)
+}
+
+fn restyle_face_text_with(field: &str, ctx: &AmountCtx, places: Places) -> Option<String> {
     let toks: Vec<&str> = field.split_whitespace().collect();
     let (num_field, commodity, rest) = split_amount(&toks);
     if !rest.is_empty() {
         return None;
     }
-    restyle_pair(&num_field, &commodity, ctx)
+    restyle_pair(&num_field, &commodity, ctx, places)
 }
 
 /// The style actually used for rendering under `ctx`.
@@ -582,13 +591,34 @@ fn effective_style(style: &DisplayStyle, ctx: &AmountCtx) -> DisplayStyle {
 
 /// The core of restyling: parse the face, require a declared style, render
 /// with the value's own scale.
-fn restyle_pair(num_field: &str, commodity: &str, ctx: &AmountCtx) -> Option<String> {
+/// How much precision a restyle should produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Places {
+    /// Exactly what was written. Required anywhere `fmt` can reach: changing
+    /// the precision of an amount already in the journal changes what
+    /// `hledger print` emits, which the semantic invariant forbids.
+    AsWritten,
+    /// The commodity's declared places, or the amount's own if it carries
+    /// more. A floor, never a ceiling — see [`restyle_entered`].
+    AtLeastDeclared,
+}
+
+fn restyle_pair(
+    num_field: &str,
+    commodity: &str,
+    ctx: &AmountCtx,
+    places: Places,
+) -> Option<String> {
     let (value, commodity) = parse_face(num_field, commodity, ctx)?;
     if commodity.is_empty() {
         return None;
     }
     let style = effective_style(ctx.styles.get(&commodity)?, ctx);
-    Some(render_styled(value, &commodity, &style, value.scale()))
+    let places = match places {
+        Places::AsWritten => value.scale(),
+        Places::AtLeastDeclared => style.decimal_places.max(value.scale()),
+    };
+    Some(render_styled(value, &commodity, &style, places))
 }
 
 /// Restyle a posting's (number field, commodity token) pair for column
@@ -617,6 +647,12 @@ pub fn restyle_face_fields(num: &str, commodity: &str, ctx: &AmountCtx) -> Optio
 /// Any group that does not restyle stays exactly as written.
 #[must_use]
 pub fn restyle_tail(rest: &[&str], ctx: &AmountCtx) -> Vec<String> {
+    restyle_tail_with(rest, ctx, Places::AsWritten)
+}
+
+/// [`restyle_tail`] with an explicit precision policy. `fmt` must always pass
+/// [`Places::AsWritten`]; only an amount being entered may be padded.
+fn restyle_tail_with(rest: &[&str], ctx: &AmountCtx, places: Places) -> Vec<String> {
     const OPS: [&str; 6] = ["==*", "=*", "==", "=", "@@", "@"];
     let mut out: Vec<String> = Vec::new();
     let mut i = 0usize;
@@ -644,7 +680,7 @@ pub fn restyle_tail(rest: &[&str], ctx: &AmountCtx) -> Vec<String> {
             group.push(next);
             i = i.saturating_add(1);
         }
-        if let Some(s) = restyle_face_text(&group.join(" "), ctx) {
+        if let Some(s) = restyle_face_text_with(&group.join(" "), ctx, places) {
             out.push((*op).to_owned());
             out.extend(s.split_whitespace().map(ToOwned::to_owned));
         } else {
@@ -656,11 +692,31 @@ pub fn restyle_tail(rest: &[&str], ctx: &AmountCtx) -> Vec<String> {
     out
 }
 
-/// Restyle a whole typed amount field — face plus any cost/assertion tail —
-/// leaving every part without a declared style, or that does not parse,
-/// exactly as typed.
+/// Restyle an amount the user has **just entered** — face plus any
+/// cost/assertion tail — leaving every part without a declared style, or that
+/// does not parse, exactly as typed.
+///
+/// This is `add`'s path, and it differs from [`restyle_face_fields`] (`fmt`'s)
+/// in one way: the face amount is padded out to the commodity's declared
+/// number of decimal places. Entering `4 EUR` under `commodity 1_000.00 EUR`
+/// stores `4.00 EUR`, which is also what the generated balancing amount would
+/// have been, so the two sides of a transaction agree.
+///
+/// The declared places are a **minimum, never a maximum**: `4.000` and
+/// `4.001` are left alone. hledger accepts more precision than a commodity
+/// declares — the directive sets the default, not a limit — and rounding
+/// `4.001` down would lose value, which no rewrite here is allowed to do.
+///
+/// Applies to every amount in the field, the face as well as a cost or
+/// assertion tail: `10EUR @ 1.1USD` becomes `10.00 EUR @ 1.10 USD`.
+///
+/// `fmt` must *not* do this to text already in the journal. Verified: under a
+/// declared `1_000.00 EUR`, `hledger print` renders a written `1234 EUR` as
+/// `1_234.`, so padding it to `1_234.00` changes print output and breaks the
+/// semantic invariant. Existing precision is the author's; entered precision
+/// is ours to complete.
 #[must_use]
-pub fn restyle_field(text: &str, ctx: &AmountCtx) -> String {
+pub fn restyle_entered(text: &str, ctx: &AmountCtx) -> String {
     let toks: Vec<&str> = text.split_whitespace().collect();
     let (num_field, commodity, rest) = split_amount(&toks);
     let face_src = if commodity.is_empty() {
@@ -669,11 +725,11 @@ pub fn restyle_field(text: &str, ctx: &AmountCtx) -> String {
         format!("{num_field} {commodity}")
     };
     let mut out: Vec<String> = Vec::new();
-    match restyle_pair(&num_field, &commodity, ctx) {
+    match restyle_pair(&num_field, &commodity, ctx, Places::AtLeastDeclared) {
         Some(s) => out.extend(s.split_whitespace().map(ToOwned::to_owned)),
         None => out.extend(face_src.split_whitespace().map(ToOwned::to_owned)),
     }
-    out.extend(restyle_tail(&rest, ctx));
+    out.extend(restyle_tail_with(&rest, ctx, Places::AtLeastDeclared));
     out.join(" ")
 }
 
@@ -1082,16 +1138,32 @@ mod tests {
     }
 
     #[test]
-    fn restyle_field_covers_face_and_tail() {
+    fn a_generated_amount_sheds_arithmetic_trailing_zeros_but_keeps_the_floor() {
+        let c = ctx_with("EUR", "1_000.00 EUR");
+        let d = |s: &str| s.parse::<Decimal>().unwrap();
+        // 10.00 × 1.105 lands at scale 5; the zeros say nothing.
+        assert_eq!(render_amount(d("11.05000"), "EUR", &c), "11.05 EUR");
+        // The declared places are still a floor.
+        assert_eq!(render_amount(d("5"), "EUR", &c), "5.00 EUR");
+        assert_eq!(render_amount(d("5.0"), "EUR", &c), "5.00 EUR");
+        // Genuine precision beyond the declaration survives.
+        assert_eq!(render_amount(d("11.056"), "EUR", &c), "11.056 EUR");
+        assert_eq!(render_amount(d("11.05600"), "EUR", &c), "11.056 EUR");
+    }
+
+    #[test]
+    fn restyle_entered_covers_face_and_tail() {
         let mut c = ctx_with("EUR", "1_000.00 EUR");
         let (n, s) = style_from_sample("1,000.00 USD").unwrap();
         c.styles.insert(n, s);
+        // Face, price and assertion all take their commodity's declared two
+        // places — every amount in the field the user just typed.
         assert_eq!(
-            restyle_field("10EUR @ 1.1USD = 5EUR", &c),
-            "10 EUR @ 1.1 USD = 5 EUR"
+            restyle_entered("10EUR @ 1.1USD = 5EUR", &c),
+            "10.00 EUR @ 1.10 USD = 5.00 EUR"
         );
         // Nothing restylable: byte-identical tokens, single-spaced.
-        assert_eq!(restyle_field("10 GBP", &c), "10 GBP");
+        assert_eq!(restyle_entered("10 GBP", &c), "10 GBP");
     }
 
     #[test]
@@ -1100,7 +1172,7 @@ mod tests {
         let (n, s) = style_from_sample("1,000.00 USD").unwrap();
         c.styles.insert(n, s);
         for src in ["10EUR", "1000,50 EUR", "10.5 EUR", "-5EUR @ 1.2USD"] {
-            let restyled = restyle_field(src, &c);
+            let restyled = restyle_entered(src, &c);
             assert_eq!(
                 parse_amount(src, &c).unwrap(),
                 parse_amount(&restyled, &c).unwrap(),

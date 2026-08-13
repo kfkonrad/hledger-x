@@ -244,10 +244,43 @@ restyled" rule): under `commodity 1_000.00 EUR`, a sloppy `10EUR` or `EUR10`
 becomes `10 EUR`, in `fmt` and in the transaction `add` is building alike.
 
 What restyling normalizes — all verified against hledger 1.99's `print`:
-symbol side, symbol spacing, digit grouping and the decimal mark. The entered
-precision is kept exactly: hledger prints `10 EUR`, not `10.00 EUR`, keeps
-trailing zeros (`10.500`), and never rounds. Cost and assertion tails restyle
-too. Parsing honours the marks in effect, so under a comma-decimal style a
+symbol side, symbol spacing, digit grouping and the decimal mark. Cost and
+assertion tails restyle too.
+
+**Decimal places split the two engines**, added 2026-08-13 with the user:
+
+| | precision |
+| --- | --- |
+| `fmt`, on text already in the journal | exactly as written |
+| `add`, on an amount just entered | at least the declared places |
+
+`fmt` must leave it alone. Verified: under `commodity 1_000.00 EUR` a written
+`1234 EUR` prints as `1_234.`, so padding it to `1_234.00` is a different
+document and the semantic invariant fails. `hledger print` never pads —
+`4 EUR` stays `4 EUR` — because the source's precision is the author's.
+
+An amount being *entered* is a different thing: nobody has committed to its
+precision yet, and the declared style is the answer to "how is this commodity
+written here". So `4 EUR` and `4.0 EUR` are stored as `4.00 EUR`. This also
+removes an asymmetry that was simply a bug: the generated balancing amount
+already padded (`render_amount` takes `decimal_places.max(scale)`), so typing
+`5 EUR` produced a posting pair of `5 EUR` and `-5.00 EUR`.
+
+**Typed trailing zeros are kept, computed ones are not.** A person writing
+`4.000` is stating a precision; `render_amount` producing `11.05000` from
+`10.00 × 1.105` is not — that scale is an artefact of the multiplication. So a
+generated amount is normalized before the declared floor applies, and the
+balancing posting for that cost reads `-11.05 USD`. Without this the padding
+above would have made generated amounts *worse* than before it.
+
+**Declared places are a floor, never a ceiling.** `4.000` and `4.001` are left
+exactly as typed. hledger accepts more precision than a commodity declares —
+the directive sets the default, not a limit — and rounding `4.001` to `4.00`
+would lose value, which invariant 2 forbids outright. The face amount and the
+second commodity in an `@`/`@@` cost or a `=` assertion are all padded, each
+against its own commodity's declared style — a price is as much a thing the
+user just typed as the face is (settled 2026-08-17 with the user). Parsing
+honours the marks in effect, so under a comma-decimal style a
 historical `10.5` genuinely *means* 105 and is rewritten as such — that is
 hledger's reading of the file, not ours.
 

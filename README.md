@@ -61,6 +61,9 @@ the configured `sort`.
 Alignment is computed file-wide, so one long account name or number reflows every posting in the file — expect
 occasional diffs much larger than the edit.
 
+`fmt` never changes an amount's precision — that belongs to whoever wrote it, and altering it would change what
+`hledger print` emits. (`add` does fill an amount you type out to the commodity's declared decimal places; see below.)
+
 #### Exit codes
 
 | Code | Meaning                                         |
@@ -103,6 +106,15 @@ This works like so:
   how to configure completion behavior. Entering an empty account (no account) closes the transaction.
 - Amount: pre-filled but greyed out, press `→` or `Tab` to accept or type an amount to override. If the amount is left
   empty `hledger-x` will calculate the balance and close the transaction.
+
+An amount you enter is filled out to the decimal places its commodity declares: with `commodity 1_000.00 EUR`, both
+`4 EUR` and `4.0 EUR` are written as `4.00 EUR` — the same form the calculated balancing amount takes. The declared
+places are a minimum, never a maximum, so `4.000 EUR` and `4.001 EUR` are written exactly as typed; hledger accepts
+more precision than a commodity declares, and rounding would lose value. Commodities with no `commodity` directive are
+left alone entirely.
+
+A price or balance assertion is filled out the same way, against its own commodity's declared style, so
+`10 EUR @ 1.1 USD` is written as `10.00 EUR @ 1.10 USD`.
 
 #### Navigating `hledger-x add`
 

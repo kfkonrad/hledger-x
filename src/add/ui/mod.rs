@@ -900,7 +900,7 @@ impl Session {
         // Normalize what was typed to the declared display style — the form
         // `fmt` (and `hledger print`) would write. Amounts of undeclared
         // commodities stay as typed.
-        text = crate::amount::restyle_field(&text, &self.ctx.amount_ctx);
+        text = crate::amount::restyle_entered(&text, &self.ctx.amount_ctx);
         // Strict mode mirrors `hledger check commodities`, covering the face
         // commodity and any second commodity in a cost/assertion tail. A
         // unitless amount is always valid, even in strict mode.
@@ -1336,14 +1336,73 @@ mod tests {
         s.submit();
         type_in(&mut s, "1234EUR");
         assert_eq!(s.submit(), Submit::Advanced);
-        // Committed as hledger would print it; typed precision kept.
-        assert_eq!(s.draft.postings[0].1, "1_234 EUR");
+        // Grouped and spaced per the declaration, and filled out to its two
+        // decimal places — the same form the generated balancing amount
+        // would take, so the two sides of the transaction match.
+        assert_eq!(s.draft.postings[0].1, "1_234.00 EUR");
         // Undeclared commodities stay as typed.
         type_in(&mut s, "liabilities:cc");
         s.submit();
         type_in(&mut s, "-10USD");
         assert_eq!(s.submit(), Submit::AdvancedWithNote("USD is a commodity new to this journal".to_owned()));
         assert_eq!(s.draft.postings[1].1, "-10USD");
+    }
+
+    #[test]
+    fn declared_decimal_places_are_a_floor_not_a_ceiling() {
+        // The `commodity` directive states the default precision, so an
+        // entered amount is filled out to it — but hledger accepts more, and
+        // rounding down would lose value, so extra places survive untouched.
+        let src = "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n";
+        for (typed, written) in [
+            ("4 EUR", "4.00 EUR"),
+            ("4.0 EUR", "4.00 EUR"),
+            ("4.00 EUR", "4.00 EUR"),
+            // More precision than declared: kept exactly.
+            ("4.000 EUR", "4.000 EUR"),
+            ("4.001 EUR", "4.001 EUR"),
+            // Undeclared commodity: nothing is assumed about it at all.
+            ("4 USD", "4 USD"),
+            // Unitless amounts have no style to follow.
+            ("4", "4"),
+            // Prices and assertions are amounts too, and take their own
+            // commodity's declared places.
+            ("4 EUR @ 1.1 EUR", "4.00 EUR @ 1.10 EUR"),
+            ("4 EUR = 9 EUR", "4.00 EUR = 9.00 EUR"),
+            // …but only where a style is declared.
+            ("4 EUR @ 1.1 USD", "4.00 EUR @ 1.1 USD"),
+        ] {
+            let (mut s, _t) = session(src);
+            s.submit();
+            type_in(&mut s, "Ikea");
+            s.submit();
+            type_in(&mut s, "a:b");
+            s.submit();
+            type_in(&mut s, typed);
+            s.submit();
+            assert_eq!(s.draft.postings[0].1, written, "typed {typed:?}");
+        }
+    }
+
+    #[test]
+    fn padding_an_entered_amount_never_changes_its_value() {
+        let src = "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n";
+        let (s, _t) = session(src);
+        for typed in [
+            "4 EUR",
+            "4.0 EUR",
+            "4.000 EUR",
+            "4.001 EUR",
+            "1234EUR",
+            "4 EUR @ 1.1 EUR",
+        ] {
+            let written = crate::amount::restyle_entered(typed, &s.ctx.amount_ctx);
+            assert_eq!(
+                parse_amount(typed, &s.ctx.amount_ctx),
+                parse_amount(&written, &s.ctx.amount_ctx),
+                "{typed:?} -> {written:?} changed value"
+            );
+        }
     }
 
     #[test]
