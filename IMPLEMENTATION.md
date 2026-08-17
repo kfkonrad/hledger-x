@@ -18,6 +18,7 @@ src/
     mod.rs         format[_with], sorted/check variants, scan_ctx, widths
     posting.rs     Posting parse + restyle + render, width computation
     sort.rs        Entry parse, directive-bounded stable sort
+    blank.rs       top-level block split, blank-line normalization
   add/             (epic 2)
     mod.rs
     parser.rs      include walk, directive extraction, scope stack
@@ -57,7 +58,8 @@ acceptance criteria; they are ported into `tests/golden/`.
 
 ## `lex.rs` — shared primitives
 
-Exact semantics, all operating on a single line:
+Exact semantics, all operating on a single line — except
+`comment_block_len`, which needs a slice to find a construct's extent:
 
 | Function | Rule |
 | --- | --- |
@@ -65,6 +67,9 @@ Exact semantics, all operating on a single line:
 | `is_comment(s)` | first char is `;`, `#` or `*` (column 0, not indented) |
 | `opens_txn(s)` | first char `is_ascii_digit` — this is the *only* test for a transaction header |
 | `is_indented_non_blank(s)` | first char is whitespace and not `is_blank` |
+| `opens_comment_block(s)` | `rstrip(s) == "comment"` — the keyword alone at column 0 |
+| `closes_comment_block(s)` | `rstrip(s) == "end comment"`, same strictness |
+| `comment_block_len(after_opener)` | lines the block spans past its opener: contents plus the terminator, or the whole slice if unterminated |
 | `rstrip(s)` | drop trailing whitespace |
 | `split_comment(s)` | split at the **first** `;`. Returns `(rstrip(before), Option<comment_including_semicolon>)`. Accounts and amounts never contain `;`, so the first one is the boundary. |
 | `split_account_amount(s)` | split at the first run of **2 or more** whitespace chars (space or tab). Returns `(account, rest_after_dropping_the_run)`. No such run → whole string is the account, rest is empty. A *single* space or tab is not a separator — account names may contain single spaces. |
@@ -141,7 +146,7 @@ Note `pad_right`/`pad_left` must not truncate when the string exceeds the width
 ## `fmt/mod.rs` — the two-pass format
 
 ```
-format(s) = lines(s) |> format_lines |> unlines
+format(s) = lines(s) |> blank::normalize |> format_lines |> unlines
 ```
 
 **Match Haskell `lines`/`unlines` exactly**, because the goldens depend on it:
@@ -176,10 +181,67 @@ lines and indented sub-directives untouched. The `in_txn` guard is what stops
 
 `is_formatted(s) = format(s) == s` (drives `--check`).
 
+### `comment` blocks
+
+Three `lex.rs` helpers carry it: `opens_comment_block(s)` (`rstrip(s) ==
+"comment"`), `closes_comment_block(s)` (`rstrip(s) == "end comment"`), and
+`comment_block_len(after_opener)` — the contents plus the terminator, or the
+rest of the slice if unterminated. See `DESIGN.md` for the verified delimiter
+rules; the strictness is the point, since `comment` with an argument is a
+parse error and an *indented* `end comment` does not close anything.
+
+Two shapes use them. Index walks (`scan_ctx`, `styled_lines`, both of
+`parser.rs`'s walks) carry an `opaque: bool` and `continue` while it is set.
+Block walks (`sort::parse_entries`, `blank::parse`) call `comment_block_len`
+to take the block whole, which is what makes it one barrier and keeps its
+interior blank lines out of reach.
+
+`styled_lines` therefore returns a three-way `Class` rather than
+`Option<Posting>`:
+
+```rust
+enum Class { Post(Posting), Other, Opaque }
+```
+
+`Opaque` lines skip `format_other` entirely — they are emitted byte-for-byte,
+keeping even their trailing whitespace — and contribute nothing to
+`widths_of`, so prose inside a block cannot widen the alignment columns.
+
+## `fmt/blank.rs` — blank-line normalization
+
+Runs on the line list *before* `format_lines` (and after `sort_entries`), so
+it can insert and delete lines while `format_lines` stays a 1:1 line map.
+Blank lines are `""` literals, so it returns `Vec<&'a str>` like its input.
+
+```rust
+enum Kind { Txn, Other }
+struct Block<'a> {
+    kind: Kind,
+    lines: Vec<&'a str>,
+    blank_before: bool,   // was there a blank line above it in the input?
+}
+```
+
+`parse` is `sort::parse_entries` without the dates and without `Blank`
+entries: it buffers leading comment lines in `pending` and attaches them to
+the block below (a comment followed by a blank stands alone), consuming each
+head line's `is_indented_non_blank` run with it. Blank lines are not emitted;
+they only set `blank_before` on the next block. Because a block owns its whole
+indented run, no rule below can put a blank inside one.
+
+Emit, for each adjacent pair: a single `""` iff
+`b.blank_before || prev.kind == Txn || b.kind == Txn`. Nothing before the
+first block or after the last, which drops leading and trailing blanks.
+
+Idempotent by construction: after one pass `blank_before` is exactly what the
+rules produced. See `DESIGN.md` § Blank lines for the rationale, and
+`tests/golden/blanks.*` for the end-to-end fixture.
+
 ## `fmt/sort.rs` — `--sort`
 
 ```
-format_sorted(s) = lines(s) |> sort_entries |> format_lines |> unlines
+format_sorted(s) = lines(s) |> sort_entries |> blank::normalize
+                 |> format_lines |> unlines
 ```
 
 ```rust
@@ -257,7 +319,8 @@ Exit codes are a `Status` enum ordered worst-last (`Ok` < `Unformatted` <
 
 1. **Golden fixtures.** Copy `*.in.ledger` / `*.golden` from
    `hledger-fmt/test/testdata/` into `tests/golden/`. Byte-for-byte equality.
-   `sort.in.ledger` / `sort.sorted.golden` covers `--sort`.
+   `sort.in.ledger` / `sort.sorted.golden` covers `--sort`, and
+   `blanks.*` — ours, not the reference's — covers blank-line normalization.
 2. **Idempotence.** `format(format(x)) == format(x)` for every fixture, plus
    property-based over generated journals if convenient.
 3. **`--check` exit codes** on both formatted and unformatted input.

@@ -1,0 +1,18 @@
+commodity USD
+    format 1,000.00 USD
+2025-01-01 first
+    Expenses:Food   1234USD
+    Assets:Cash
+comment
+Prose, not journal syntax. The lines below look like a transaction, a
+directive and a posting, and none of them are:
+
+2025-06-06 do not touch me
+   Expenses:Food     9999USD
+commodity EUR
+    format 1.000,00 EUR
+
+end comment
+2025-01-02 second
+    Expenses:Food   5 USD
+    Assets:Cash

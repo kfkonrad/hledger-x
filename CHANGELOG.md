@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Fixed
+- `comment` … `end comment` blocks are now treated as comments by both `add` and `fmt` instead of being parsed as normal
+  code
 - `add`: an account pre-filled from a transaction template is shown as grey ghost text instead of being written into the
   buffer, so typing replaces it rather than appending to it
 - `add`: `Enter`, `Tab` and `→` all accept a ghost suggestion at every prompt. Previously `Enter` accepted the date and
@@ -15,6 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   `10.00 EUR @ 1.105 USD` balances with `-11.05 USD`, not `-11.05000 USD`
 
 ### Changed
+- `fmt`: blank lines are normalized. A run of them collapses to exactly one, leading and trailing ones are dropped, and
+  one is inserted wherever a transaction directly abuts the block above or below it. Consecutive directives, `P` lines
+  and `include`s stay dense, and a `comment` … `end comment` block keeps its contents exactly as they are. Comments
+  attach downward — a comment block above a transaction heads it and keeps its blank line above, matching how `--sort`
+  already moves such a comment with its transaction
 - `add`: an amount you enter is filled out to its commodity's declared decimal places — with `commodity 1_000.00 EUR`,
   `4 EUR` is written as `4.00 EUR`. The declared places are a floor, never a ceiling, so `4.001 EUR` is kept as typed.
   Applies to the face amount, an `@`/`@@` price and a `=` assertion alike, each against its own commodity. `fmt` still

@@ -61,6 +61,18 @@ the configured `sort`.
 Alignment is computed file-wide, so one long account name or number reflows every posting in the file — expect
 occasional diffs much larger than the edit.
 
+A `comment` … `end comment` block is opaque. Its contents are prose, not journal syntax, so nothing in it is
+reformatted, restyled, re-spaced or reordered — the lines pass through byte-for-byte — and nothing in it counts towards
+the alignment columns. Declarations inside a block declare nothing, and an `include` inside one is not followed, which
+is what hledger does too.
+
+Blank lines are normalized. A run of them collapses to exactly one, leading and trailing ones go, and one is inserted
+wherever a transaction directly abuts the block above or below it. Consecutive directives, `P` price lines and
+`include`s stay dense — only boundaries involving a transaction gain a blank line. Comments attach downward: a comment
+block directly above a transaction heads it, so the blank line goes above the comment, and a comment written directly
+*below* a transaction's last posting is pushed away from it by one blank line. This is the same attachment `--sort`
+uses, so a comment that heads a transaction travels with it.
+
 `fmt` never changes an amount's precision — that belongs to whoever wrote it, and altering it would change what
 `hledger print` emits. (`add` does fill an amount you type out to the commodity's declared decimal places; see below.)
 

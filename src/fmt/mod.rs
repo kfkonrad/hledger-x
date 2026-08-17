@@ -14,15 +14,23 @@
 //! text's own `commodity` / `D` directives via [`scan_ctx`], or from a
 //! caller-supplied [`AmountCtx`] covering the whole include tree.
 //!
+//! Blank lines between top-level blocks are normalized to exactly one where a
+//! transaction is involved, and collapsed to at most one everywhere else; see
+//! [`blank`].
+//!
 //! Amounts are aligned to a single file-wide column: the account field is
 //! padded past the longest account name in the file, and every first-amount
 //! number is right-aligned to one shared column across all transactions.
 
+pub mod blank;
 pub mod posting;
 pub mod sort;
 
 use crate::amount::{style_from_sample, AmountCtx};
-use crate::lex::{directive_arg, is_blank, is_indented_non_blank, opens_txn, rstrip};
+use crate::lex::{
+    closes_comment_block, directive_arg, is_blank, is_indented_non_blank, opens_comment_block,
+    opens_txn, rstrip,
+};
 use posting::{account_of, parse_posting, render, restyle, Posting};
 
 /// Format a whole file's contents, restyling amounts to the styles declared
@@ -40,7 +48,7 @@ pub fn format(s: &str) -> String {
 /// caller's context is authoritative.
 #[must_use]
 pub fn format_with(s: &str, ctx: &AmountCtx) -> String {
-    unlines(&format_lines(&lines(s), ctx))
+    unlines(&format_lines(&blank::normalize(&lines(s)), ctx))
 }
 
 /// Like [`format`], but also stably sorts transactions by date.
@@ -56,7 +64,10 @@ pub fn format_sorted(s: &str) -> String {
 /// [`format_sorted`] with caller-supplied styles.
 #[must_use]
 pub fn format_sorted_with(s: &str, ctx: &AmountCtx) -> String {
-    unlines(&format_lines(&sort::sort_entries(&lines(s)), ctx))
+    unlines(&format_lines(
+        &blank::normalize(&sort::sort_entries(&lines(s))),
+        ctx,
+    ))
 }
 
 /// Whether the input is already a fixed point of [`format`]. Drives `--check`.
@@ -98,7 +109,19 @@ pub fn scan_ctx(ls: &[&str]) -> AmountCtx {
     // The commodity whose indented subdirective block we are inside, waiting
     // for a `format` line.
     let mut block: Option<String> = None;
+    // Inside a `comment` block nothing is journal syntax, so no directive in
+    // it may be read.
+    let mut opaque = false;
     for l in ls {
+        if opaque {
+            opaque = !closes_comment_block(l);
+            continue;
+        }
+        if opens_comment_block(l) {
+            opaque = true;
+            block = None;
+            continue;
+        }
         if is_indented_non_blank(l) {
             if let Some(name) = &block {
                 if let Some(sample) = directive_arg(l.trim_start(), "format") {
@@ -180,9 +203,23 @@ pub fn widths_with(ls: &[&str], ctx: &AmountCtx) -> (usize, usize) {
     widths_of(&styled_lines(ls, ctx))
 }
 
+/// What a physical line is, once classified.
+enum Class {
+    /// A posting line, parsed and restyled: the only kind that is reflowed.
+    Post(Posting),
+    /// Anything else the formatter may touch — see [`format_other`].
+    Other,
+    /// A line inside a `comment` block, or one of its delimiters: passed
+    /// through byte-for-byte, since its contents are not journal syntax.
+    Opaque,
+}
+
 /// The alignment widths of an already-classified line list.
-fn widths_of(styled: &[Option<Posting>]) -> (usize, usize) {
-    let posts = styled.iter().flatten();
+fn widths_of(styled: &[Class]) -> (usize, usize) {
+    let posts = styled.iter().filter_map(|c| match c {
+        Class::Post(p) => Some(p),
+        Class::Other | Class::Opaque => None,
+    });
     let acc_w = posts
         .clone()
         .filter_map(|p| account_of(p).map(|a| a.chars().count()))
@@ -205,19 +242,28 @@ fn widths_of(styled: &[Option<Posting>]) -> (usize, usize) {
 /// header. An indented run that follows anything else — an `account` or
 /// `commodity` directive, say — is not postings. A `decimal-mark` directive
 /// changes how amounts *parse* from that point on (the declared style still
-/// governs display — verified against hledger 1.99).
-fn styled_lines(ls: &[&str], ctx: &AmountCtx) -> Vec<Option<Posting>> {
+/// governs display — verified against hledger 1.99). A `comment` block is
+/// opaque throughout: a posting-looking line inside it is prose.
+fn styled_lines(ls: &[&str], ctx: &AmountCtx) -> Vec<Class> {
     let mut cur = ctx.clone();
     let mut in_txn = false;
+    let mut opaque = false;
     let mut out = Vec::with_capacity(ls.len());
     for l in ls {
-        if in_txn && is_indented_non_blank(l) {
-            out.push(Some(restyle(parse_posting(l), &cur)));
+        if opaque {
+            opaque = !closes_comment_block(l);
+            out.push(Class::Opaque);
+        } else if opens_comment_block(l) {
+            opaque = true;
+            in_txn = false;
+            out.push(Class::Opaque);
+        } else if in_txn && is_indented_non_blank(l) {
+            out.push(Class::Post(restyle(parse_posting(l), &cur)));
         } else {
             if let Some(arg) = directive_arg(l, "decimal-mark") {
                 cur.decimal_mark = arg.chars().next().filter(|c| matches!(c, '.' | ','));
             }
-            out.push(None);
+            out.push(Class::Other);
             in_txn = opens_txn(l);
         }
     }
@@ -230,13 +276,18 @@ fn format_lines(ls: &[&str], ctx: &AmountCtx) -> Vec<String> {
     let (acc_w, num_w) = widths_of(&styled);
     ls.iter()
         .zip(styled)
-        .map(|(l, p)| p.map_or_else(|| format_other(l), |p| render(acc_w, num_w, &p)))
+        .map(|(l, c)| match c {
+            Class::Post(p) => render(acc_w, num_w, &p),
+            Class::Other => format_other(l),
+            Class::Opaque => (*l).to_owned(),
+        })
         .collect()
 }
 
 /// Format a non-posting line.
 ///
-/// Blank lines collapse to empty (grouping preserved); transaction headers get
+/// Blank lines collapse to empty — how *many* there are is [`blank`]'s
+/// business, decided before this point; transaction headers get
 /// trailing whitespace trimmed; everything else — directives, top-level
 /// comments, `include`, `P` price lines — passes through verbatim.
 fn format_other(s: &str) -> String {
@@ -274,8 +325,46 @@ mod tests {
     }
 
     #[test]
-    fn blank_lines_collapse_but_are_not_removed() {
-        assert_eq!(format("2025-01-01 x\n   \t \n\n"), "2025-01-01 x\n\n\n");
+    fn whitespace_only_lines_are_blank_lines() {
+        // Trailing blanks go entirely; an interior run collapses to one.
+        assert_eq!(format("2025-01-01 x\n   \t \n\n"), "2025-01-01 x\n");
+        assert_eq!(
+            format("2025-01-01 x\n   \t \n\naccount a:b\n"),
+            "2025-01-01 x\n\naccount a:b\n"
+        );
+    }
+
+    #[test]
+    fn transactions_are_separated_by_exactly_one_blank_line() {
+        let dense = "2025-01-01 a\n    e:x  1\n2025-01-02 b\n    e:x  2\n";
+        let spaced = "2025-01-01 a\n    e:x  1\n\n\n2025-01-02 b\n    e:x  2\n";
+        let want = "2025-01-01 a\n    e:x  1\n\n2025-01-02 b\n    e:x  2\n";
+        assert_eq!(format(dense), want);
+        assert_eq!(format(spaced), want);
+    }
+
+    #[test]
+    fn a_comment_block_passes_through_byte_for_byte() {
+        // Everything inside is prose: the posting-looking lines keep their
+        // sloppy indentation and spacing, the blank line survives, the
+        // trailing whitespace on the delimiters survives, and the `commodity`
+        // directive in there declares nothing.
+        let src = "commodity USD\n    format 1,000.00 USD\n\ncomment  \n2025-01-01 not a transaction\n   e:x   1234USD  \n\ncommodity EUR\n    format 1.000,00 EUR\nend comment\t\n\n2025-02-02 real\n    e:x  1234EUR\n";
+        let want = "commodity USD\n    format 1,000.00 USD\n\ncomment  \n2025-01-01 not a transaction\n   e:x   1234USD  \n\ncommodity EUR\n    format 1.000,00 EUR\nend comment\t\n\n2025-02-02 real\n    e:x  1234EUR\n";
+        assert_eq!(format(src), want);
+    }
+
+    #[test]
+    fn an_unterminated_comment_block_is_opaque_to_eof() {
+        let src = "2025-01-01 a\n    e:x  1 USD\n\ncomment\n2025-01-02 prose\n    sloppy   text\n";
+        assert_eq!(format(src), src);
+    }
+
+    #[test]
+    fn a_comment_block_is_one_barrier_and_never_reordered() {
+        let src = "comment\n2025-09-09 prose\nend comment\n\n2025-02-02 b\n    e:x  2 USD\n\n2025-01-01 a\n    e:x  1 USD\n";
+        let want = "comment\n2025-09-09 prose\nend comment\n\n2025-01-01 a\n    e:x  1 USD\n\n2025-02-02 b\n    e:x  2 USD\n";
+        assert_eq!(format_sorted(src), want);
     }
 
     #[test]
@@ -417,7 +506,8 @@ mod tests {
     #[test]
     fn the_last_declaration_wins_and_commodity_beats_d() {
         // Both verified against hledger 1.99.
-        let src = "commodity 1_000.00 EUR\ncommodity 1.000,00 EUR\n\n2025-01-01 x\n    a  1234,5 EUR\n";
+        let src =
+            "commodity 1_000.00 EUR\ncommodity 1.000,00 EUR\n\n2025-01-01 x\n    a  1234,5 EUR\n";
         assert_eq!(
             format(src),
             "commodity 1_000.00 EUR\ncommodity 1.000,00 EUR\n\n2025-01-01 x\n    a  1.234,5 EUR\n"
