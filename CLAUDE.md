@@ -59,6 +59,21 @@ Epic 2's build order is `parser.rs` → `index.rs` → `amount.rs` → `write.rs
 - **Keep `README.md` current.** It follows the
   [standard-readme](https://github.com/RichardLitt/standard-readme) spec, like
   the user's other repos. Behaviour changes belong in it.
+- **Keep `CHANGELOG.md` current, and write it for end users.** It follows
+  [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). An entry says what
+  changed for someone *using* the tool, not how it was built:
+  - No implementation vocabulary — no buffers, parsers, internal module or type
+    names, or descriptions of the mechanism behind a fix. Say what the user sees
+    now and, for a fix, what they saw before.
+  - One short concrete example beats a paragraph of rules. Prefer
+    `` typing `4 EUR` writes `4.00 EUR` `` over a precise statement of the
+    policy.
+  - Summarize a rule to the cases a user would notice; do not enumerate every
+    branch. Edge cases that only matter to a maintainer belong in `DESIGN.md`.
+  - Group under `### Added` / `### Changed` / `### Fixed`, prefix with the
+    affected subcommand (`` `add`: ``, `` `fmt`: ``) when it applies, and keep
+    each entry to a sentence or two.
+  - No issue numbers, commit hashes or internal task references.
 
 ```sh
 cargo test                  # unit + golden + CLI + semantic-equivalence tests
