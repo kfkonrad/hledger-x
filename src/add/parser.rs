@@ -415,7 +415,9 @@ impl Walk {
                 });
             } else if let Some(sample) = directive_arg(line, "commodity") {
                 open_commodity = Some(self.journal.commodities.len());
-                self.journal.commodities.push(parse_commodity(sample, line_pos));
+                self.journal
+                    .commodities
+                    .push(parse_commodity(sample, line_pos));
             } else if let Some(mark) = directive_arg(line, "decimal-mark") {
                 state.decimal_mark = mark.chars().next();
             } else if let Some(sample) = directive_arg(line, "D") {
@@ -434,7 +436,12 @@ impl Walk {
     }
 
     /// Expand and walk one `include` directive.
-    fn include(&mut self, parent: &Path, pattern: &str, state: &ParseState) -> Result<(), ParseError> {
+    fn include(
+        &mut self,
+        parent: &Path,
+        pattern: &str,
+        state: &ParseState,
+    ) -> Result<(), ParseError> {
         let base = parent.parent().map_or_else(PathBuf::new, Path::to_path_buf);
         let targets = expand_include(&base, pattern);
         if targets.is_empty() {

@@ -75,9 +75,11 @@ impl NewTransaction {
     /// postings), before any alignment.
     #[must_use]
     pub fn raw_lines(&self) -> Vec<String> {
-        let mut out = vec![format!("{} {}", self.date.format("%Y-%m-%d"), self.description)
-            .trim_end()
-            .to_owned()];
+        let mut out = vec![
+            format!("{} {}", self.date.format("%Y-%m-%d"), self.description)
+                .trim_end()
+                .to_owned(),
+        ];
         for (account, amount) in &self.postings {
             if amount.trim().is_empty() {
                 out.push(format!("    {account}"));
@@ -137,9 +139,7 @@ pub fn integrate_with(
         warnings.push("file was not formatted; it will be reformatted on write".to_owned());
     }
     if opts.insertion == Insertion::Chronological && !opts.sort && !map.is_date_sorted() {
-        warnings.push(
-            "file is not sorted by date; inserting chronologically anyway".to_owned(),
-        );
+        warnings.push("file is not sorted by date; inserting chronologically anyway".to_owned());
     }
 
     let mut lines: Vec<String> = map.lines.clone();
@@ -179,11 +179,7 @@ pub fn integrate_with(
     let mut lines: Vec<String> = map.lines;
     for txn in txns {
         let at = insertion_index(&FileMap::build(&unlines(&lines)), txn.date, opts.insertion);
-        let mut rendered = vec![txn
-            .raw_lines()
-            .first()
-            .cloned()
-            .unwrap_or_default()];
+        let mut rendered = vec![txn.raw_lines().first().cloned().unwrap_or_default()];
         for raw in txn.raw_lines().iter().skip(1) {
             rendered.push(render(
                 acc_w,
@@ -239,7 +235,9 @@ fn insertion_index(map: &FileMap, date: NaiveDate, insertion: Insertion) -> usiz
                 }
             }
             at.unwrap_or_else(|| {
-                map.transactions.first().map_or(map.lines.len(), |t| t.start)
+                map.transactions
+                    .first()
+                    .map_or(map.lines.len(), |t| t.start)
             })
         }
     }
@@ -378,15 +376,17 @@ pub fn parse_transactions(src: &str) -> Vec<NewTransaction> {
 
 /// `$XDG_STATE_HOME/hledger-x`, defaulting to `~/.local/state/hledger-x`.
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME").map_or_else(
-        || {
-            std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
-                .join(".local")
-                .join("state")
-        },
-        PathBuf::from,
-    )
-    .join("hledger-x")
+    std::env::var_os("XDG_STATE_HOME")
+        .map_or_else(
+            || {
+                std::env::var_os("HOME")
+                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
+                    .join(".local")
+                    .join("state")
+            },
+            PathBuf::from,
+        )
+        .join("hledger-x")
 }
 
 #[cfg(test)]
@@ -417,7 +417,11 @@ mod tests {
     #[test]
     fn appending_to_a_formatted_file_is_a_pure_append() {
         let src = "2026-01-05 a\n    aa:bb   1.00 EUR\n    cc:dd  -1.00 EUR\n";
-        let new = txn(d(2026, 1, 6), "b", &[("aa:bb", "2.00 EUR"), ("cc:dd", "-2.00 EUR")]);
+        let new = txn(
+            d(2026, 1, 6),
+            "b",
+            &[("aa:bb", "2.00 EUR"), ("cc:dd", "-2.00 EUR")],
+        );
         let out = integrate(src, &[new], &OPTS);
         assert_eq!(
             out.contents,
@@ -429,7 +433,11 @@ mod tests {
     #[test]
     fn a_wider_transaction_reflows_the_whole_file_in_format_mode() {
         let src = "2026-01-05 a\n    aa:bb  1.00 EUR\n";
-        let new = txn(d(2026, 1, 6), "b", &[("expenses:very:long", "-7485978.18 EUR")]);
+        let new = txn(
+            d(2026, 1, 6),
+            "b",
+            &[("expenses:very:long", "-7485978.18 EUR")],
+        );
         let out = integrate(src, &[new], &OPTS);
         assert_eq!(
             out.contents,
@@ -440,7 +448,11 @@ mod tests {
     #[test]
     fn an_unformatted_file_warns_before_being_reformatted() {
         let src = "2026-01-05 a\n  aa:bb  1.00 EUR\n";
-        let out = integrate(src, &[txn(d(2026, 1, 6), "b", &[("aa:bb", "1 EUR")])], &OPTS);
+        let out = integrate(
+            src,
+            &[txn(d(2026, 1, 6), "b", &[("aa:bb", "1 EUR")])],
+            &OPTS,
+        );
         assert!(out.warnings.iter().any(|w| w.contains("reformatted")));
     }
 
@@ -454,7 +466,11 @@ mod tests {
     fn amountless_postings_write_bare() {
         let out = integrate(
             "",
-            &[txn(d(2026, 1, 6), "b", &[("a:b", "1 EUR"), ("c:d", "-1 EUR"), ("e:f", "")])],
+            &[txn(
+                d(2026, 1, 6),
+                "b",
+                &[("a:b", "1 EUR"), ("c:d", "-1 EUR"), ("e:f", "")],
+            )],
             &OPTS,
         );
         assert_eq!(
@@ -485,7 +501,11 @@ mod tests {
             insertion: Insertion::Chronological,
             ..WriteOptions::default()
         };
-        let out = integrate(src, &[txn(d(2026, 1, 1), "first", &[("x:y", "2 EUR")])], &opts);
+        let out = integrate(
+            src,
+            &[txn(d(2026, 1, 1), "first", &[("x:y", "2 EUR")])],
+            &opts,
+        );
         assert_eq!(
             out.contents,
             "2026-01-01 first\n    x:y  2 EUR\n\n2026-01-05 a\n    x:y  1 EUR\n"
@@ -499,7 +519,11 @@ mod tests {
             insertion: Insertion::Chronological,
             ..WriteOptions::default()
         };
-        let out = integrate(src, &[txn(d(2026, 1, 7), "mid", &[("x:y", "2 EUR")])], &opts);
+        let out = integrate(
+            src,
+            &[txn(d(2026, 1, 7), "mid", &[("x:y", "2 EUR")])],
+            &opts,
+        );
         assert!(out.warnings.iter().any(|w| w.contains("not sorted")));
     }
 
@@ -529,7 +553,11 @@ mod tests {
         };
         let out = integrate(
             src,
-            &[txn(d(2026, 1, 6), "b", &[("expenses:long", "-12.00 EUR"), ("x:y", "12.00 EUR")])],
+            &[txn(
+                d(2026, 1, 6),
+                "b",
+                &[("expenses:long", "-12.00 EUR"), ("x:y", "12.00 EUR")],
+            )],
             &opts,
         );
         assert_eq!(
@@ -548,7 +576,11 @@ mod tests {
         };
         let out = integrate(
             src,
-            &[txn(d(2026, 1, 6), "b", &[("x:y", "1.00 EUR"), ("expenses:long", "-1.00 EUR")])],
+            &[txn(
+                d(2026, 1, 6),
+                "b",
+                &[("x:y", "1.00 EUR"), ("expenses:long", "-1.00 EUR")],
+            )],
             &opts,
         );
         // A later fmt run must be a no-op.
@@ -591,7 +623,12 @@ mod tests {
     #[test]
     fn recovery_for_target_derives_a_safe_filename() {
         let rec = Recovery::for_target(Path::new("/home/user/my journal.ledger"));
-        let name = rec.path().file_name().unwrap().to_string_lossy().into_owned();
+        let name = rec
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(name.starts_with("recovery-"));
         assert!(name.ends_with(".journal"));
         assert!(!name.contains(' '));

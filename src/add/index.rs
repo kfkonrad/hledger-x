@@ -60,7 +60,12 @@ impl Index {
         for (i, txn) in journal.transactions.iter().enumerate() {
             let weight = decay(today, txn.date, half_life_days);
             if !txn.description.is_empty() {
-                bump(&mut idx.descriptions, txn.description.clone(), txn.date, weight);
+                bump(
+                    &mut idx.descriptions,
+                    txn.description.clone(),
+                    txn.date,
+                    weight,
+                );
                 // Later transactions win ties: strictly-greater keeps the
                 // earlier one only when it is genuinely newer.
                 let slot = idx.templates.entry(txn.description.clone()).or_insert(i);
@@ -270,7 +275,11 @@ mod tests {
                 )
             })
             .collect();
-        txns.push(txn(d(2026, 8, 10), "Rewe", &[("e:g", "1 EUR", Some("EUR"))]));
+        txns.push(txn(
+            d(2026, 8, 10),
+            "Rewe",
+            &[("e:g", "1 EUR", Some("EUR"))],
+        ));
         let idx = Index::build(&journal(txns), TODAY(), 90.0);
         assert_eq!(idx.ranked_descriptions(), vec!["Edeka", "Rewe"]);
     }

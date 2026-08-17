@@ -254,8 +254,8 @@ fn apply_str(
     origin: &str,
     base: Option<&Path>,
 ) -> Result<(), ConfigError> {
-    let raw: Raw = toml::from_str(src)
-        .map_err(|e| ConfigError(crate::errors::toml_error(src, origin, &e)))?;
+    let raw: Raw =
+        toml::from_str(src).map_err(|e| ConfigError(crate::errors::toml_error(src, origin, &e)))?;
     if let Some(v) = raw.ledger_file {
         cfg.ledger_file = Some(resolve_path(v, base));
     }
@@ -419,7 +419,8 @@ mod tests {
         let err = load_str(Some("sort = true\n[add]\nformat_file = false\n"), None).unwrap_err();
         assert!(err.0.contains("incompatible"));
         // Even split across the two files.
-        let err = load_str(Some("[add]\nformat_file = false\n"), Some("sort = true\n")).unwrap_err();
+        let err =
+            load_str(Some("[add]\nformat_file = false\n"), Some("sort = true\n")).unwrap_err();
         assert!(err.0.contains("incompatible"));
     }
 
