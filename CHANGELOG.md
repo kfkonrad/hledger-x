@@ -7,25 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ### Fixed
-- `comment` … `end comment` blocks are now treated as comments by both `add` and `fmt` instead of being parsed as normal
-  code
-- `add`: an account pre-filled from a transaction template is shown as grey ghost text instead of being written into the
-  buffer, so typing replaces it rather than appending to it
-- `add`: `Enter`, `Tab` and `→` all accept a ghost suggestion at every prompt. Previously `Enter` accepted the date and
-  description ghosts but not the amount ghost
-- `add`: a calculated balancing amount no longer carries trailing zeros left over from the arithmetic that produced it —
-  `10.00 EUR @ 1.105 USD` balances with `-11.05 USD`, not `-11.05000 USD`
+- Text inside a `comment` … `end comment` block is now left alone by both `add` and `fmt`, instead of being mistaken for
+  real journal entries
+- `add`: suggestions filled in from a past transaction now appear as grey ghost text. Typing replaces the suggestion
+  instead of appending to it
+- `add`: `Enter`, `Tab` and `→` all accept a suggestion at every prompt. `Enter` previously did not work on amounts
+- `add`: a balancing amount calculated from a price no longer picks up extra trailing zeros — `10.00 EUR @ 1.105 USD`
+  now balances with `-11.05 USD` instead of `-11.05000 USD`
 
 ### Changed
-- `fmt`: blank lines are normalized. A run of them collapses to exactly one, leading and trailing ones are dropped, and
-  one is inserted wherever a transaction directly abuts the block above or below it. Consecutive directives, `P` lines
-  and `include`s stay dense, and a `comment` … `end comment` block keeps its contents exactly as they are. Comments
-  attach downward — a comment block above a transaction heads it and keeps its blank line above, matching how `--sort`
-  already moves such a comment with its transaction
-- `add`: an amount you enter is filled out to its commodity's declared decimal places — with `commodity 1_000.00 EUR`,
-  `4 EUR` is written as `4.00 EUR`. The declared places are a floor, never a ceiling, so `4.001 EUR` is kept as typed.
-  Applies to the face amount, an `@`/`@@` price and a `=` assertion alike, each against its own commodity. `fmt` still
-  never touches the precision of text already in the journal
+- `fmt`: blank lines are tidied up. Transactions are always separated by exactly one blank line, runs of blank lines
+  collapse to one, and blank lines at the start and end of the file are removed. Groups of directives, prices and
+  `include` lines stay packed together, and `comment` blocks are left untouched. A comment sitting directly above a
+  transaction is treated as belonging to it, the same way `--sort` already keeps them together
+- `add`: an amount you type is padded out to the number of decimals its commodity declares — with
+  `commodity 1_000.00 EUR`, typing `4 EUR` writes `4.00 EUR`. Extra decimals you type yourself are never trimmed, and
+  prices and balance assertions get the same treatment. Amounts already in your journal are still never reformatted
+  by `fmt`
 
 ## [0.1.0] - 2026-08-12
 
