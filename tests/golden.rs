@@ -1,6 +1,7 @@
 //! Golden fixtures ported from `hledger-fmt/test/testdata`. Byte-for-byte
 //! equality with the reference formatter's output is the acceptance criterion
-//! for epic 1.
+//! for epic 1. `blanks` is ours, not the reference's: hledger-fmt leaves blank
+//! lines exactly as it finds them.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -14,7 +15,15 @@ use std::path::PathBuf;
 
 use hledger_x::fmt::{format, format_sorted, is_formatted, is_formatted_sorted};
 
-const FIXTURES: [&str; 5] = ["postings", "directives", "trailing", "multi", "assertion"];
+const FIXTURES: [&str; 7] = [
+    "postings",
+    "directives",
+    "trailing",
+    "multi",
+    "assertion",
+    "blanks",
+    "comment-block",
+];
 const SORT_FIXTURES: [&str; 1] = ["sort"];
 
 fn data(name: &str) -> String {

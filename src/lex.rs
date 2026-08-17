@@ -17,6 +17,39 @@ pub fn is_comment(s: &str) -> bool {
     matches!(s.chars().next(), Some(';' | '#' | '*'))
 }
 
+/// Whether a line opens a `comment` block, whose contents are opaque: not
+/// journal syntax at all, and never read or rewritten.
+///
+/// Verified against hledger 1.99: the keyword must stand alone at column 0.
+/// `comment some words` is a parse error, an indented `comment` is not an
+/// opener, and the keyword is lowercase only. Trailing whitespace is fine.
+#[must_use]
+pub fn opens_comment_block(s: &str) -> bool {
+    rstrip(s) == "comment"
+}
+
+/// Whether a line closes a `comment` block. Same shape as the opener, and
+/// just as strict: an *indented* `end comment` does not close the block —
+/// verified, hledger swallows the rest of the file.
+#[must_use]
+pub fn closes_comment_block(s: &str) -> bool {
+    rstrip(s) == "end comment"
+}
+
+/// How many lines a `comment` block occupies *after* its opener: its
+/// contents, plus the `end comment` line if it has one.
+///
+/// An unterminated block runs to the end of the file, which hledger accepts
+/// without complaint (verified).
+#[must_use]
+pub fn comment_block_len(after_opener: &[&str]) -> usize {
+    let inner = after_opener
+        .iter()
+        .take_while(|l| !closes_comment_block(l))
+        .count();
+    after_opener.len().min(inner.saturating_add(1))
+}
+
 /// Whether a line opens a transaction.
 ///
 /// A leading ASCII digit is the *only* test, which is what excludes periodic
@@ -167,6 +200,29 @@ mod tests {
         assert!(!opens_txn("= expenses:food"));
         assert!(!opens_txn("P 2025-01-01 USD 1 EUR"));
         assert!(!opens_txn(""));
+    }
+
+    #[test]
+    fn comment_block_delimiters_stand_alone_at_column_zero() {
+        assert!(opens_comment_block("comment"));
+        assert!(opens_comment_block("comment \t"));
+        assert!(!opens_comment_block("  comment"));
+        assert!(!opens_comment_block("comment some words"));
+        assert!(!opens_comment_block("Comment"));
+        assert!(closes_comment_block("end comment  "));
+        assert!(!closes_comment_block("  end comment"));
+        assert!(!closes_comment_block("end comment now"));
+    }
+
+    #[test]
+    fn a_comment_block_runs_to_its_terminator_or_to_eof() {
+        // Contents plus the `end comment` line.
+        assert_eq!(comment_block_len(&["a", "b", "end comment", "c"]), 3);
+        // Unterminated: everything that is left.
+        assert_eq!(comment_block_len(&["a", "b"]), 2);
+        assert_eq!(comment_block_len(&[]), 0);
+        // An indented terminator does not terminate.
+        assert_eq!(comment_block_len(&["a", "  end comment", "b"]), 3);
     }
 
     #[test]

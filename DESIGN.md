@@ -217,14 +217,90 @@ not the diff misreporting.
    that style, the way `hledger print` shows them (see § Amount restyling).
    Everything else — unitless amounts, undeclared commodities, anything that
    does not parse — is copied through unchanged, byte-for-byte.
-8. Blank lines collapse to empty. Transaction headers get trailing whitespace
-   trimmed, nothing more. Directives, top-level comments, `include`, `P` lines
-   and indented sub-directives pass through verbatim.
+8. Blank lines collapse to empty and are re-spaced between top-level blocks
+   (see § Blank lines). Transaction headers get trailing whitespace trimmed,
+   nothing more. Directives, top-level comments, `include`, `P` lines and
+   indented sub-directives pass through verbatim.
 9. Output always ends in a newline. `format(format(x)) == format(x)`.
 
 An indented run is treated as postings only when it follows a transaction
 header (a line starting at column 0 with a digit), which is what keeps
-`account` / `commodity` sub-directives untouched.
+`account` / `commodity` sub-directives untouched. Rules 1–9 apply to journal
+syntax only: a `comment` block is opaque and none of them reach inside it (see
+§ `comment` blocks are opaque).
+
+## `comment` blocks are opaque (2026-08-17, with the user)
+
+A `comment` … `end comment` block is prose, not journal syntax. Both `fmt` and
+`add`'s parser skip it entirely: nothing inside is parsed, restyled,
+realigned, re-spaced, reordered or read as a declaration — the lines pass
+through byte-for-byte, trailing whitespace and all — and nothing inside
+contributes to the file-wide alignment widths.
+
+The delimiter rules, verified against hledger 1.99 (all of these were guesses
+worth checking, and two of them are stricter than assumed):
+
+| input | hledger |
+|---|---|
+| `comment` at column 0, alone on the line | opens a block |
+| `comment some words` | **parse error** — no arguments allowed |
+| indented `comment` | not an opener |
+| `Comment` | parse error — lowercase only |
+| trailing whitespace after either keyword | fine |
+| `end comment` at column 0, alone | closes the block |
+| `end comment trailing` | **parse error** |
+| *indented* `end comment` | does **not** close — the rest of the file is silently swallowed |
+| no terminator | accepted; the block runs to EOF |
+
+Three consequences worth stating, because each is a bug we would otherwise
+have:
+
+1. A date-looking line inside a block is not a transaction. `--sort` must not
+   reorder it, and `add` must not treat it as an insertion point.
+2. A `commodity` / `D` / `decimal-mark` line inside a block declares nothing.
+3. An `include` inside a block is **not** followed — hledger does not follow
+   it either, so neither does `add`'s include walk.
+
+The block is a single barrier for `--sort` and a single block for blank-line
+spacing, which is what keeps its interior blank lines intact.
+
+## Blank lines (2026-08-17, with the user)
+
+The file is a sequence of **top-level blocks**: a transaction (its header plus
+its indented run) or anything else (a directive plus its indented
+sub-directives, a `P` line, an `include`). Only the blank lines *between*
+blocks are rewritten; a blank can never land inside one, because a block's
+indented run is consumed whole — which is what keeps a blank line from
+appearing between a header and its postings, or inside a `commodity` block
+where it would end that block.
+
+1. A run of blank lines collapses to exactly **one** — never to none, so an
+   existing separation is never lost.
+2. Leading blank lines are dropped, and trailing ones too (`unlines` then
+   supplies the single final newline).
+3. A blank line is **inserted** at a boundary that has none **iff either side
+   is a transaction**. Consecutive directives, `P` lines and `include`s stay
+   dense, which is how people write them; forcing them apart would be worse
+   than the unevenness being fixed.
+4. **Comments attach downward.** A comment block directly above another block
+   is part of it, so the blank goes above the comment, never between the
+   comment and the transaction it heads. A comment written directly *below* a
+   transaction's last posting therefore gets pushed away by one blank line.
+
+Rule 4 is the same attachment `--sort` already uses (§ Sorting), so the two
+agree by construction: a comment that heads a transaction travels with it and
+keeps its blank line. The alternative considered — a comment keeps whichever
+side it is already glued to — was rejected because `fmt`'s notion of
+attachment would then disagree with `--sort`'s.
+
+Verified against hledger 1.99: transactions written back-to-back with no blank
+line parse identically, and `hledger print` itself separates transactions with
+exactly one blank line. So this is layout, not meaning, and `blanks.in.ledger`
+puts it under the semantic-equivalence test like every other fixture.
+
+Not configurable — decided with the user. Normalizing blank lines is simply
+what the formatter does, like trimming trailing whitespace, and one notion of
+"formatted" keeps `--check` honest.
 
 ## Alignment is file-wide — and it forces whole-file rewrites
 
@@ -807,6 +883,10 @@ Interactions:
 | `decimal-mark` | parsing and rendering of typed input | parse state — file-scoped, inherited by includes |
 | `D` | default commodity, surfaced as editable pre-filled text | parse state — file-scoped, inherited by includes |
 | `include` | file graph, nested, globs | — |
+
+None of them count inside a `comment` block — see § `comment` blocks are
+opaque. That applies to `include` too, so the walk cannot wander into a file
+hledger never reads.
 
 ## Configuration
 

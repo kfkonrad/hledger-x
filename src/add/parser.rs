@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 
 use crate::lex::{
-    directive_arg, is_indented_non_blank, opens_txn, rstrip, split_account_amount, split_amount,
-    split_comment,
+    closes_comment_block, directive_arg, is_indented_non_blank, opens_comment_block, opens_txn,
+    rstrip, split_account_amount, split_amount, split_comment,
 };
 
 /// Parse state — scope model 1.
@@ -256,8 +256,17 @@ impl FileMap {
         let (acc_w, num_w) = crate::fmt::widths_with(&lines, ctx);
         let mut transactions = Vec::new();
         let mut i = 0usize;
+        // A `comment` block is opaque: a date-looking line inside it is prose,
+        // not a transaction, and must not become an insertion point.
+        let mut opaque = false;
         while let Some(line) = lines.get(i) {
-            if opens_txn(line) {
+            if opaque {
+                opaque = !closes_comment_block(line);
+                i = i.saturating_add(1);
+            } else if opens_comment_block(line) {
+                opaque = true;
+                i = i.saturating_add(1);
+            } else if opens_txn(line) {
                 let start = i;
                 i = i.saturating_add(1);
                 while lines.get(i).is_some_and(|l| is_indented_non_blank(l)) {
@@ -344,11 +353,25 @@ impl Walk {
         // block we are inside, if any — where a `format` line may still
         // supply the display-style sample.
         let mut open_commodity: Option<usize> = None;
+        // Inside a `comment` block nothing is journal syntax: not the
+        // transactions, not the declarations, and — the one with teeth — not
+        // the `include` lines, which hledger does not follow either.
+        let mut opaque = false;
         while let Some(line) = lines.get(i) {
             let lineno = i.saturating_add(1);
             let line_pos = self.pos;
             self.pos = self.pos.saturating_add(1);
             i = i.saturating_add(1);
+
+            if opaque {
+                opaque = !closes_comment_block(line);
+                continue;
+            }
+            if opens_comment_block(line) {
+                opaque = true;
+                open_commodity = None;
+                continue;
+            }
 
             if is_indented_non_blank(line) {
                 // An indented line outside a transaction: a subdirective. The
@@ -610,6 +633,46 @@ mod tests {
     }
 
     #[test]
+    fn nothing_inside_a_comment_block_is_journal_syntax() {
+        // hledger ignores all of this, including the `include`; so must we.
+        let t = tree(&[(
+            "main.journal",
+            "account Assets:Real\n\
+                 comment\n\
+                 account Assets:Prose\n\
+                 commodity EUR\n\
+                 include missing.journal\n\
+                 2025-06-06 not a transaction\n\
+                     Expenses:Prose  1 EUR\n\
+                 end comment\n\
+                 2025-01-01 real\n\
+                     Assets:Real  1 EUR\n\
+                     Expenses:Real\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let accounts: Vec<&str> = j.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(accounts, vec!["Assets:Real"]);
+        assert!(j.commodities.is_empty());
+        assert_eq!(j.transactions.len(), 1);
+        assert_eq!(j.transactions[0].date, d(2025, 1, 1));
+        assert_eq!(
+            j.files.len(),
+            1,
+            "the include inside the block was followed"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_comment_block_is_opaque_to_end_of_file() {
+        let t = tree(&[(
+            "main.journal",
+            "2025-01-01 real\n    a:b  1 EUR\n    c:d\n\ncomment\n2025-06-06 prose\n    e:f  1 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        assert_eq!(j.transactions.len(), 1);
+    }
+
+    #[test]
     fn a_format_subdirective_supplies_the_commodity_sample() {
         let t = tree(&[(
             "main.journal",
@@ -631,7 +694,10 @@ mod tests {
                 "main.journal",
                 "include sub.journal\ncommodity 1_000.00 EUR\nD 1.000,00 EUR\n",
             ),
-            ("sub.journal", "commodity 1,000.00 USD\ncommodity 1_000.00 USD\n"),
+            (
+                "sub.journal",
+                "commodity 1,000.00 USD\ncommodity 1_000.00 USD\n",
+            ),
         ]);
         let ctx = parse(&t, "main.journal").amount_ctx();
         assert_eq!(ctx.styles["EUR"].group_sep, Some('_'));
@@ -715,10 +781,7 @@ mod tests {
         let t = tree(&[
             ("main.journal", "include g/sub/mid.journal\n"),
             ("g/sub/mid.journal", "include deep/d.journal\n"),
-            (
-                "g/sub/deep/d.journal",
-                "2026-01-05 deep\n    a  1 EUR\n",
-            ),
+            ("g/sub/deep/d.journal", "2026-01-05 deep\n    a  1 EUR\n"),
         ]);
         let j = parse(&t, "main.journal");
         assert_eq!(j.transactions.len(), 1);
@@ -781,16 +844,10 @@ mod tests {
         // test A); a parent's mark must be visible inside the include
         // (test C).
         let t = tree(&[
-            (
-                "main.journal",
-                "decimal-mark ,\ninclude sub.journal\n",
-            ),
+            ("main.journal", "decimal-mark ,\ninclude sub.journal\n"),
             ("sub.journal", "include leaf.journal\n"),
             ("leaf.journal", ""),
-            (
-                "main2.journal",
-                "include marked.journal\n",
-            ),
+            ("main2.journal", "include marked.journal\n"),
             ("marked.journal", "decimal-mark ,\n"),
         ]);
         let j = parse(&t, "main.journal");

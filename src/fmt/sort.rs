@@ -3,9 +3,12 @@
 //! Directives and standalone comment blocks are barriers: transactions
 //! reorder only within the runs between them, which keeps positional
 //! directives in scope. A comment line directly above a transaction (no blank
-//! line between) travels with it.
+//! line between) travels with it. A `comment` block is opaque: it is one
+//! barrier, and a date-looking line inside it is prose, not a transaction.
 
-use crate::lex::{is_blank, is_comment, is_indented_non_blank, opens_txn};
+use crate::lex::{
+    comment_block_len, is_blank, is_comment, is_indented_non_blank, opens_comment_block, opens_txn,
+};
 
 /// A transaction's sort key: its primary date as `(year, month, day)`.
 type DateKey = (i64, i64, i64);
@@ -55,7 +58,13 @@ fn parse_entries<'a>(ls: &[&'a str]) -> Vec<Entry<'a>> {
             pending.push(line);
             rest = tail;
         } else {
-            let run_len = tail.iter().take_while(|l| is_indented_non_blank(l)).count();
+            // A `comment` block is opaque and taken whole: a date-looking
+            // line inside it is prose, not a transaction to reorder.
+            let run_len = if opens_comment_block(line) {
+                comment_block_len(tail)
+            } else {
+                tail.iter().take_while(|l| is_indented_non_blank(l)).count()
+            };
             let (run, after) = tail.split_at(run_len);
             let mut block = std::mem::take(&mut pending);
             block.push(line);
