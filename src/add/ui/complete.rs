@@ -30,12 +30,7 @@ pub enum Shape {
 /// Whether `candidate` matches `query` under `style`, with a match quality
 /// (higher is better; only `fuzzy` produces meaningful gradations).
 #[must_use]
-pub fn match_quality(
-    style: Completion,
-    shape: Shape,
-    query: &str,
-    candidate: &str,
-) -> Option<i64> {
+pub fn match_quality(style: Completion, shape: Shape, query: &str, candidate: &str) -> Option<i64> {
     let q = query.to_lowercase();
     let c = candidate.to_lowercase();
     match shape {
@@ -115,7 +110,8 @@ fn fuzzy_quality(query: &str, candidate: &str) -> Option<i64> {
     let start_penalty = i64::try_from(first_hit.unwrap_or(0))
         .unwrap_or(i64::MAX)
         .min(20);
-    want.is_none().then_some(score.saturating_sub(start_penalty))
+    want.is_none()
+        .then_some(score.saturating_sub(start_penalty))
 }
 
 /// Filter and order `ranked` (already frecency-ordered, best first) for
@@ -233,7 +229,10 @@ mod tests {
 
     #[test]
     fn prefix_is_anchored_segment_by_segment() {
-        assert_eq!(hits(Completion::Prefix, "ex:gro"), vec!["expenses:groceries"]);
+        assert_eq!(
+            hits(Completion::Prefix, "ex:gro"),
+            vec!["expenses:groceries"]
+        );
         assert_eq!(
             hits(Completion::Prefix, "ass:b"),
             vec!["assets:bank:checking", "assets:bank:savings"]
@@ -256,7 +255,10 @@ mod tests {
 
     #[test]
     fn prefix_tab_completes() {
-        assert_eq!(tab(Completion::Prefix, "i").as_deref(), Some("income:salary"));
+        assert_eq!(
+            tab(Completion::Prefix, "i").as_deref(),
+            Some("income:salary")
+        );
         assert_eq!(tab(Completion::Prefix, "ass").as_deref(), Some("assets:"));
         assert_eq!(
             tab(Completion::Prefix, "ass:b").as_deref(),
@@ -271,7 +273,10 @@ mod tests {
             tab(Completion::Prefix, "ex:t").as_deref(),
             Some("expenses:travel:t")
         );
-        assert_eq!(tab(Completion::Prefix, "ex:g").as_deref(), Some("expenses:g"));
+        assert_eq!(
+            tab(Completion::Prefix, "ex:g").as_deref(),
+            Some("expenses:g")
+        );
     }
 
     // ---- substring: gaps allowed, within a segment ----
@@ -282,7 +287,10 @@ mod tests {
             tab(Completion::Substring, "check").as_deref(),
             Some("assets:bank:checking")
         );
-        assert_eq!(tab(Completion::Substring, "ash").as_deref(), Some("assets:cash"));
+        assert_eq!(
+            tab(Completion::Substring, "ash").as_deref(),
+            Some("assets:cash")
+        );
         assert_eq!(
             tab(Completion::Substring, "ift").as_deref(),
             Some("expenses:gifts")
@@ -326,7 +334,10 @@ mod tests {
             hits(Completion::Substring, "as:a"),
             vec!["assets:bank:checking", "assets:bank:savings", "assets:cash"]
         );
-        assert_eq!(tab(Completion::Substring, "as:a").as_deref(), Some("assets:"));
+        assert_eq!(
+            tab(Completion::Substring, "as:a").as_deref(),
+            Some("assets:")
+        );
     }
 
     #[test]
@@ -360,7 +371,10 @@ mod tests {
             tab(Completion::Fuzzy, "ckng").as_deref(),
             Some("assets:bank:checking")
         );
-        assert_eq!(tab(Completion::Fuzzy, "bnk").as_deref(), Some("assets:bank:"));
+        assert_eq!(
+            tab(Completion::Fuzzy, "bnk").as_deref(),
+            Some("assets:bank:")
+        );
         assert_eq!(
             tab(Completion::Fuzzy, "exp:trn").as_deref(),
             Some("expenses:travel:train")
@@ -404,7 +418,10 @@ mod tests {
         ];
         let matched = filter_ranked(Completion::Substring, Shape::Account, "bank:ing", pool);
         assert_eq!(matched.len(), 2);
-        assert_eq!(complete(Completion::Substring, Shape::Account, "bank:ing", pool), None);
+        assert_eq!(
+            complete(Completion::Substring, Shape::Account, "bank:ing", pool),
+            None
+        );
     }
 
     #[test]
@@ -448,10 +465,7 @@ mod tests {
             complete(Completion::Prefix, Shape::Plain, "Re", pool).as_deref(),
             Some("Rewe")
         );
-        assert_eq!(
-            complete(Completion::Prefix, Shape::Plain, "R", pool),
-            None
-        );
+        assert_eq!(complete(Completion::Prefix, Shape::Plain, "R", pool), None);
     }
 
     #[test]

@@ -200,11 +200,7 @@ fn a_file_reached_twice_is_formatted_once() {
     let dir = scratch("fmt_dedup");
     let (_main, sub) = tree(&dir);
     // `sub.journal` is in main's tree and named as an operand as well.
-    let out = run_in(
-        &dir,
-        &["fmt", "-f", "main.journal", "sub.journal"],
-        "",
-    );
+    let out = run_in(&dir, &["fmt", "-f", "main.journal", "sub.journal"], "");
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert_eq!(fs::read_to_string(&sub).unwrap(), FORMATTED);
     assert_eq!(
@@ -303,7 +299,11 @@ fn check_diff_writes_nothing() {
     let a = write(&dir, "a.journal", UNFORMATTED);
     let out = run_in(&dir, &["fmt", "--check", "--diff", "a.journal"], "");
     assert_eq!(out.code, 1, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("+    A:B  1 USD"), "stdout: {}", out.stdout);
+    assert!(
+        out.stdout.contains("+    A:B  1 USD"),
+        "stdout: {}",
+        out.stdout
+    );
     assert!(
         out.stderr.contains("would reformat:"),
         "stderr: {}",
@@ -344,14 +344,22 @@ fn diff_on_stdin_replaces_the_formatted_payload() {
         "stdout: {}",
         out.stdout
     );
-    assert!(!out.stdout.contains("2025-01-01 x\n    A:B"), "stdout: {}", out.stdout);
+    assert!(
+        !out.stdout.contains("2025-01-01 x\n    A:B"),
+        "stdout: {}",
+        out.stdout
+    );
 }
 
 #[test]
 fn diff_covers_every_file_in_a_followed_tree() {
     let dir = scratch("fmt_diff_follow");
     tree(&dir);
-    let out = run_in(&dir, &["fmt", "--check", "--diff", "-f", "main.journal"], "");
+    let out = run_in(
+        &dir,
+        &["fmt", "--check", "--diff", "-f", "main.journal"],
+        "",
+    );
     assert_eq!(out.code, 1, "stderr: {}", out.stderr);
     assert!(
         out.stdout.contains("--- a/main.journal") && out.stdout.contains("--- a/sub.journal"),
@@ -367,14 +375,22 @@ fn quiet_leaves_diffs_alone() {
     // -q suppresses the file list; asking for a diff is asking for output.
     let out = run_in(&dir, &["fmt", "--diff", "-q", "a.journal"], "");
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("+    A:B  1 USD"), "stdout: {}", out.stdout);
+    assert!(
+        out.stdout.contains("+    A:B  1 USD"),
+        "stdout: {}",
+        out.stdout
+    );
 }
 
 #[test]
 fn diff_reflects_sorting() {
     let dir = scratch("fmt_diff_sort");
     write(&dir, "a.journal", "2025-03-02 b\n\n2025-01-05 a\n");
-    let out = run_in(&dir, &["fmt", "--check", "--diff", "--sort", "a.journal"], "");
+    let out = run_in(
+        &dir,
+        &["fmt", "--check", "--diff", "--sort", "a.journal"],
+        "",
+    );
     assert_eq!(out.code, 1, "stderr: {}", out.stderr);
     assert!(
         out.stdout.contains("+2025-01-05 a"),
@@ -550,7 +566,11 @@ fn a_directory_root_is_reported_too() {
     fs::create_dir(dir.join("sub")).unwrap();
     let out = run_in(&dir, &["fmt", "--follow", "sub"], "");
     assert_eq!(out.code, 3, "stderr: {}", out.stderr);
-    assert!(out.stderr.contains("is a directory"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("is a directory"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -631,7 +651,11 @@ fn add_appends_a_formatted_transaction() {
     // EOF quits.
     let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     let written = fs::read_to_string(&journal).unwrap();
     assert!(
         written.contains("Rewe\n    expenses:groceries     18.20 EUR\n"),
@@ -685,15 +709,14 @@ fn add_to_an_included_file_writes_there() {
     let input = "\nRewe\n\n5.00 EUR\nassets:cash\n\n.\n";
     let out = run_add(
         &dir,
-        &[
-            "-f",
-            main.to_str().unwrap(),
-            "--to",
-            sub.to_str().unwrap(),
-        ],
+        &["-f", main.to_str().unwrap(), "--to", sub.to_str().unwrap()],
         input,
     );
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     let sub_text = fs::read_to_string(&sub).unwrap();
     assert!(sub_text.contains("Rewe"), "sub was:\n{sub_text}");
     // The main file is untouched.
@@ -714,7 +737,11 @@ fn add_with_no_input_writes_nothing() {
 #[test]
 fn add_respects_local_config() {
     let dir = scratch("add_local_config");
-    write(&dir, ".hledger-x.toml", "[add]\ninsertion = \"chronological\"\n");
+    write(
+        &dir,
+        ".hledger-x.toml",
+        "[add]\ninsertion = \"chronological\"\n",
+    );
     let journal = write(
         &dir,
         "main.journal",
@@ -723,7 +750,11 @@ fn add_respects_local_config() {
     // Dated between the two: must land between them, not at the end.
     let input = "2026-06-15\nMiddle\na:b\n3.00 EUR\nc:d\n\n.\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     let text = fs::read_to_string(&journal).unwrap();
     let early = text.find("early").unwrap();
     let middle = text.find("Middle").unwrap();
@@ -739,7 +770,11 @@ fn add_falls_back_to_the_configured_ledger_file() {
     let journal = write(&dir, "main.journal", ADD_JOURNAL);
     let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
     let out = run_add(&dir, &[], input);
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     assert!(fs::read_to_string(&journal).unwrap().contains("18.20 EUR"));
 }
 
@@ -749,7 +784,11 @@ fn the_ledger_file_precedence_is_flag_then_config_then_env() {
     let flagged = write(&dir, "flag.journal", ADD_JOURNAL);
     let configured = write(&dir, "config.journal", ADD_JOURNAL);
     let env = write(&dir, "env.journal", ADD_JOURNAL);
-    write(&dir, ".hledger-x.toml", "ledger_file = \"config.journal\"\n");
+    write(
+        &dir,
+        ".hledger-x.toml",
+        "ledger_file = \"config.journal\"\n",
+    );
     let input = "\nRewe\n\n18.20 EUR\n\n\n.\n";
 
     // The flag beats both.
@@ -766,7 +805,9 @@ fn the_ledger_file_precedence_is_flag_then_config_then_env() {
     // Without the flag, the config beats the environment.
     let out = run_add_env(&dir, &[], input, Some(env.to_str().unwrap()));
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(fs::read_to_string(&configured).unwrap().contains("18.20 EUR"));
+    assert!(fs::read_to_string(&configured)
+        .unwrap()
+        .contains("18.20 EUR"));
     assert!(!fs::read_to_string(&env).unwrap().contains("18.20 EUR"));
 }
 
@@ -807,7 +848,11 @@ fn add_writes_typed_amounts_in_the_declared_style() {
     );
     let input = "2026-06-15\nIkea\ne:f\n1234EUR\ng:h\n\n.\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     let text = fs::read_to_string(&journal).unwrap();
     // Both sides take the declared style, decimal places included: the
     // amount that was typed and the balancing amount that was generated end
@@ -830,7 +875,11 @@ fn add_appends_equity_conversion_postings_when_configured() {
     // A multi-commodity transaction: balanced at cost, not at face value.
     let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n.\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     let text = fs::read_to_string(&journal).unwrap();
     assert!(
         text.contains("equity:conversion") && text.contains("-10 USD"),
@@ -869,7 +918,11 @@ fn add_leaves_conversions_alone_by_default() {
     );
     let input = "2026-08-04\nIVPN\nexpenses:subscriptions:services\n10 USD @@ 9.06 EUR\nassets:dkb:giro\n-9.06 EUR\n\n.\n";
     let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
-    assert_eq!(out.code, 0, "stderr: {}\nstdout: {}", out.stderr, out.stdout);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
     let text = fs::read_to_string(&journal).unwrap();
     assert!(!text.contains("equity:conversion"), "file was:\n{text}");
 }
@@ -920,11 +973,17 @@ fn a_missing_file_is_reported_in_english() {
 fn an_unreadable_file_is_reported_in_english() {
     let dir = scratch("err_perm");
     let p = write(&dir, "locked.journal", "2026-01-01 x\n    a:b  1\n");
-    fs::set_permissions(&p, <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o000))
-        .unwrap();
+    fs::set_permissions(
+        &p,
+        <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o000),
+    )
+    .unwrap();
     let out = run_in(&dir, &["fmt", p.to_str().unwrap()], "");
-    fs::set_permissions(&p, <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644))
-        .unwrap();
+    fs::set_permissions(
+        &p,
+        <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+    )
+    .unwrap();
     assert_eq!(out.code, 3, "stderr: {}", out.stderr);
     assert!(out.stderr.contains("permission denied"), "{}", out.stderr);
     assert_no_leaks(&out.stderr);
@@ -963,7 +1022,11 @@ fn an_add_setting_outside_the_add_section_says_where_it_belongs() {
 #[test]
 fn a_wrongly_typed_config_value_says_what_it_wanted() {
     let dir = scratch("err_cfg_type");
-    write(&dir, ".hledger-x.toml", "sort = true\n[add]\nstrict = \"yes\"\n");
+    write(
+        &dir,
+        ".hledger-x.toml",
+        "sort = true\n[add]\nstrict = \"yes\"\n",
+    );
     let out = run_in(&dir, &["fmt", "-"], "");
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(
@@ -987,7 +1050,11 @@ fn add_reports_a_missing_journal_without_a_report_banner() {
 #[test]
 fn add_reports_a_bad_config_without_a_report_banner() {
     let dir = scratch("err_add_cfg");
-    write(&dir, ".hledger-x.toml", "[add]\nequity_conversion_account = \"\"\n");
+    write(
+        &dir,
+        ".hledger-x.toml",
+        "[add]\nequity_conversion_account = \"\"\n",
+    );
     let out = run_add(&dir, &[], "");
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(out.stderr.starts_with("hledger-x add: "), "{}", out.stderr);

@@ -12,11 +12,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use hledger_x::add::parser::{parse_journal, FileMap, ParseError};
-use hledger_x::config::Config;
-use hledger_x::errors::{display_path, io_reason};
 use hledger_x::add::ui::{plain, term, Session, SessionCtx};
 use hledger_x::add::write::{integrate_with, Recovery};
 use hledger_x::amount::AmountCtx;
+use hledger_x::config::Config;
+use hledger_x::errors::{display_path, io_reason};
 use hledger_x::fmt::{format, format_sorted, format_sorted_with, format_with};
 use similar::TextDiff;
 
@@ -192,7 +192,8 @@ fn add(args: &AddArgs) -> Result<(), Failure> {
             io_reason(&e)
         ))
     })?;
-    let config = hledger_x::config::load(&cwd).map_err(|e| Failure::usage(format!("config: {e}")))?;
+    let config =
+        hledger_x::config::load(&cwd).map_err(|e| Failure::usage(format!("config: {e}")))?;
 
     // Precedence: the flag, then the config's `ledger_file`, then the
     // environment.
@@ -618,4 +619,3 @@ fn run_files(args: &FmtArgs, sort: bool, plan: &Plan) -> Status {
 fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
-

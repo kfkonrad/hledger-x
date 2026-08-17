@@ -18,8 +18,8 @@ use crossterm::QueueableCommand;
 
 use super::plain::{render_done, rewrite_recovery};
 use super::{Session, Submit};
-use crate::amount::render_amount;
 use crate::add::write::{NewTransaction, Recovery};
+use crate::amount::render_amount;
 
 /// Open completion menu state.
 struct Menu {
@@ -291,12 +291,7 @@ impl Ui {
         Ok(Flow::Continue)
     }
 
-    fn apply_submit(
-        &mut self,
-        session: &mut Session,
-        recovery: &Recovery,
-        result: Submit,
-    ) -> Flow {
+    fn apply_submit(&mut self, session: &mut Session, recovery: &Recovery, result: Submit) -> Flow {
         match result {
             Submit::Advanced => self.note = Note::None,
             Submit::AdvancedWithNote(n) => self.note = Note::Info(n),
@@ -384,9 +379,7 @@ impl Ui {
         let preview = session.preview_lines();
         // What the log may use: whatever the rest of the frame — preview,
         // separator, prompt, one note or menu row, one spare — leaves over.
-        let log_budget = height
-            .saturating_sub(preview.len())
-            .saturating_sub(4);
+        let log_budget = height.saturating_sub(preview.len()).saturating_sub(4);
         rows.extend(log_rows(session, log_budget));
 
         for l in preview {
@@ -411,10 +404,7 @@ impl Ui {
 
         // The menu gets whatever fits below the prompt, scrolling beyond
         // that; a footer row and one spare line stay reserved.
-        let menu_rows = height
-            .saturating_sub(rows.len())
-            .saturating_sub(2)
-            .max(1);
+        let menu_rows = height.saturating_sub(rows.len()).saturating_sub(2).max(1);
         self.menu_rows = menu_rows;
 
         match (&self.menu, &self.note) {
@@ -527,7 +517,9 @@ impl Ui {
         match status {
             Ok(s) if s.success() => {
                 let edited = std::fs::read_to_string(&path).unwrap_or_default();
-                if let Some(txn) = crate::add::write::parse_transactions(&edited).into_iter().next()
+                if let Some(txn) = crate::add::write::parse_transactions(&edited)
+                    .into_iter()
+                    .next()
                 {
                     session.load_draft_from(&txn);
                     self.note = Note::Info("reloaded from editor".to_owned());
@@ -597,10 +589,7 @@ fn log_rows(session: &Session, budget: usize) -> Vec<Vec<(String, bool)>> {
     }
     let mut rows: Vec<Vec<(String, bool)>> = Vec::new();
     if hidden > 0 {
-        rows.push(vec![(
-            format!("  … {hidden} earlier transaction(s)"),
-            true,
-        )]);
+        rows.push(vec![(format!("  … {hidden} earlier transaction(s)"), true)]);
     }
     for block in blocks.iter().rev() {
         for l in block {
@@ -864,4 +853,3 @@ mod tests {
         assert!(log_rows(&s, 0).is_empty());
     }
 }
-

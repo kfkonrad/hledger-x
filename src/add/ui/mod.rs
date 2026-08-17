@@ -17,10 +17,10 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-use crate::amount::{imbalance, parse_amount, render_amount, AmountCtx};
 use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
 use super::write::NewTransaction;
+use crate::amount::{imbalance, parse_amount, render_amount, AmountCtx};
 use crate::config::{Completion, Config};
 use crate::fmt::posting::{parse_posting, render};
 
@@ -155,9 +155,8 @@ impl SessionCtx {
 
         let mut amount_ctx = journal.amount_ctx();
         let target_file = journal.file(&target).cloned();
-        let (insertion_pos, state) = target_file.map_or((usize::MAX, None), |f| {
-            (f.eof_pos, Some(f.state_at_eof))
-        });
+        let (insertion_pos, state) =
+            target_file.map_or((usize::MAX, None), |f| (f.eof_pos, Some(f.state_at_eof)));
         amount_ctx.decimal_mark = state.as_ref().and_then(|s| s.decimal_mark);
 
         let declared_accounts_visible: HashSet<String> = journal
@@ -238,8 +237,7 @@ impl SessionCtx {
             .or_else(|| {
                 // The sample may be a bare symbol.
                 let t = sample.trim();
-                (!t.is_empty() && !t.chars().any(|c| c.is_ascii_digit()))
-                    .then(|| t.to_owned())
+                (!t.is_empty() && !t.chars().any(|c| c.is_ascii_digit())).then(|| t.to_owned())
             })
     }
 }
@@ -396,8 +394,16 @@ impl Draft {
         match field {
             Field::Date => self.date_input.clone(),
             Field::Description => self.description.clone(),
-            Field::Account(i) => self.postings.get(i).map(|p| p.0.clone()).unwrap_or_default(),
-            Field::Amount(i) => self.postings.get(i).map(|p| p.1.clone()).unwrap_or_default(),
+            Field::Account(i) => self
+                .postings
+                .get(i)
+                .map(|p| p.0.clone())
+                .unwrap_or_default(),
+            Field::Amount(i) => self
+                .postings
+                .get(i)
+                .map(|p| p.1.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -507,8 +513,7 @@ impl Session {
     /// freshest thing the user could want.
     #[must_use]
     pub fn account_pool(&self) -> Vec<String> {
-        let desc =
-            (!self.draft.description.is_empty()).then_some(self.draft.description.as_str());
+        let desc = (!self.draft.description.is_empty()).then_some(self.draft.description.as_str());
         let mut pool = self.ctx.account_pool(desc);
         for a in self.entered_accounts.iter().rev() {
             if !pool.iter().any(|x| x == a) {
@@ -603,9 +608,11 @@ impl Session {
             .get(i)
             .map(|(a, _)| a.as_str())
             .unwrap_or_default();
-        let template_match = self.draft.template.get(i).and_then(|(a, amt)| {
-            (a == account && !amt.is_empty()).then(|| amt.clone())
-        });
+        let template_match = self
+            .draft
+            .template
+            .get(i)
+            .and_then(|(a, amt)| (a == account && !amt.is_empty()).then(|| amt.clone()));
         let balancing = self.balancing_prefill(i);
         // On the template's *last* posting the balancing sum is the better
         // prediction ("the final posting's amount is pre-filled with the
@@ -737,9 +744,7 @@ impl Session {
         match self.draft.field {
             Field::Account(i) => self.submit_account(i, true),
             Field::Amount(i) => self.submit_amount(i, true),
-            Field::Date | Field::Description => {
-                Submit::Invalid("nothing to confirm".to_owned())
-            }
+            Field::Date | Field::Description => Submit::Invalid("nothing to confirm".to_owned()),
         }
     }
 
@@ -922,9 +927,7 @@ impl Session {
                     let hint = closest(c, self.ctx.declared_commodities_visible.iter())
                         .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
                     return Submit::Confirm {
-                        question: format!(
-                            "{c} is not a declared commodity — use it anyway?{hint}"
-                        ),
+                        question: format!("{c} is not a declared commodity — use it anyway?{hint}"),
                     };
                 }
             } else if let Some(c) = names.iter().find(|c| {
@@ -948,7 +951,6 @@ impl Session {
         ensure_len(&mut self.draft.postings, i.saturating_add(1));
         self.advance_to(Field::Account(i.saturating_add(1)));
     }
-
 
     /// Whether an empty Enter at amount `i` would write the balancing
     /// amount and end the transaction, rather than merely accept a ghost.
@@ -996,11 +998,7 @@ impl Session {
         // Refuse to write a transaction that provably does not balance.
         // Unknown imbalance (unparseable or elided amounts) passes — entry
         // tool, not validator.
-        let has_bare = self
-            .draft
-            .postings
-            .iter()
-            .any(|(_, a)| a.trim().is_empty());
+        let has_bare = self.draft.postings.iter().any(|(_, a)| a.trim().is_empty());
         if !has_bare {
             let amounts = self.draft.committed_amounts();
             if let Some(sums) = imbalance(&amounts, &self.ctx.amount_ctx) {
@@ -1066,9 +1064,13 @@ impl Session {
         let (d, candidate) = best?;
         // Also accept segment near-misses like `exp:trav` for
         // `expenses:travel:train`, which levenshtein alone would miss.
-        let segmentish =
-            complete::match_quality(Completion::Prefix, complete::Shape::Account, name, candidate)
-                .is_some();
+        let segmentish = complete::match_quality(
+            Completion::Prefix,
+            complete::Shape::Account,
+            name,
+            candidate,
+        )
+        .is_some();
         let close_enough = d <= name.chars().count().saturating_div(2).max(2);
         (segmentish || close_enough).then(|| candidate.clone())
     }
@@ -1099,9 +1101,9 @@ impl Session {
             });
         }
         match self.draft.field {
-            Field::Date => Some(
-                "Enter accepts · u undoes the last transaction · q saves and quits".to_owned(),
-            ),
+            Field::Date => {
+                Some("Enter accepts · u undoes the last transaction · q saves and quits".to_owned())
+            }
             Field::Account(i) if i >= 1 && empty => {
                 Some("Enter on the empty account finishes the transaction".to_owned())
             }
@@ -1217,9 +1219,10 @@ fn closest<'a, I: Iterator<Item = &'a String>>(name: &str, pool: I) -> Option<St
 /// no style is declared). The typed number itself is never restyled.
 fn attach_commodity(number: &str, symbol: &str, ctx: &AmountCtx) -> String {
     use crate::amount::Side;
-    let (side, spaced) = ctx.styles.get(symbol).map_or((Side::Right, true), |s| {
-        (s.symbol_side, s.symbol_space)
-    });
+    let (side, spaced) = ctx
+        .styles
+        .get(symbol)
+        .map_or((Side::Right, true), |s| (s.symbol_side, s.symbol_space));
     let space = if spaced { " " } else { "" };
     match side {
         Side::Left => format!("{symbol}{space}{number}"),
@@ -1265,7 +1268,11 @@ fn levenshtein(a: &str, b: &str) -> usize {
         let mut cur: Vec<usize> = Vec::with_capacity(bv.len().saturating_add(1));
         cur.push(i.saturating_add(1));
         for (j, cb) in bv.iter().enumerate() {
-            let del = prev.get(j.saturating_add(1)).copied().unwrap_or(usize::MAX).saturating_add(1);
+            let del = prev
+                .get(j.saturating_add(1))
+                .copied()
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
             let ins = cur.last().copied().unwrap_or(usize::MAX).saturating_add(1);
             let sub = prev
                 .get(j)
@@ -1344,7 +1351,10 @@ mod tests {
         type_in(&mut s, "liabilities:cc");
         s.submit();
         type_in(&mut s, "-10USD");
-        assert_eq!(s.submit(), Submit::AdvancedWithNote("USD is a commodity new to this journal".to_owned()));
+        assert_eq!(
+            s.submit(),
+            Submit::AdvancedWithNote("USD is a commodity new to this journal".to_owned())
+        );
         assert_eq!(s.draft.postings[1].1, "-10USD");
     }
 
@@ -1353,7 +1363,8 @@ mod tests {
         // The `commodity` directive states the default precision, so an
         // entered amount is filled out to it — but hledger accepts more, and
         // rounding down would lose value, so extra places survive untouched.
-        let src = "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n";
+        let src =
+            "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n";
         for (typed, written) in [
             ("4 EUR", "4.00 EUR"),
             ("4.0 EUR", "4.00 EUR"),
@@ -1386,7 +1397,8 @@ mod tests {
 
     #[test]
     fn padding_an_entered_amount_never_changes_its_value() {
-        let src = "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n";
+        let src =
+            "commodity 1_000.00 EUR\n\n2026-08-01 Rewe\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n";
         let (s, _t) = session(src);
         for typed in [
             "4 EUR",
@@ -1511,9 +1523,7 @@ mod tests {
         let Submit::Done(txn) = conversion_txn(config) else {
             panic!("expected Done");
         };
-        assert!(txn.postings[2..]
-            .iter()
-            .all(|(a, _)| a == "equity:trading"));
+        assert!(txn.postings[2..].iter().all(|(a, _)| a == "equity:trading"));
     }
 
     #[test]
@@ -1770,7 +1780,10 @@ mod tests {
         let Submit::Confirm { question } = r else {
             panic!("expected Confirm, got {r:?}");
         };
-        assert!(question.contains("EUX is not a declared commodity"), "{question}");
+        assert!(
+            question.contains("EUX is not a declared commodity"),
+            "{question}"
+        );
         assert!(question.contains("did you mean EUR"), "{question}");
         assert_eq!(s.submit_confirmed(), Submit::Advanced);
         // A declared commodity passes without a question…
@@ -1800,7 +1813,10 @@ mod tests {
         let Submit::Confirm { question } = r else {
             panic!("expected Confirm, got {r:?}");
         };
-        assert!(question.contains("USD is not a declared commodity"), "{question}");
+        assert!(
+            question.contains("USD is not a declared commodity"),
+            "{question}"
+        );
         assert_eq!(s.submit_confirmed(), Submit::Advanced);
         // A fully declared assertion tail passes silently.
         s.draft.nav_up();
@@ -1864,10 +1880,7 @@ mod tests {
         // Substring (the default): `roc` is unique mid-segment, so Tab
         // finishes it — no menu, no Enter to select.
         type_in(&mut s, "roc");
-        assert_eq!(
-            s.complete_buffer().as_deref(),
-            Some("expenses:groceries")
-        );
+        assert_eq!(s.complete_buffer().as_deref(), Some("expenses:groceries"));
         // Ambiguous: nothing unanimous past `assets:bank:`, so Tab stops
         // there and the caller opens the menu.
         type_in(&mut s, "ban");

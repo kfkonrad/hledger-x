@@ -129,7 +129,11 @@ fn humanize(msg: &str) -> (String, Option<String>) {
     if let Some(rest) = msg.strip_prefix("invalid type: ") {
         if let Some((found, want)) = rest.rsplit_once(", expected ") {
             return (
-                format!("expected {}, but found {}", describe_want(want), describe_found(found)),
+                format!(
+                    "expected {}, but found {}",
+                    describe_want(want),
+                    describe_found(found)
+                ),
                 None,
             );
         }

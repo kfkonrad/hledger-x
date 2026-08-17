@@ -102,10 +102,7 @@ pub fn style_from_sample(sample: &str) -> Option<(String, DisplayStyle)> {
             let num_start = t.find(|c: char| c.is_ascii_digit())?;
             let head: String = t.chars().take_while(|c| !c.is_ascii_digit()).collect();
             let digits_on = t.get(num_start..=num_end)?;
-            let tail: String = t
-                .get(num_end.saturating_add(1)..)
-                .unwrap_or("")
-                .to_owned();
+            let tail: String = t.get(num_end.saturating_add(1)..).unwrap_or("").to_owned();
             // The number part may carry marks *inside* digits_on only; a
             // leading sign belongs to the number, not the symbol.
             let symbol_left = head.trim_start_matches(['+', '-']).to_owned();
@@ -182,7 +179,11 @@ fn split_number(
         .collect();
     let decimal_mark: Option<char> = if let Some(forced) = forced_mark {
         // The forced mark is decimal; the other char, if present, groups.
-        marks.iter().rev().find(|(_, c)| *c == forced).map(|_| forced)
+        marks
+            .iter()
+            .rev()
+            .find(|(_, c)| *c == forced)
+            .map(|_| forced)
     } else {
         match marks.as_slice() {
             [] => None,
@@ -339,7 +340,10 @@ fn detach_symbol(tok: &str) -> (String, String) {
         .rev()
         .collect();
     if !trailing.is_empty() {
-        let keep = body.chars().count().saturating_sub(trailing.chars().count());
+        let keep = body
+            .chars()
+            .count()
+            .saturating_sub(trailing.chars().count());
         let rest: String = body.chars().take(keep).collect();
         return (format!("{sign}{rest}"), trailing);
     }
@@ -457,8 +461,7 @@ pub fn imbalance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decim
 /// As [`imbalance`], at face value.
 #[must_use]
 pub fn face_imbalance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, Decimal)>> {
-    face_balance(amounts, ctx)
-        .map(|sums| sums.into_iter().filter(|(_, v)| !v.is_zero()).collect())
+    face_balance(amounts, ctx).map(|sums| sums.into_iter().filter(|(_, v)| !v.is_zero()).collect())
 }
 
 /// The amounts of the equity conversion postings a transaction needs.
@@ -629,7 +632,11 @@ fn restyle_pair(
 /// the way `$100` is aligned today. `None` when nothing restyles — the
 /// caller keeps the fields as parsed.
 #[must_use]
-pub fn restyle_face_fields(num: &str, commodity: &str, ctx: &AmountCtx) -> Option<(String, String)> {
+pub fn restyle_face_fields(
+    num: &str,
+    commodity: &str,
+    ctx: &AmountCtx,
+) -> Option<(String, String)> {
     let (value, name) = parse_face(num, commodity, ctx)?;
     if name.is_empty() {
         return None;
@@ -638,7 +645,10 @@ pub fn restyle_face_fields(num: &str, commodity: &str, ctx: &AmountCtx) -> Optio
     if style.symbol_side == Side::Right && style.symbol_space {
         Some((render_styled(value, "", &style, value.scale()), name))
     } else {
-        Some((render_styled(value, &name, &style, value.scale()), String::new()))
+        Some((
+            render_styled(value, &name, &style, value.scale()),
+            String::new(),
+        ))
     }
 }
 
@@ -980,7 +990,10 @@ mod tests {
     fn tail_commodities_are_extracted_from_costs_and_assertions() {
         assert_eq!(tail_commodities("23.45 EUR"), Vec::<String>::new());
         assert_eq!(tail_commodities("5 EUR @ 1.10 USD"), vec!["USD"]);
-        assert_eq!(tail_commodities("5 EUR @@ 6 USD = 5 EUR"), vec!["USD", "EUR"]);
+        assert_eq!(
+            tail_commodities("5 EUR @@ 6 USD = 5 EUR"),
+            vec!["USD", "EUR"]
+        );
         assert_eq!(tail_commodities("5 EUR ==* 5 EUR"), vec!["EUR"]);
         // Attached symbols count too.
         assert_eq!(tail_commodities("5 EUR @ $1.10"), vec!["$"]);
@@ -1031,7 +1044,10 @@ mod tests {
     #[test]
     fn render_comma_style_groups_with_dots() {
         let c = ctx_with("EUR", "1.000,00 EUR");
-        assert_eq!(render_amount(dec("1234567.8"), "EUR", &c), "1.234.567,80 EUR");
+        assert_eq!(
+            render_amount(dec("1234567.8"), "EUR", &c),
+            "1.234.567,80 EUR"
+        );
     }
 
     #[test]
@@ -1055,7 +1071,10 @@ mod tests {
         assert_eq!(restyle_face_text("10EUR", &c).unwrap(), "10 EUR");
         assert_eq!(restyle_face_text("EUR10", &c).unwrap(), "10 EUR");
         assert_eq!(restyle_face_text("EUR 10", &c).unwrap(), "10 EUR");
-        assert_eq!(restyle_face_text("-1234.5 EUR", &c).unwrap(), "-1_234.5 EUR");
+        assert_eq!(
+            restyle_face_text("-1234.5 EUR", &c).unwrap(),
+            "-1_234.5 EUR"
+        );
         // Verified: trailing zeros are kept.
         assert_eq!(restyle_face_text("10.500 EUR", &c).unwrap(), "10.500 EUR");
     }
@@ -1063,7 +1082,10 @@ mod tests {
     #[test]
     fn restyle_converts_the_decimal_mark() {
         let c = ctx_with("EUR", "1.000,00 EUR");
-        assert_eq!(restyle_face_text("1000,50 EUR", &c).unwrap(), "1.000,50 EUR");
+        assert_eq!(
+            restyle_face_text("1000,50 EUR", &c).unwrap(),
+            "1.000,50 EUR"
+        );
         // Verified: under a comma-decimal style hledger reads `10.5` as 105.
         assert_eq!(restyle_face_text("10.5 EUR", &c).unwrap(), "105 EUR");
         // A decimal-mark directive governs parsing AND stays in the rendered
@@ -1119,14 +1141,8 @@ mod tests {
         let mut c = ctx_with("EUR", "1_000.00 EUR");
         let (n, s) = style_from_sample("1,000.00 USD").unwrap();
         c.styles.insert(n, s);
-        assert_eq!(
-            restyle_tail(&["@", "1.1USD"], &c),
-            vec!["@", "1.1", "USD"]
-        );
-        assert_eq!(
-            restyle_tail(&["=", "-11USD"], &c),
-            vec!["=", "-11", "USD"]
-        );
+        assert_eq!(restyle_tail(&["@", "1.1USD"], &c), vec!["@", "1.1", "USD"]);
+        assert_eq!(restyle_tail(&["=", "-11USD"], &c), vec!["=", "-11", "USD"]);
         // Attached operator amounts restyle too.
         assert_eq!(restyle_tail(&["=5EUR"], &c), vec!["=", "5", "EUR"]);
         // Undeclared or unparseable groups stay verbatim.

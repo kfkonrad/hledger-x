@@ -83,7 +83,12 @@ pub fn run<R: BufRead, W: Write>(
             Submit::Undo => {
                 if let Some(t) = session.undo() {
                     rewrite_recovery(session, recovery);
-                    writeln!(out, "undid: {} {}", t.date.format("%Y-%m-%d"), t.description)?;
+                    writeln!(
+                        out,
+                        "undid: {} {}",
+                        t.date.format("%Y-%m-%d"),
+                        t.description
+                    )?;
                 }
             }
             Submit::Done(txn) => finish_txn(session, recovery, *txn, out)?,
@@ -253,8 +258,7 @@ mod tests {
 
     #[test]
     fn strict_confirmation_via_pipe() {
-        let src =
-            "account expenses:groceries\naccount assets:cash\ncommodity 1.00 EUR\n";
+        let src = "account expenses:groceries\naccount assets:cash\ncommodity 1.00 EUR\n";
         let cfg = Config {
             strict: true,
             ..Config::default()

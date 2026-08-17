@@ -45,7 +45,11 @@ Distribution is GitHub releases, built by goreleaser (`.goreleaser.yaml`) from
 a `v*` tag via `.github/workflows/release.yml`, whose notes come from the
 matching `CHANGELOG.md` section. `.github/workflows/ci.yml` runs `cargo test`
 (with hledger installed, so the semantic-equivalence tests do not skip
-themselves) and `cargo clippy --all-targets -- -D warnings` on pull requests.
+themselves), `cargo fmt --all --check` and
+`cargo clippy --all-targets -- -D warnings` on pull requests.
+
+Formatting is stock `rustfmt` — no `rustfmt.toml`, nothing to argue about —
+and CI gates on it, so run `cargo fmt` before committing.
 
 ---
 

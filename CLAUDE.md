@@ -44,6 +44,10 @@ Epic 2's build order is `parser.rs` → `index.rs` → `amount.rs` → `write.rs
   `string_slice`, `as_conversions`, …). `cargo clippy --all-targets` must be
   clean. Panicking constructs are allowed in tests only — via `clippy.toml` for
   `#[cfg(test)]` modules and a crate-level `#![allow]` in each `tests/*.rs`.
+- **Formatting is stock `rustfmt`** — no `rustfmt.toml`, nothing to argue
+  about. CI gates on `cargo fmt --all --check`, so run `cargo fmt` before
+  committing. It reformats the whole crate, so run it on a clean tree: if it
+  touches files you did not, that churn does not belong in your change.
 - **Prefer that page's dependencies** when a new one is needed: `clap`,
   `chrono`, `color-eyre`, `criterion`, `itertools`, `rayon`, `serde`.
 - **This file is committed and public. Keep it free of anything local or
@@ -59,6 +63,7 @@ Epic 2's build order is `parser.rs` → `index.rs` → `amount.rs` → `write.rs
 ```sh
 cargo test                  # unit + golden + CLI + semantic-equivalence tests
 cargo clippy --all-targets  # must be clean
+cargo fmt --all --check     # what CI enforces; `cargo fmt` to fix
 ```
 
 ## Environment facts
