@@ -273,11 +273,13 @@ fn formatting_stdin_lists_nothing() {
 // ---- --diff ----
 
 #[test]
-fn diff_shows_what_changed_and_still_writes() {
+fn diff_shows_what_changed_and_writes_nothing() {
     let dir = scratch("fmt_diff_write");
     let a = write(&dir, "a.journal", UNFORMATTED);
     let out = run_in(&dir, &["fmt", "--diff", "a.journal"], "");
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    // --diff implies --check: showing a change and making it are different
+    // requests, so the exit status is 1 and the file is untouched.
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
     assert_eq!(
         out.stdout,
         "\
@@ -289,8 +291,21 @@ fn diff_shows_what_changed_and_still_writes() {
 +    A:B  1 USD
 "
     );
-    // --diff on its own is not --check: the file is written.
-    assert_eq!(fs::read_to_string(&a).unwrap(), FORMATTED);
+    assert_eq!(fs::read_to_string(&a).unwrap(), UNFORMATTED);
+}
+
+#[test]
+fn diff_and_check_diff_do_the_same_thing() {
+    // `--check` adds nothing to `--diff`; the pair is accepted because it
+    // reads well, not because it changes anything.
+    let dir = scratch("fmt_diff_implies_check");
+    let a = write(&dir, "a.journal", UNFORMATTED);
+    let plain = run_in(&dir, &["fmt", "--diff", "a.journal"], "");
+    let paired = run_in(&dir, &["fmt", "--check", "--diff", "a.journal"], "");
+    assert_eq!(plain.code, paired.code);
+    assert_eq!(plain.stdout, paired.stdout);
+    assert_eq!(plain.stderr, paired.stderr);
+    assert_eq!(fs::read_to_string(&a).unwrap(), UNFORMATTED);
 }
 
 #[test]
@@ -317,7 +332,7 @@ fn diff_replaces_the_plain_changed_file_list() {
     let dir = scratch("fmt_diff_list");
     write(&dir, "a.journal", UNFORMATTED);
     let out = run_in(&dir, &["fmt", "--diff", "a.journal"], "");
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
     // The headers name the file; a bare `a.journal` line would be noise.
     assert!(
         !out.stdout.lines().any(|l| l == "a.journal"),
@@ -338,7 +353,7 @@ fn an_unchanged_file_produces_no_diff() {
 #[test]
 fn diff_on_stdin_replaces_the_formatted_payload() {
     let out = run(&["fmt", "--diff", "-"], UNFORMATTED);
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
     assert!(
         out.stdout.starts_with("--- a/<stdin>\n+++ b/<stdin>\n"),
         "stdout: {}",
@@ -374,7 +389,7 @@ fn quiet_leaves_diffs_alone() {
     write(&dir, "a.journal", UNFORMATTED);
     // -q suppresses the file list; asking for a diff is asking for output.
     let out = run_in(&dir, &["fmt", "--diff", "-q", "a.journal"], "");
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
     assert!(
         out.stdout.contains("+    A:B  1 USD"),
         "stdout: {}",
