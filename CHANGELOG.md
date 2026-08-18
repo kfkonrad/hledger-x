@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   `10.00 GBP` under `D 1,000.00 GBP`
 
 ### Changed
+- `fmt`: `--diff` no longer writes the files. It now shows what would change and stops there, exiting 1 if anything
+  would — the same thing `--check --diff` has always done, and what `black --diff`, `gofmt -d` and most other
+  formatters do. Run `fmt` without `--diff` to actually format
 - `fmt`: the postings of `~` (periodic) and `=` (auto posting) rules are now indented and aligned like every other
   posting, instead of being left exactly as typed. Nothing else about them changes — a rule is not a transaction, so no
   amount in one is padded, restyled or filled in, and a `*2` multiplier is only lined up

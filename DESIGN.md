@@ -154,9 +154,14 @@ hledger-x fmt [--check] [--diff] [--sort|--no-sort] [-q] [-f|--follow ROOT]... [
 - `-` — stdin to stdout. Cannot be combined with anything else
 - `--check` — write nothing, list what it would reformat on stderr, exit 1
 - `--diff` — a unified diff of every change on stdout, in place of the file
-  list. On its own it still writes (`terraform fmt -diff`, not `black --diff`);
-  pair it with `--check` to write nothing. On stdin it replaces the formatted
-  payload, there being no file to write
+  list. **Implies `--check`** (2026-08-18, at the user's request, reversing an
+  earlier decision): nothing is written and the exit status is 1 if anything
+  would change. Showing a change and making it are different requests, and
+  every formatter reached for next — `black --diff`, `gofmt -d`,
+  `ruff format --diff` — reads the diff as a dry run; following
+  `terraform fmt -diff` instead made `fmt --diff` a write dressed up as a
+  preview. `--check --diff` remains valid and does exactly the same thing. On
+  stdin the diff replaces the formatted payload, there being no file to write
 - `--sort` / `--no-sort` — override the configured `sort`
 - `-q`/`--quiet` — do not list the files that changed. `--diff` outranks it:
   asking for a diff is asking for output

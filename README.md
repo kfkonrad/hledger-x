@@ -46,7 +46,7 @@ hledger-x fmt -f 2025/main.journal       # another journal, with its includes
 hledger-x fmt main.journal 2025.journal  # exactly these files, includes not followed
 hledger-x fmt - < main.journal           # stdin to stdout
 hledger-x fmt --check                    # write nothing, exit non-zero if anything needs formatting
-hledger-x fmt --diff                     # show a unified diff of the changes
+hledger-x fmt --diff                     # show a unified diff of the changes; writes nothing
 hledger-x fmt --sort                     # sort transactions by date in addition to formatting them
 hledger-x fmt --explicit                 # write out inferred amounts and pad decimals
 hledger-x fmt --quiet                    # do not print a list of changed files

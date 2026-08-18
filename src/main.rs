@@ -56,7 +56,9 @@ struct FmtArgs {
     /// Write nothing; exit 1 if any file is not already formatted.
     #[arg(long)]
     check: bool,
-    /// Print a unified diff of every change, instead of just naming the files.
+    /// Print a unified diff of every change instead of naming the files.
+    /// Implies --check: nothing is written, and the exit status is 1 if
+    /// anything would change.
     #[arg(long)]
     diff: bool,
     /// Write out what the journal leaves implied: fill in each transaction's
@@ -490,6 +492,19 @@ fn run_fmt(args: &FmtArgs) -> ExitCode {
     ExitCode::from(fmt_status(args).code())
 }
 
+impl FmtArgs {
+    /// Whether this run writes nothing.
+    ///
+    /// `--diff` implies `--check`: showing the change and making it are
+    /// different requests, and every formatter the user is likely to reach
+    /// for next — `black --diff`, `gofmt -d`, `ruff format --diff` — treats
+    /// the diff as a dry run. Writing while printing what "would" change is
+    /// the surprise, whatever `terraform fmt -diff` does.
+    const fn dry_run(&self) -> bool {
+        self.check || self.diff
+    }
+}
+
 fn fmt_status(args: &FmtArgs) -> Status {
     let config = match std::env::current_dir() {
         Ok(cwd) => match hledger_x::config::load(&cwd) {
@@ -580,7 +595,7 @@ fn run_stdin(args: &FmtArgs, opts: Options) -> Status {
         } else {
             Ok(())
         }
-    } else if args.check {
+    } else if args.dry_run() {
         Ok(())
     } else {
         out.write_all(formatted.as_bytes())
@@ -589,7 +604,7 @@ fn run_stdin(args: &FmtArgs, opts: Options) -> Status {
         eprintln!("hledger-x fmt: cannot write to stdout: {}", io_reason(&e));
         return Status::Error;
     }
-    if args.check && changed {
+    if args.dry_run() && changed {
         Status::Unformatted
     } else {
         Status::Ok
@@ -624,7 +639,7 @@ fn run_files(args: &FmtArgs, opts: Options, plan: &Plan) -> Status {
         if args.diff {
             let _ = write_diff(&mut out, &job.display, &src, &formatted);
         }
-        if args.check {
+        if args.dry_run() {
             eprintln!("would reformat: {}", job.display);
             status.merge(Status::Unformatted);
             continue;
@@ -638,8 +653,9 @@ fn run_files(args: &FmtArgs, opts: Options, plan: &Plan) -> Status {
             status.merge(Status::Error);
             continue;
         }
-        // The diff already names the file; a bare path line would be noise.
-        if !args.diff && !args.quiet {
+        // Only a run that actually writes gets here, so a `--diff` run never
+        // reaches this line — its own header names the file already.
+        if !args.quiet {
             let _ = writeln!(out, "{}", job.display);
         }
     }
