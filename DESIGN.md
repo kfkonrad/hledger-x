@@ -491,6 +491,17 @@ in the author's notation, and only surviving because hledger happened to
 resolve it back. `style_from_amounts` now samples the bare number's own
 grouping and decimal mark when the commodity is empty.
 
+**A posting's status flag is not part of its account** (found 2026-08-18 by
+sweeping). `parse_posting` keeps the flag in the account field, which is
+harmless for layout but not for anything that reads the name. Two places were
+wrong: `explicit::Group::of` classified `* (v)` as a real posting, counting a
+virtual amount into the real balance and filling in an amount that left the
+transaction unbalanced — hledger refused the output; and `add`'s parser
+indexed `* assets:bank` as an account of that name, so an account already in
+the journal had no completion and tripped strict mode every time. Both now
+step over the flag. Anything else that grows an interest in the account name
+must do the same.
+
 **Known gap: lot notation.** `10 AAPL {$5}` carries a lot cost that hledger
 balances against (`print -x` fills `$-50`); we read the `{...}` token as an
 unrecognized tail, the amount does not parse, and the transaction is passed

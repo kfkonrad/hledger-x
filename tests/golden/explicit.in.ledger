@@ -83,6 +83,15 @@ commodity 1 000.00 USD
     [t10:tracked]  4 EUR
     [t10:mirror]
 
+2026-01-12 a status flag does not change which group a posting is in
+    ; `* (v)` is still an unbalanced virtual posting, and `! [w]` still
+    ; balances among its own kind — the flag is not part of the account
+    t12:expenses  10 EUR
+    * (t12:budget)  3 EUR
+    t12:assets
+    ! [t12:tracked]  4 EUR
+    ! [t12:mirror]
+
 2026-01-11 unitless amounts stay unitless
     ; a commodity is never inferred, so the filled-in amount has none either.
     ; note that the `D` directive above makes hledger *read* a bare amount as

@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   as they are
 
 ### Fixed
+- A posting's own status flag is no longer mistaken for part of its account name. `* (budget:food)` is again an
+  unbalanced virtual posting rather than a real one — `fmt --explicit` was counting its amount into the wrong total and
+  writing a balancing amount that left the transaction unbalanced — and `* assets:bank` is now recognised as
+  `assets:bank`, so `add` completes it and stops calling it a new account
 - A space used as the digit group mark (`1 234.00 USD`) is now understood, and a `commodity 1 000.00 USD` directive
   declaring one is honoured. Such amounts used to be misaligned — the number column treated `1 234.00 USD` as the
   number `1` — and were never restyled or padded

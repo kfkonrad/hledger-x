@@ -47,7 +47,15 @@ enum Group {
 
 impl Group {
     fn of(account: &str) -> Self {
-        match account.chars().next() {
+        // A posting may carry a status flag before its account (`* (v)`), and
+        // the flag is part of the account field as parsed. It has to be
+        // stepped over: reading `* (v)` as a real posting counts a virtual
+        // amount into the real balance, and the amount filled in from that
+        // sum is wrong — wrong enough that hledger rejects the result.
+        let name = account
+            .strip_prefix(['*', '!'])
+            .map_or(account, str::trim_start);
+        match name.chars().next() {
             Some('[') => Self::Balanced,
             Some('(') => Self::Unbalanced,
             _ => Self::Real,
@@ -244,6 +252,16 @@ mod tests {
         assert_eq!(Group::of("Assets:Bank"), Group::Real);
         assert_eq!(Group::of("[Assets:Bank]"), Group::Balanced);
         assert_eq!(Group::of("(Assets:Bank)"), Group::Unbalanced);
+    }
+
+    #[test]
+    fn a_status_flag_does_not_hide_a_virtual_posting() {
+        // The flag is part of the account field as parsed, so it has to be
+        // stepped over before the brackets can be seen.
+        assert_eq!(Group::of("* (Assets:Bank)"), Group::Unbalanced);
+        assert_eq!(Group::of("! [Assets:Bank]"), Group::Balanced);
+        assert_eq!(Group::of("* Assets:Bank"), Group::Real);
+        assert_eq!(Group::of("!(Assets:Bank)"), Group::Unbalanced);
     }
 
     #[test]

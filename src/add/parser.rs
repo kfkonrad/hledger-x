@@ -541,6 +541,11 @@ fn parse_transaction(
         }
         let (pbody, _comment) = split_comment(s);
         let (account, amount) = split_account_amount(pbody);
+        // A posting may carry a status flag of its own (`* assets:bank`).
+        // It is not part of the account name, and indexing it as one made an
+        // account that is already in the journal read as new — no completion
+        // for it, and strict mode asking about it every time.
+        let account = strip_status(account);
         if account.is_empty() {
             continue;
         }
@@ -637,6 +642,24 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn a_posting_status_flag_is_not_part_of_the_account_name() {
+        // `* assets:bank` is assets:bank, marked cleared. Indexing the flag
+        // as part of the name hid the account from completion and made
+        // strict mode treat an account already in the journal as new.
+        let t = tree(&[(
+            "main.journal",
+            "2026-01-01 x\n    * assets:bank  10 EUR\n    ! expenses:food  -10 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        let used: Vec<&str> = j
+            .transactions
+            .iter()
+            .flat_map(|t| t.postings.iter().map(|p| p.account.as_str()))
+            .collect();
+        assert_eq!(used, vec!["assets:bank", "expenses:food"]);
     }
 
     #[test]
