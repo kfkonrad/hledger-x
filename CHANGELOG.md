@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   as they are
 
 ### Fixed
+- A space used as the digit group mark (`1 234.00 USD`) is now understood, and a `commodity 1 000.00 USD` directive
+  declaring one is honoured. Such amounts used to be misaligned — the number column treated `1 234.00 USD` as the
+  number `1` — and were never restyled or padded
+- A calculated amount with no commodity now keeps the grouping it was written with: `1 000` balances with `-1 000` and
+  `1,000` with `-1,000`, rather than `-1000` and `-1.000`
 - `fmt`/`add`: a cost written with its amount attached to the operator (`@1.1EUR`) is now understood. Before, a posting
   using one was treated as unreadable
 - Balance assertions written `=*` or `==*`, and a cost or assertion with its amount written right up against the

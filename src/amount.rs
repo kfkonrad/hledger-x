@@ -94,41 +94,35 @@ pub struct ParsedAmount {
 /// bare symbol with no number.
 #[must_use]
 pub fn style_from_sample(sample: &str) -> Option<(String, DisplayStyle)> {
-    let toks: Vec<&str> = sample.split_whitespace().collect();
-    match toks.as_slice() {
-        [t] => {
-            // Symbol attached to the number: $1000.00 or 1000.00€.
-            let num_end = t.rfind(|c: char| c.is_ascii_digit())?;
-            let num_start = t.find(|c: char| c.is_ascii_digit())?;
-            let head: String = t.chars().take_while(|c| !c.is_ascii_digit()).collect();
-            let digits_on = t.get(num_start..=num_end)?;
-            let tail: String = t.get(num_end.saturating_add(1)..).unwrap_or("").to_owned();
-            // The number part may carry marks *inside* digits_on only; a
-            // leading sign belongs to the number, not the symbol.
-            // The sign belongs to the number on either side of the symbol:
-            // both `-$10` and `$-10` sample the commodity `$`.
-            let symbol_left = head.trim_matches(['+', '-']).to_owned();
-            if !symbol_left.is_empty() {
-                let style = style_of_number(digits_on, Side::Left, false, &symbol_left)?;
-                return Some((symbol_left, style));
-            }
-            if !tail.is_empty() {
-                let style = style_of_number(digits_on, Side::Right, false, &tail)?;
-                return Some((tail, style));
-            }
-            None
-        }
-        [a, b] => {
-            if is_number_like(a) {
-                Some(((*b).to_owned(), style_of_number(a, Side::Right, true, b)?))
-            } else if is_number_like(b) {
-                Some(((*a).to_owned(), style_of_number(b, Side::Left, true, a)?))
-            } else {
-                None
-            }
-        }
-        _ => None,
+    // The number is everything between the first and last digit, marks and
+    // group spaces included; the symbol is whatever sits to one side of it.
+    // Scanning for that span rather than splitting on whitespace is what lets
+    // `1 000.00 USD` and `USD 1 000.00` both be read.
+    let s = sample.trim();
+    let num_start = s.find(|c: char| c.is_ascii_digit())?;
+    let num_end = s.rfind(|c: char| c.is_ascii_digit())?;
+    let digits_on = s.get(num_start..=num_end)?;
+    let head = s.get(..num_start).unwrap_or("");
+    let tail = s.get(num_end.saturating_add(1)..).unwrap_or("");
+
+    // A sign belongs to the number wherever it was written, on either side of
+    // the symbol: `-$10` and `$-10` both sample the commodity `$`.
+    let left = head.trim().trim_matches(['+', '-']).trim();
+    let right = tail.trim();
+    if !left.is_empty() && !right.is_empty() {
+        return None; // a symbol on both sides is not an amount
     }
+    if !left.is_empty() {
+        let spaced = head.ends_with(char::is_whitespace);
+        let style = style_of_number(digits_on, Side::Left, spaced, left)?;
+        return Some((left.to_owned(), style));
+    }
+    if !right.is_empty() {
+        let spaced = tail.starts_with(char::is_whitespace);
+        let style = style_of_number(digits_on, Side::Right, spaced, right)?;
+        return Some((right.to_owned(), style));
+    }
+    None // a bare number declares no commodity
 }
 
 /// Derive a style from a sample number like `1_000.00` or `1.234,56`.
@@ -220,17 +214,19 @@ fn split_number(
         })
     });
 
-    // Group separators in the integer part: the non-decimal mark chars + `_`.
+    // Group separators in the integer part: the non-decimal mark chars, plus
+    // `_` and a space. hledger accepts both, and a space is what a
+    // `commodity 1 000.00 USD` declaration asks us to render.
     let mut group_sep: Option<char> = None;
     for c in int_raw.chars() {
-        if c == '_' || ((c == '.' || c == ',') && decimal_mark != Some(c)) {
+        if c == '_' || c == ' ' || ((c == '.' || c == ',') && decimal_mark != Some(c)) {
             if group_sep.is_some_and(|g| g != c) {
                 return None; // two different group separators — not a number
             }
             group_sep = Some(c);
         }
     }
-    if frac_raw.contains(['.', ',', '_']) {
+    if frac_raw.contains(['.', ',', '_', ' ']) {
         return None;
     }
     Some((
@@ -290,29 +286,31 @@ pub fn parse_amount(text: &str, ctx: &AmountCtx) -> Option<ParsedAmount> {
 /// Parse the face value: the number token (possibly with an attached symbol)
 /// plus the separate commodity token, if any.
 fn parse_face(num_field: &str, commodity: &str, ctx: &AmountCtx) -> Option<(Decimal, String)> {
-    // `USD 100` style: number field contains the joined pair.
-    let (num_tok, commodity) = if commodity.is_empty() {
-        let mut parts = num_field.split_whitespace();
-        let a = parts.next()?;
-        parts.next().map_or_else(
-            || (a, String::new()),
-            |b| {
-                if is_number_like(b) {
-                    (b, a.to_owned()) // symbol-first: USD 100
+    // `USD 100` style: the number field contains the joined pair. A number
+    // field may itself contain spaces when they group digits (`1 000.00`), so
+    // the split is on what the *first* part is, not on how many there are.
+    let (num_tok, commodity): (String, String) = if commodity.is_empty() {
+        let parts: Vec<&str> = num_field.split_whitespace().collect();
+        match parts.as_slice() {
+            [] => return None,
+            [only] => ((*only).to_owned(), String::new()),
+            [first, rest @ ..] => {
+                if is_number_like(first) {
+                    (parts.join(" "), String::new()) // a space-grouped number
                 } else {
-                    (a, b.to_owned())
+                    (rest.join(" "), (*first).to_owned()) // symbol-first
                 }
-            },
-        )
+            }
+        }
     } else {
-        (num_field, commodity.to_owned())
+        (num_field.to_owned(), commodity.to_owned())
     };
 
     // An attached symbol: $100, 100€, -$5.
     let (num_tok, commodity) = if commodity.is_empty() {
-        detach_symbol(num_tok)
+        detach_symbol(&num_tok)
     } else {
-        (num_tok.to_owned(), commodity)
+        (num_tok, commodity)
     };
 
     let mark = ctx
@@ -558,15 +556,24 @@ fn amount_groups(text: &str) -> Vec<String> {
 /// alternative is not "leave it alone" but a hardcoded guess.
 #[must_use]
 pub fn style_from_amounts(amounts: &[&str], commodity: &str) -> Option<DisplayStyle> {
-    if commodity.is_empty() {
-        return None;
+    for group in amounts.iter().flat_map(|t| amount_groups(t)) {
+        match style_from_sample(&group) {
+            Some((name, style)) if name == commodity => return Some(style),
+            // A bare number names no commodity, so it can only speak for a
+            // unitless amount — but it does speak for one. The grouping and
+            // decimal mark someone typed are worth copying: a `1 000` that
+            // balanced with a bare `-1000` read as sloppily as `$10` next to
+            // `-10 $`, and copying `1,000` keeps us from answering it with a
+            // `-1.000` that says something else in the author's notation.
+            None if commodity.is_empty() => {
+                if let Some(style) = style_of_number(group.trim(), Side::Right, true, "") {
+                    return Some(style);
+                }
+            }
+            Some(_) | None => {}
+        }
     }
-    amounts
-        .iter()
-        .flat_map(|t| amount_groups(t))
-        .filter_map(|g| style_from_sample(&g))
-        .find(|(name, _)| name == commodity)
-        .map(|(_, style)| style)
+    None
 }
 
 /// Render a value in a commodity's declared style — or, absent a declared
@@ -948,6 +955,65 @@ mod tests {
         assert_eq!(parsed.contributes, (Decimal::from(13), "EUR".to_owned()));
         let parsed = parse_amount("10 USD =10USD", &ctx).unwrap();
         assert_eq!(parsed.contributes, (Decimal::from(10), "USD".to_owned()));
+    }
+
+    #[test]
+    fn a_space_group_mark_is_read_declared_and_rendered() {
+        // hledger accepts a space as the digit group mark and honours it in a
+        // `commodity` declaration; we used to read neither, so such amounts
+        // were never restyled and — worse — were misaligned, since the number
+        // field stopped at the first space.
+        let (name, style) = style_from_sample("1 000.00 USD").unwrap();
+        assert_eq!(name, "USD");
+        assert_eq!(style.group_sep, Some(' '));
+        assert_eq!(style.decimal_places, 2);
+        assert_eq!(style.symbol_side, Side::Right);
+        assert!(style.symbol_space);
+
+        // Both placements, and an attached symbol.
+        assert_eq!(
+            style_from_sample("USD 1 000.00").map(|(n, s)| (n, s.symbol_side, s.group_sep)),
+            Some(("USD".to_owned(), Side::Left, Some(' ')))
+        );
+        assert_eq!(
+            style_from_sample("1 000.00£").map(|(n, s)| (n, s.symbol_side, s.group_sep)),
+            Some(("£".to_owned(), Side::Right, Some(' ')))
+        );
+
+        // Values round-trip through the space grouping.
+        assert_eq!(
+            parse_number("1 234 567.00", None),
+            Some(Decimal::new(123_456_700, 2))
+        );
+
+        let mut ctx = AmountCtx::default();
+        ctx.styles.insert("USD".to_owned(), style);
+        assert_eq!(
+            render_amount(Decimal::from(1_234_567), "USD", &ctx),
+            "1 234 567.00 USD"
+        );
+    }
+
+    #[test]
+    fn a_unitless_amount_copies_its_siblings_notation() {
+        // No commodity means no declaration can settle how it is written, so
+        // the sibling does: answering `1 000` with a bare `-1000` read as
+        // badly as answering `$10` with `-10 $`.
+        let ctx = AmountCtx::default();
+        for (sample, want) in [
+            ("1 000", "-1 000"),
+            ("1,000", "-1,000"),
+            ("1_000", "-1_000"),
+            ("10000", "-10000"),
+        ] {
+            let value = parse_amount(sample, &ctx).unwrap().value;
+            let negated = Decimal::ZERO.checked_sub(value).unwrap();
+            assert_eq!(
+                render_amount_like(negated, "", &ctx, &[sample]),
+                want,
+                "sample {sample}"
+            );
+        }
     }
 
     #[test]

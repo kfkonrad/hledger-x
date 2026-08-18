@@ -21,7 +21,6 @@ commodity CHF
     format 1,000.000 CHF
 D 1,000.00 GBP
 
-; A space as the digit group mark is *not* supported — see the last section.
 commodity 1 000.00 USD
 
 ; ---------------------------------------------------------------------------
@@ -126,6 +125,18 @@ commodity 1 000.00 USD
     t27:broker  10 CHF @ 1.1 EUR
     t27:assets  -11 EUR = -11 EUR
 
+2026-02-09 a space as the digit group mark
+    ; a space between digit groups is part of the number, not the boundary
+    ; with the commodity — `1 234.00 USD` is one amount
+    t29:expenses   1234567 USD
+    t29:assets    -1234567 USD
+
+2026-02-10 a space-grouped amount already in the journal
+    ; and it lines up with an ungrouped one in the same column
+    t30:expenses   1 234.00 USD
+    t30:assets       -50.00 USD
+    t30:rest
+
 2026-02-08 more precision than declared is kept
     ; the declared places are a floor, never a ceiling: rounding would lose
     ; value, so 4.0001 is left exactly as written
@@ -162,6 +173,13 @@ commodity 1 000.00 USD
     t36:broker  10 DKK @ Kc1.1
     t36:assets
 
+2026-03-07 a unitless amount keeps the grouping it was written with
+    ; no commodity to declare a style, so the sibling's own notation is
+    ; copied — answering `1 000` with a bare `-1000` read as badly as
+    ; answering `$10` with `-10 $`
+    t37:steps  1 000
+    t37:balance
+
 ; ---------------------------------------------------------------------------
 ; Deliberately left alone.
 ; ---------------------------------------------------------------------------
@@ -171,19 +189,12 @@ commodity 1 000.00 USD
     t41:expenses   1 PLN
     t41:assets    -1 PLN
 
-2026-04-02 a space as the digit group mark is not supported
-    ; `commodity 1 000.00 USD` above declares one. hledger honours it and
-    ; prints `1 234. USD`; hledger-x does not read that declaration, so these
-    ; amounts pass through untouched rather than being rewritten wrongly
-    t42:expenses   1234 USD
-    t42:assets    -1234 USD
-
-2026-04-03 lot notation is not understood
+2026-04-02 lot notation is not understood
     ; hledger would fill `$-50` here from the lot cost. hledger-x cannot read
     ; `{...}`, so the amount does not parse and the whole transaction is left
     ; as it stands rather than guessed at
-    t43:shares  10 AAPL {$5}
-    t43:cash
+    t42:shares  10 AAPL {$5}
+    t42:cash
 
 ~ monthly  rent
     ; a periodic rule is not a transaction, and is never touched

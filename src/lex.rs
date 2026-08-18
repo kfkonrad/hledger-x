@@ -143,9 +143,27 @@ pub fn directive_arg<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
     }
 }
 
+/// Whether a token continues a space-grouped number: it begins with a digit.
+///
+/// That is the whole test, and it is safe because an unquoted hledger
+/// commodity symbol cannot contain a digit at all, let alone start with one —
+/// so a token after a number that starts with a digit can only be the rest of
+/// that number. The trailing part is left unconstrained on purpose: the last
+/// group may carry an attached symbol, as in `1 234 567.00£`. Anything that
+/// then fails to parse as a number simply does not restyle, which is the same
+/// safe outcome as any other unreadable amount.
+#[must_use]
+pub fn is_digit_group(t: &str) -> bool {
+    t.starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// Split amount tokens into (number field, commodity, remaining tokens).
 ///
 /// The remainder is the cost/assertion tail, kept verbatim and never aligned.
+///
+/// A space between two digit groups is part of the number, not the boundary
+/// with the commodity: `1 234.00 USD` is one amount, the way hledger reads and
+/// prints it under `commodity 1 000.00 USD`.
 #[must_use]
 pub fn split_amount<'a>(toks: &[&'a str]) -> (String, String, Vec<&'a str>) {
     let cut = toks
@@ -153,15 +171,28 @@ pub fn split_amount<'a>(toks: &[&'a str]) -> (String, String, Vec<&'a str>) {
         .position(|t| is_rest_start(t))
         .unwrap_or(toks.len());
     let (amt, rest) = toks.split_at(cut);
+    if let Some((first, tail)) = amt.split_first() {
+        if is_number_like(first) {
+            let groups = tail.iter().take_while(|t| is_digit_group(t)).count();
+            let (extra, after) = tail.split_at(groups);
+            let mut num = (*first).to_owned();
+            for g in extra {
+                num.push(' ');
+                num.push_str(g);
+            }
+            let (commodity, more) = after
+                .split_first()
+                .map_or_else(|| (String::new(), &[][..]), |(c, m)| ((*c).to_owned(), m));
+            let mut tail_toks: Vec<&str> = more.to_vec();
+            tail_toks.extend_from_slice(rest);
+            return (num, commodity, tail_toks);
+        }
+    }
     match amt {
         [] => (String::new(), String::new(), rest.to_vec()),
         [t] => ((*t).to_string(), String::new(), rest.to_vec()),
         [t0, t1, more @ ..] => {
-            if is_number_like(t0) {
-                let mut tail: Vec<&str> = more.to_vec();
-                tail.extend_from_slice(rest);
-                ((*t0).to_string(), (*t1).to_string(), tail)
-            } else if is_number_like(t1) && more.is_empty() {
+            if is_number_like(t1) && more.is_empty() {
                 (format!("{t0} {t1}"), String::new(), rest.to_vec())
             } else {
                 (amt.join(" "), String::new(), rest.to_vec())
@@ -189,6 +220,61 @@ mod tests {
         assert!(!is_comment("    ; indented"));
         assert!(!is_comment(""));
         assert!(!is_comment("account Assets:Bank"));
+    }
+
+    #[test]
+    fn a_space_between_digit_groups_belongs_to_the_number() {
+        // `1 234.00 USD` is one amount, not the number 1 with a commodity
+        // `234.00`. Safe because an unquoted commodity symbol cannot contain
+        // a digit, so nothing else can follow a number starting with one.
+        assert_eq!(
+            split_amount(&["1", "234.00", "USD"]),
+            ("1 234.00".to_owned(), "USD".to_owned(), vec![])
+        );
+        assert_eq!(
+            split_amount(&["-1", "234", "567.00", "USD"]),
+            ("-1 234 567.00".to_owned(), "USD".to_owned(), vec![])
+        );
+        // The last group may carry an attached symbol.
+        assert_eq!(
+            split_amount(&["1", "234.00£"]),
+            ("1 234.00£".to_owned(), String::new(), vec![])
+        );
+        // A unitless grouped number.
+        assert_eq!(
+            split_amount(&["1", "000"]),
+            ("1 000".to_owned(), String::new(), vec![])
+        );
+        // The tail is still cut first, and grouping applies inside it too.
+        assert_eq!(
+            split_amount(&["1", "234", "USD", "@", "1", "500", "EUR"]),
+            (
+                "1 234".to_owned(),
+                "USD".to_owned(),
+                vec!["@", "1", "500", "EUR"]
+            )
+        );
+    }
+
+    #[test]
+    fn ordinary_amounts_are_unaffected_by_group_spaces() {
+        assert_eq!(
+            split_amount(&["100", "USD"]),
+            ("100".to_owned(), "USD".to_owned(), vec![])
+        );
+        // Symbol-first: the first token is not a number, so nothing is joined.
+        assert_eq!(
+            split_amount(&["USD", "100"]),
+            ("USD 100".to_owned(), String::new(), vec![])
+        );
+        assert_eq!(
+            split_amount(&["$100"]),
+            ("$100".to_owned(), String::new(), vec![])
+        );
+        assert_eq!(
+            split_amount(&["100", "USD", "extra"]),
+            ("100".to_owned(), "USD".to_owned(), vec!["extra"])
+        );
     }
 
     #[test]
