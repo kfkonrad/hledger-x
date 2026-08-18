@@ -772,6 +772,59 @@ mod tests {
     }
 
     #[test]
+    fn an_inferred_amount_of_an_undeclared_commodity_copies_its_siblings() {
+        // Nothing declares these commodities, so the postings being balanced
+        // against settle how the generated one is written. Every expectation
+        // here is `hledger print -x`'s own output, verified against 1.99.
+        for (src, want) in [
+            // Symbol attached on the left, and the sign hledger puts between
+            // symbol and digits.
+            ("    a  $10\n    b\n", "    a   $10\n    b  $-10\n"),
+            ("    a  $-10\n    b\n", "    a  $-10\n    b   $10\n"),
+            // Attached on the right, and symbol-first with a space.
+            ("    a  10€\n    b\n", "    a   10€\n    b  -10€\n"),
+            ("    a  USD 10\n    b\n", "    a   USD 10\n    b  USD -10\n"),
+            // Digit grouping the author typed is kept.
+            (
+                "    a  1,234.50 USD\n    b\n",
+                "    a   1,234.50 USD\n    b  -1,234.50 USD\n",
+            ),
+            // A zero remainder still renders in the sibling's style.
+            (
+                "    a  $10\n    b  $-10\n    c\n",
+                "    a   $10\n    b  $-10\n    c    $0\n",
+            ),
+            // The style may come from a cost tail rather than a face.
+            (
+                "    a  10 EUR @ $1.1\n    b\n",
+                "    a      10 EUR @ $1.1\n    b  $-11.0\n",
+            ),
+        ] {
+            let src = format!("2026-01-01 x\n{src}");
+            assert_eq!(explicit(&src), format!("2026-01-01 x\n{want}"), "{src}");
+        }
+    }
+
+    #[test]
+    fn a_unitless_inferred_amount_stays_unitless() {
+        // Invariant 3: never infer a commodity.
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10\n    b\n"),
+            "2026-01-01 x\n    a   10\n    b  -10\n"
+        );
+    }
+
+    #[test]
+    fn a_declared_style_beats_the_siblings() {
+        // The directive is the author's statement about the commodity; a
+        // sibling amount is only what someone happened to type.
+        assert_eq!(
+            explicit("commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  EUR1234\n    b\n"),
+            "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a   1_234.00 EUR\n    b  -1_234.00 EUR\n"
+        );
+    }
+
+    #[test]
     fn explicit_never_touches_periodic_or_auto_transactions() {
         let src = "~ monthly\n    a  10 EUR\n    b\n\n= a\n    c  *2\n    d\n";
         assert_eq!(explicit(src), src);
@@ -783,6 +836,28 @@ mod tests {
             explicit("2026-01-01 x\n    ; note\n    a  10 EUR\n    b  ; why\n"),
             "2026-01-01 x\n    ; note\n    a   10 EUR\n    b  -10 EUR  ; why\n"
         );
+    }
+
+    #[test]
+    fn explicit_fills_through_every_cost_and_assertion_operator() {
+        // hledger has four assertion operators and allows the amount to be
+        // attached to any operator. Each of these forms used to make the
+        // whole amount unparseable, so nothing was filled in.
+        for (tail, want) in [
+            ("= 10 USD", "-10 USD"),
+            ("== 10 USD", "-10 USD"),
+            ("=* 10 USD", "-10 USD"),
+            ("==* 10 USD", "-10 USD"),
+            ("=10USD", "-10 USD"),
+            // The sibling is attached, so the fill is too — as hledger does.
+            ("@1.1EUR", "-11.0EUR"),
+            ("@@13EUR", "-13EUR"),
+        ] {
+            let src = format!("2026-01-01 x\n    a  10 USD {tail}\n    b\n");
+            let out = explicit(&src);
+            let filled = out.lines().last().unwrap_or_default().trim();
+            assert_eq!(filled, format!("b  {want}"), "tail `{tail}`");
+        }
     }
 
     #[test]

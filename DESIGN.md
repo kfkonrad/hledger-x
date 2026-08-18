@@ -437,6 +437,67 @@ the run selected.
   split, since duplicating the tail would assert something nobody wrote.
 - A remainder of zero is still written (`0 EUR`), not omitted.
 
+**Where an undeclared commodity's style comes from** (2026-08-18, with the
+user). Padding needs a declared style and simply does not happen without one —
+`1 USD` with no `commodity USD` directive stays `1 USD`, exactly as in `add`.
+But a *generated* amount has to be rendered somehow, and `render_amount`'s old
+fallback was a hardcoded guess (symbol right, spaced, ungrouped) that put `$10`
+and `-10 $` side by side in one transaction and dropped typed digit grouping.
+So when no directive settles it, **the postings being balanced against do**:
+`$10` balances with `$-10`, `10€` with `-10€`, and a typed `1,234.50` keeps its
+grouping. A declared style still beats anything observed.
+
+This is not the journal-wide style inference deviation 1 rules out. That rule
+protects amounts a person *wrote* from being reflowed by someone else's sloppy
+entry; nothing here restyles an existing amount. It only chooses how to render
+an amount being created from nothing, where the alternative was never "leave it
+alone" — it was a worse guess. `add` shares the path (`render_amount_like`), so
+the two tools write the same journal the same way, and the running-imbalance
+status line uses it too.
+
+**Reference journal.** `tests/golden/explicit.in.ledger` is one transaction
+per case, annotated, with `explicit.explicit.golden` as the expected output —
+including the cases deliberately left alone, so a future fix shows up as a
+visible golden change rather than a silent one. It is valid hledger, so
+`hledger print -x` can be run against it directly.
+
+**Known gap: a space as the digit group mark.** `commodity 1 000.00 USD` is
+valid and hledger honours it; `style_from_sample` splits its sample on
+whitespace and so reads nothing. Amounts of such a commodity are therefore
+never restyled or padded — they pass through byte-for-byte, which is the safe
+failure. Closing it means teaching `split_amount` that a space inside a number
+is not the account/amount separator, which is the core of `fmt`'s line layout;
+that is a bigger change than it looks and is not worth making speculatively.
+Note we already handle such amounts *safely* when they appear in a posting
+(verified: they align correctly and hledger reads the result back unchanged).
+
+**Known gap: lot notation.** `10 AAPL {$5}` carries a lot cost that hledger
+balances against (`print -x` fills `$-50`); we read the `{...}` token as an
+unrecognized tail, the amount does not parse, and the transaction is passed
+through untouched. That is the safe failure, and the user's journal contains no
+lots, so it is recorded rather than built. Note `print -x` also *rewrites* lot
+notation (`{{$50}}` becomes `{$5} @ $5`) — if this is ever picked up, that
+normalization is not ours to copy.
+
+Fixing this surfaced two genuine parser bugs. The first: `detach_symbol` read `$-10` — how
+hledger itself writes a negative dollar amount — as commodity `$-`, so a
+transaction using it summed into two bogus commodities. Under `--explicit` that
+produced invalid output (`$--10`); in `add` it was a wrong imbalance. The sign
+now belongs to the number on either side of the symbol, and `style_from_sample`
+had the same slip.
+
+The second: `cost_contribution` recognized only `=` and `==`, and required the
+operator to be a token of its own. hledger has four assertion operators (`=*`
+and `==*` are the subaccount-inclusive forms, and `restyle_tail_with`'s `OPS`
+list already knew about them) and lets the amount sit right against the
+operator (`@1.1EUR`). Any of those made the whole amount unparseable, which is
+silent: `add` reported "imbalance unknown" and `--explicit` declined to fill in.
+Some attached forms worked only by luck, when restyling happened to split the
+token first — which needs a declared style, so undeclared commodities fell
+through. `cost_contribution` now matches against the same `OPS` list, longest
+prefix first, and takes the operator's attached operand as the head of the
+price.
+
 **Costs are deliberately not inferred.** `print -x` turns `10 EUR` / `-11 USD`
 into `10 EUR @@ 11 USD`. That is a claim about what the transaction *was* —
 a conversion rather than two independent legs — and inventing it in the user's

@@ -95,6 +95,11 @@ and `--explicit` opts `fmt` into the same thing.)
   `1.00 EUR` — the same rule `add` applies to an amount you type. The declared places are a minimum, never a maximum,
   so `4.001 EUR` is left alone, and a commodity with no `commodity` directive is left alone entirely.
 
+When a commodity has no `commodity` directive, padding simply does not apply — `1 USD` stays `1 USD`. An amount that
+has to be *generated*, though, still has to be written somehow, and its style is taken from the postings it balances
+against: `$10` balances with `$-10`, `10€` with `-10€`, and a typed `1,234.50 USD` keeps its digit grouping. A declared
+style always wins over what the neighbours happen to look like.
+
 `--check` honours `--explicit`: `hledger-x fmt --check --explicit` fails on a journal that still leaves an amount
 implied, which is what you want in a pre-commit hook or CI.
 
@@ -108,6 +113,10 @@ What it deliberately does *not* do:
 - It never guesses. A transaction with two amount-less postings, an amount that does not parse, or a periodic (`~`) or
   auto (`=`) rule is passed through untouched — `fmt` is not a validator, and a wrong amount would be far worse than
   no amount.
+
+`tests/golden/explicit.in.ledger` is a reference journal with one annotated transaction per case, if you want to see
+all of this at once — including what is deliberately left alone. It is valid hledger, so
+`hledger print -x -f tests/golden/explicit.in.ledger` shows the comparison directly.
 
 Real, `[balanced virtual]` and `(unbalanced virtual)` postings balance separately, the way hledger balances them: an
 unbalanced virtual posting contributes to nothing and never receives an inferred amount. When the remainder spans

@@ -1,0 +1,205 @@
+; A reference journal for `hledger-x fmt --explicit`.
+;
+; Every case --explicit changes, and the notable ones it deliberately leaves
+; alone. The file is valid hledger, so the two can be compared directly:
+;
+;   hledger-x fmt --explicit --diff tests/golden/explicit.in.ledger
+;   hledger print -x -f tests/golden/explicit.in.ledger
+;
+; Accounts are namespaced per transaction so every balance assertion stands on
+; its own and any case can be reordered or deleted on its own.
+
+; ---------------------------------------------------------------------------
+; Declared commodity styles. Only a *declared* style enables decimal padding;
+; a commodity with no directive is never padded.
+; ---------------------------------------------------------------------------
+
+commodity 1,000.00 EUR
+commodity $1,000.00
+commodity 1_000.00 SEK
+commodity CHF
+    format 1,000.000 CHF
+D 1,000.00 GBP
+
+; A space as the digit group mark is *not* supported — see the last section.
+commodity 1 000.00 USD
+
+; ---------------------------------------------------------------------------
+; Filling in the amount hledger would infer.
+; ---------------------------------------------------------------------------
+
+2026-01-01 one posting left blank
+    ; the classic case: the remainder is worked out and written in
+    t01:expenses  1234 EUR
+    t01:assets
+
+2026-01-02 inferred through a unit cost
+    ; the cost side is what balances, so the blank posting gets EUR
+    t02:broker  10 CHF @ 1.1 EUR
+    t02:assets
+
+2026-01-03 inferred through a total cost
+    t03:broker  10 CHF @@ 11 EUR
+    t03:assets
+
+2026-01-04 a posting carrying only a balance assertion
+    ; the amount goes in front of the assertion, which is left alone
+    t04:expenses  10 EUR
+    t04:assets   = -10 EUR
+
+2026-01-05 all four assertion operators
+    ; =, ==, =* and ==* all leave the posting's contribution alone
+    t05:a  10 EUR = 10 EUR
+    t05:b  10 EUR == 10 EUR
+    t05:c  10 EUR =* 10 EUR
+    t05:d  10 EUR ==* 10 EUR
+    t05:equity
+
+2026-01-06 a cost with its amount attached
+    ; `@1.1EUR` is one token, not three
+    t06:broker  10 CHF @1.1EUR
+    t06:assets
+
+2026-01-07 an assertion with its amount attached
+    t07:expenses  10 EUR
+    t07:assets  -10 EUR =-10EUR
+
+2026-01-08 everything already balances
+    ; the remainder is zero, and an explicit zero is still written
+    t08:expenses   10 EUR
+    t08:assets    -10 EUR
+    t08:rounding
+
+2026-01-09 a remainder spanning two commodities
+    ; the blank posting becomes one posting per commodity
+    t09:broker  10 EUR
+    t09:broker  10 GBP
+    t09:assets
+
+2026-01-10 the three posting kinds balance separately
+    ; (...) contributes to nothing; [...] balances among its own kind
+    t10:expenses  10 EUR
+    (t10:budget)  10 EUR
+    t10:assets
+    [t10:tracked]  4 EUR
+    [t10:mirror]
+
+2026-01-11 unitless amounts stay unitless
+    ; a commodity is never inferred, so the filled-in amount has none either.
+    ; note that the `D` directive above makes hledger *read* a bare amount as
+    ; GBP — that is hledger applying a default, not hledger-x writing one
+    t11:steps  10000
+    t11:balance
+
+; ---------------------------------------------------------------------------
+; Padding to the commodity's declared decimal places. `fmt` on its own never
+; does this — it is the second half of what --explicit means.
+; ---------------------------------------------------------------------------
+
+2026-02-01 a declared right-side style
+    t21:expenses   1234 EUR
+    t21:assets    -1234 EUR
+
+2026-02-02 a declared attached-left style
+    t22:expenses  $1234
+    t22:assets    $-1234
+
+2026-02-03 the sign written before the symbol
+    ; `-$1234` and `$-1234` are one commodity, and both render hledger's way
+    t23:expenses  -$1234
+    t23:assets    $1234
+
+2026-02-04 an underscore as the digit group mark
+    t24:expenses   1234 SEK
+    t24:assets    -1234 SEK
+
+2026-02-05 a style declared by a `format` subdirective
+    t25:expenses   1234 CHF
+    t25:assets    -1234 CHF
+
+2026-02-06 a style declared by `D`
+    t26:expenses   1234 GBP
+    t26:assets    -1234 GBP
+
+2026-02-07 costs and assertions are padded too
+    ; both sides of the `@`, and the assertion's own amount
+    t27:broker  10 CHF @ 1.1 EUR
+    t27:assets  -11 EUR = -11 EUR
+
+2026-02-08 more precision than declared is kept
+    ; the declared places are a floor, never a ceiling: rounding would lose
+    ; value, so 4.0001 is left exactly as written
+    t28:expenses   4.0001 EUR
+    t28:assets    -4.0001 EUR
+
+; ---------------------------------------------------------------------------
+; Commodities with no directive. Nothing is padded — but an amount that has to
+; be *generated* still has to be written somehow, and it copies the posting it
+; balances against.
+; ---------------------------------------------------------------------------
+
+2026-03-01 undeclared, symbol on the right with a space
+    t31:crypto  0.5 BTC
+    t31:equity
+
+2026-03-02 undeclared, symbol attached on the left
+    t32:expenses  Kc10
+    t32:assets
+
+2026-03-03 undeclared, symbol attached on the right
+    t33:expenses  10sat
+    t33:assets
+
+2026-03-04 undeclared, symbol first
+    t34:expenses  NOK 10
+    t34:assets
+
+2026-03-05 typed digit grouping is carried into the generated amount
+    t35:expenses  1,234.50 JPY
+    t35:assets
+
+2026-03-06 the style may come from a cost tail rather than a face
+    t36:broker  10 DKK @ Kc1.1
+    t36:assets
+
+; ---------------------------------------------------------------------------
+; Deliberately left alone.
+; ---------------------------------------------------------------------------
+
+2026-04-01 an undeclared commodity is never padded
+    ; `1 PLN` stays `1 PLN`; only a declared style says what "filled out" means
+    t41:expenses   1 PLN
+    t41:assets    -1 PLN
+
+2026-04-02 a space as the digit group mark is not supported
+    ; `commodity 1 000.00 USD` above declares one. hledger honours it and
+    ; prints `1 234. USD`; hledger-x does not read that declaration, so these
+    ; amounts pass through untouched rather than being rewritten wrongly
+    t42:expenses   1234 USD
+    t42:assets    -1234 USD
+
+2026-04-03 lot notation is not understood
+    ; hledger would fill `$-50` here from the lot cost. hledger-x cannot read
+    ; `{...}`, so the amount does not parse and the whole transaction is left
+    ; as it stands rather than guessed at
+    t43:shares  10 AAPL {$5}
+    t43:cash
+
+~ monthly  rent
+    ; a periodic rule is not a transaction, and is never touched
+    t51:expenses  1234 EUR
+    t51:assets
+
+= t52:expenses
+    ; an auto-posting rule is not a transaction either, and its `*2`
+    ; multiplier is not an amount
+    (t52:budget)  *2
+
+comment
+A comment block is prose, not journal syntax. Nothing in here is filled in,
+padded or aligned, even though it looks exactly like a transaction:
+
+2026-09-09 not a transaction
+    a  1234 EUR
+    b
+end comment

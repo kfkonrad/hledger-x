@@ -13,7 +13,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hledger_x::fmt::{format, format_sorted, is_formatted, is_formatted_sorted};
+use hledger_x::fmt::{
+    format, format_opts_scanned, format_sorted, is_formatted, is_formatted_sorted, Options,
+};
 
 const FIXTURES: [&str; 7] = [
     "postings",
@@ -25,6 +27,15 @@ const FIXTURES: [&str; 7] = [
     "comment-block",
 ];
 const SORT_FIXTURES: [&str; 1] = ["sort"];
+/// Fixtures whose golden is `--explicit`'s output rather than plain `fmt`'s.
+/// `explicit` is a reference journal: one transaction per case the flag
+/// touches, plus the ones it deliberately leaves alone.
+const EXPLICIT_FIXTURES: [&str; 1] = ["explicit"];
+
+const EXPLICIT: Options = Options {
+    sort: false,
+    explicit: true,
+};
 
 fn data(name: &str) -> String {
     let path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "golden", name]
@@ -88,5 +99,54 @@ fn sorting_is_idempotent_and_passes_check_sort() {
         let g = sorted_golden(name);
         assert_eq!(format_sorted(&g), g, "golden {name}");
         assert!(is_formatted_sorted(&g), "golden {name}");
+    }
+}
+
+fn explicit_golden(name: &str) -> String {
+    data(&format!("{name}.explicit.golden"))
+}
+
+#[test]
+fn explicit_reproduces_the_explicit_golden() {
+    for name in EXPLICIT_FIXTURES {
+        assert_eq!(
+            format_opts_scanned(&input(name), EXPLICIT),
+            explicit_golden(name),
+            "fixture {name}"
+        );
+    }
+}
+
+#[test]
+fn explicit_is_idempotent_and_passes_check_explicit() {
+    for name in EXPLICIT_FIXTURES {
+        let g = explicit_golden(name);
+        assert_eq!(format_opts_scanned(&g, EXPLICIT), g, "golden {name}");
+    }
+}
+
+#[test]
+fn plain_formatting_neither_pads_nor_fills() {
+    // The same fixture under plain `fmt`: whatever --explicit adds must be
+    // absent here, or the flag is not opt-in at all.
+    for name in EXPLICIT_FIXTURES {
+        let plain = format(&input(name));
+        assert_eq!(format(&plain), plain, "fixture {name} is not idempotent");
+        assert_ne!(
+            plain,
+            explicit_golden(name),
+            "fixture {name}: plain fmt should differ from --explicit"
+        );
+        // Padding is the visible half: no amount gains decimals it did not
+        // have. `1234 EUR` stays `1234 EUR` under a declared `1,000.00 EUR`.
+        assert!(
+            plain.contains("1234 EUR"),
+            "fixture {name}: plain fmt padded an amount"
+        );
+        // And nothing is filled in: the bare posting is still bare.
+        assert!(
+            plain.lines().any(|l| l.trim() == "t01:assets"),
+            "fixture {name}: plain fmt filled in an amount"
+        );
     }
 }

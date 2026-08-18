@@ -19,7 +19,7 @@ use crossterm::QueueableCommand;
 use super::plain::{render_done, rewrite_recovery};
 use super::{Session, Submit};
 use crate::add::write::{NewTransaction, Recovery};
-use crate::amount::render_amount;
+use crate::amount::render_amount_like;
 
 /// Open completion menu state.
 struct Menu {
@@ -602,6 +602,9 @@ fn log_rows(session: &Session, budget: usize) -> Vec<Vec<(String, bool)>> {
 /// The separator line: a rule, with the running imbalance surfaced when it
 /// is nonzero (or unknown).
 fn separator(session: &Session, width: usize) -> String {
+    // The same amounts the balancing prefill is computed from, so the status
+    // line and the amount it will offer are written the same way.
+    let amounts = session.draft.committed_amounts();
     let status = session.running_imbalance().map_or_else(
         || " imbalance unknown ".to_owned(),
         |sums| {
@@ -610,7 +613,7 @@ fn separator(session: &Session, width: usize) -> String {
             } else {
                 let parts: Vec<String> = sums
                     .iter()
-                    .map(|(c, v)| render_amount(*v, c, &session.ctx.amount_ctx))
+                    .map(|(c, v)| render_amount_like(*v, c, &session.ctx.amount_ctx, &amounts))
                     .collect();
                 format!(" imbalance {} ", parts.join(", "))
             }
