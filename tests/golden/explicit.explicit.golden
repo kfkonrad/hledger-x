@@ -20,10 +20,12 @@ commodity 1_000.00 SEK
 commodity CHF
     format 1,000.000 CHF
 
-; GBP's style is declared by the `D` further down. A declared *style* is
-; journal-wide whatever its position; `D`'s other effect — naming the
-; commodity of amounts written without one — is positional, which is why it
-; sits below rather than here.
+; Every declaration is positional. hledger displays amounts journal-wide in
+; the style it ends up with, but it *parses* a file top to bottom, so an
+; amount written above its commodity's directive is read without it — and
+; restyling such an amount can change what it means. GBP is declared by the
+; `D` further down, and everything in GBP sits below it except the one case
+; immediately above it, which shows what happens when it is not yet known.
 
 commodity 1 000.00 USD
 
@@ -76,9 +78,9 @@ commodity 1 000.00 USD
 2026-01-09 a remainder spanning two commodities
     ; the blank posting becomes one posting per commodity
     t09:broker               10.00 EUR
-    t09:broker               10.00 GBP
+    t09:broker               10.00 SEK
     t09:assets              -10.00 EUR
-    t09:assets              -10.00 GBP
+    t09:assets              -10.00 SEK
 
 2026-01-10 the three posting kinds balance separately
     ; (...) contributes to nothing; [...] balances among its own kind
@@ -128,14 +130,6 @@ commodity 1 000.00 USD
 2026-02-05 a style declared by a `format` subdirective
     t25:expenses         1,234.000 CHF
     t25:assets          -1,234.000 CHF
-
-2026-02-06 a style declared by `D`
-    ; seven digits, not four: `1,234` would be a single group mark with three
-    ; digits after it, which hledger reads as a decimal mark unless it already
-    ; knows the style — and this `D` is declared further down. See DESIGN.md
-    ; § restyling can introduce an ambiguous number
-    t26:expenses      1,234,567.00 GBP
-    t26:assets       -1,234,567.00 GBP
 
 2026-02-07 costs and assertions are padded too
     ; both sides of the `@`, and the assertion's own amount
@@ -197,12 +191,22 @@ commodity 1 000.00 USD
     t37:steps                1 000
     t37:balance             -1 000
 
+2026-04-03 a style is never applied above its own declaration
+    ; GBP's style says `,` groups digits — but this is written above the `D`
+    ; that says so, where hledger has not read it yet and `1,234 GBP` would
+    ; mean 1.234. Grouping `1234` here would multiply it by a thousand, so
+    ; the amount is left exactly as written and nothing is padded
+    t43:expenses              1234 GBP
+    t43:assets               -1234 GBP
+
 ; ---------------------------------------------------------------------------
-; The `D` default commodity. `D` names the commodity of amounts written
-; without one, and --explicit writes that out — spelling out what the journal
-; already says is the whole point of the flag. Unlike a declared style this is
-; positional (verified against hledger 1.99): it applies from this line on, so
-; the unitless amounts above keep no commodity.
+; The `D` directive. It does three things, all of them from this line on: it
+; names the commodity of amounts written without one, it declares a display
+; style for that commodity, and — alone among the directives — it says which
+; character is the decimal mark when reading an amount in *any* commodity that
+; declares no style of its own. --explicit writes the first of those out;
+; spelling out what the journal already says is the whole point of the flag.
+; The unitless amounts above keep no commodity, being above this line.
 ;
 ; `add` never does this. Its default commodity comes from the configuration
 ; alone, so a bare amount somebody types cannot quietly pick one up from the
@@ -210,6 +214,19 @@ commodity 1 000.00 USD
 ; ---------------------------------------------------------------------------
 
 D 1,000.00 GBP
+
+2026-05-03 a style declared by `D`
+    ; `D` declares a display style for its own commodity, like `commodity`
+    t26:expenses          1,234.00 GBP
+    t26:assets           -1,234.00 GBP
+
+2026-05-04 `D` also says which mark is decimal, for every commodity
+    ; unlike `commodity`, whose style is its own commodity's business, a `D`
+    ; sample decides how an amount in a commodity that declares no style
+    ; reads: under `1,000.00` the `,` groups digits, so this is fifteen
+    ; hundred zloty rather than one and a half
+    t63:expenses             1,500 PLN
+    t63:assets              -1,500 PLN
 
 2026-05-01 a bare amount takes the default commodity
     t61:expenses             10.00 GBP

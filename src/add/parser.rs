@@ -93,11 +93,26 @@ pub struct Transaction {
     pub pos: usize,
 }
 
+/// An `include` line and the span of the stream its target occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncludeSpan {
+    /// 0-based index of the `include` line within its own file.
+    pub line: usize,
+    /// Stream positions the included subtree occupies: `[start, end)`.
+    pub start_pos: usize,
+    /// One past the subtree's last position.
+    pub end_pos: usize,
+}
+
 /// One file of the include tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
     /// Path as resolved (absolute).
     pub path: PathBuf,
+    /// Stream position of the file's first line. Declarations before it are
+    /// the ones hledger has already read when it starts parsing this file —
+    /// which is what decides how the file's own amounts are read.
+    pub start_pos: usize,
     /// Stream position just past the file's last line. Appending to this file
     /// inserts at this position — the new-account guard filters declarations
     /// against it.
@@ -105,6 +120,10 @@ pub struct SourceFile {
     /// Parse state in effect at the end of the file. Text appended to the
     /// file is parsed under this state.
     pub state_at_eof: ParseState,
+    /// The file's own `include` lines, in order, with the span of the stream
+    /// each one pulls in. What those files declare comes into effect at that
+    /// line, not before it.
+    pub includes: Vec<IncludeSpan>,
 }
 
 /// The semantic product of the parse, over the whole include tree.
@@ -116,6 +135,8 @@ pub struct Journal {
     pub accounts: Vec<Declaration>,
     /// `commodity` declarations with stream positions.
     pub commodities: Vec<CommodityDecl>,
+    /// `D` directives: the sample amount as written, with stream positions.
+    pub defaults: Vec<Declaration>,
     /// Transactions in stream order.
     pub transactions: Vec<Transaction>,
     /// Non-fatal problems (missing includes, skipped transactions).
@@ -173,30 +194,83 @@ impl Journal {
     /// The file entry for `path`, if it is part of the include tree.
     #[must_use]
     pub fn file(&self, path: &Path) -> Option<&SourceFile> {
+        self.file_index(path).and_then(|i| self.files.get(i))
+    }
+
+    /// The index of `path` in [`Journal::files`], if it is part of the tree.
+    #[must_use]
+    pub fn file_index(&self, path: &Path) -> Option<usize> {
         let canon = canonical(path);
-        self.files.iter().find(|f| canonical(&f.path) == canon)
+        self.files.iter().position(|f| canonical(&f.path) == canon)
     }
 
     /// Declared display styles over the whole include tree, for amount
     /// parsing and restyling.
     ///
-    /// The main file's `D` sample ranks below `commodity` samples, and the
-    /// last declaration of a commodity wins — hledger 1.99's verified
-    /// precedence. `decimal_mark` is left unset: it is file-scoped parse
-    /// state, not journal-wide, and callers set it for their file.
+    /// Everything the tree declares, wherever it stands. Right for a caller
+    /// reading amounts at the end of the tree — which is where `add` inserts
+    /// — and wrong for one reading them in the middle of it, which wants
+    /// [`Journal::amount_ctx_at`].
     #[must_use]
     pub fn amount_ctx(&self) -> crate::amount::AmountCtx {
+        self.amount_ctx_at(usize::MAX)
+    }
+
+    /// The declared display styles the file at index `idx` inherits, as a
+    /// line-indexed list: what is in effect where the file begins, followed
+    /// by what each of its `include` lines brings in, at that line.
+    ///
+    /// hledger reads a journal top to bottom and follows each `include` where
+    /// it stands, so a style is in effect from its own declaration onward and
+    /// no earlier. That is not bookkeeping: reading `1,234 GBP` turns on
+    /// whether the `,` groups digits or marks the decimal, and a style
+    /// declared below the amount does not answer it. The file's own
+    /// directives are absent here — the formatter reads those as it goes.
+    #[must_use]
+    pub fn inherited_styles(&self, idx: usize) -> Vec<(usize, crate::amount::AmountCtx)> {
+        let Some(file) = self.files.get(idx) else {
+            return Vec::new();
+        };
+        let mut out = vec![(0, self.amount_ctx_at(file.start_pos))];
+        out.extend(file.includes.iter().map(|inc| {
+            (
+                inc.line,
+                self.styles_where(|p| p >= inc.start_pos && p < inc.end_pos),
+            )
+        }));
+        out
+    }
+
+    /// The declared display styles in effect at `pos` in the flattened
+    /// stream: those declared before it, and no others.
+    ///
+    /// hledger parses a journal top to bottom, following each `include` where
+    /// it stands, so a directive further down has not been read yet when an
+    /// amount above it is parsed. That matters beyond bookkeeping: reading
+    /// `1,234 GBP` needs to know whether the `,` groups digits or marks the
+    /// decimal, and hledger answers with the declarations it has seen so far.
+    ///
+    /// A `commodity` style outranks a `D` style for the same commodity,
+    /// whichever came first — hledger 1.99's verified precedence.
+    #[must_use]
+    pub fn amount_ctx_at(&self, pos: usize) -> crate::amount::AmountCtx {
+        self.styles_where(|p| p < pos)
+    }
+
+    /// The styles declared by the directives whose positions `keep` accepts.
+    fn styles_where(&self, keep: impl Fn(usize) -> bool) -> crate::amount::AmountCtx {
         let mut ctx = crate::amount::AmountCtx::default();
-        let d_sample = self
-            .files
-            .first()
-            .and_then(|f| f.state_at_eof.default_commodity.as_deref());
-        if let Some(sample) = d_sample {
-            if let Some((name, style)) = crate::amount::style_from_sample(sample) {
-                ctx.styles.insert(name, style);
+        for d in self.defaults.iter().filter(|d| keep(d.pos)) {
+            if let Some((name, style)) = crate::amount::style_from_sample(&d.name) {
+                // `D` also supplies the decimal mark for reading an amount in
+                // any commodity that declares no style of its own — the one
+                // journal-wide parsing fallback hledger has.
+                ctx.styles.insert(name, style.clone());
+                ctx.default_style = Some(style);
             }
         }
-        for c in &self.commodities {
+        // Applied second, so a `commodity` style wins wherever it stands.
+        for c in self.commodities.iter().filter(|c| keep(c.pos)) {
             if let Some(sample) = &c.sample {
                 if let Some((name, style)) = crate::amount::style_from_sample(sample) {
                     ctx.styles.insert(name, style);
@@ -240,20 +314,20 @@ impl FileMap {
     /// itself.
     #[must_use]
     pub fn build(src: &str) -> Self {
-        let lines = crate::fmt::lines(src);
-        Self::build_inner(src, &crate::fmt::scan_ctx(&lines))
+        Self::build_inner(src, &[])
     }
 
-    /// Build the map with the caller's declared styles — the include tree's,
-    /// typically, which the target file's own text cannot see.
+    /// Build the map with the styles the file inherits — from the include
+    /// tree ahead of it, and from its own `include` lines, each at the line
+    /// it arrives on (see `fmt::format_opts_at`).
     #[must_use]
-    pub fn build_with(src: &str, ctx: &crate::amount::AmountCtx) -> Self {
-        Self::build_inner(src, ctx)
+    pub fn build_with(src: &str, inherited: &[(usize, crate::amount::AmountCtx)]) -> Self {
+        Self::build_inner(src, inherited)
     }
 
-    fn build_inner(src: &str, ctx: &crate::amount::AmountCtx) -> Self {
+    fn build_inner(src: &str, inherited: &[(usize, crate::amount::AmountCtx)]) -> Self {
         let lines = crate::fmt::lines(src);
-        let (acc_w, num_w) = crate::fmt::widths_with(&lines, ctx);
+        let (acc_w, num_w) = crate::fmt::widths_with_at(&lines, inherited);
         let mut transactions = Vec::new();
         let mut i = 0usize;
         // A `comment` block is opaque: a date-looking line inside it is prose,
@@ -285,7 +359,7 @@ impl FileMap {
         Self {
             lines: lines.into_iter().map(ToOwned::to_owned).collect(),
             transactions,
-            formatted: crate::fmt::is_formatted_with(src, ctx),
+            formatted: crate::fmt::is_formatted_at(src, inherited),
             acc_w,
             num_w,
         }
@@ -343,8 +417,10 @@ impl Walk {
         // eof fields are patched when the file is done.
         self.journal.files.push(SourceFile {
             path: path.to_path_buf(),
+            start_pos: self.pos,
             eof_pos: 0,
             state_at_eof: ParseState::default(),
+            includes: Vec::new(),
         });
 
         let lines: Vec<&str> = crate::fmt::lines(src);
@@ -407,7 +483,16 @@ impl Walk {
                     )),
                 }
             } else if let Some(pattern) = directive_arg(line, "include") {
+                let start_pos = self.pos;
                 self.include(path, pattern, &state)?;
+                let span = IncludeSpan {
+                    line: i.saturating_sub(1),
+                    start_pos,
+                    end_pos: self.pos,
+                };
+                if let Some(entry) = self.journal.files.get_mut(file_idx) {
+                    entry.includes.push(span);
+                }
             } else if let Some(name) = directive_arg(line, "account") {
                 self.journal.accounts.push(Declaration {
                     name: name.to_owned(),
@@ -422,6 +507,10 @@ impl Walk {
                 state.decimal_mark = mark.chars().next();
             } else if let Some(sample) = directive_arg(line, "D") {
                 state.default_commodity = Some(sample.to_owned());
+                self.journal.defaults.push(Declaration {
+                    name: sample.to_owned(),
+                    pos: line_pos,
+                });
             }
             // Anything else — blank lines, comments, other directives,
             // indented lines outside a transaction — is ignored: `add` is an
@@ -713,6 +802,45 @@ mod tests {
         assert_eq!(j.commodities[0].name, "EUR");
         assert_eq!(j.commodities[0].sample.as_deref(), Some("1.000,00 EUR"));
         assert_eq!(j.commodities[1].sample, None);
+    }
+
+    #[test]
+    fn inherited_styles_arrive_where_the_include_stands() {
+        let t = tree(&[
+            (
+                "main.journal",
+                "include early.journal\n2026-01-01 x\n    a  1 EUR\n\ninclude late.journal\n",
+            ),
+            ("early.journal", "commodity 1_000.00 EUR\n"),
+            ("late.journal", "commodity 1.000,00 USD\n"),
+        ]);
+        let j = parse(&t, "main.journal");
+        let inherited = j.inherited_styles(0);
+        // Nothing precedes the main file, then one entry per include line.
+        assert!(inherited[0].1.styles.is_empty());
+        assert_eq!(inherited[1].0, 0); // `include early.journal`
+        assert_eq!(inherited[1].1.styles["EUR"].group_sep, Some('_'));
+        assert_eq!(inherited[2].0, 4); // `include late.journal`
+        assert_eq!(inherited[2].1.styles["USD"].group_sep, Some('.'));
+        // An included file inherits what precedes it and declares the rest
+        // itself, so its own entry is empty.
+        let late = j.file_index(&t.path().join("late.journal")).unwrap();
+        assert_eq!(late, 2);
+        assert_eq!(
+            j.inherited_styles(late)[0].1.styles["EUR"].group_sep,
+            Some('_')
+        );
+    }
+
+    #[test]
+    fn amount_ctx_at_ignores_declarations_below_it() {
+        let t = tree(&[(
+            "main.journal",
+            "2026-01-01 x\n    a  1 EUR\n\ncommodity 1_000.00 EUR\n",
+        )]);
+        let j = parse(&t, "main.journal");
+        assert!(j.amount_ctx_at(1).styles.is_empty());
+        assert_eq!(j.amount_ctx().styles["EUR"].group_sep, Some('_'));
     }
 
     #[test]

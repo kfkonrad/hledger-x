@@ -17,7 +17,7 @@ use hledger_x::add::write::{integrate_with, Recovery};
 use hledger_x::amount::AmountCtx;
 use hledger_x::config::Config;
 use hledger_x::errors::{display_path, io_reason};
-use hledger_x::fmt::{format_opts, format_opts_scanned, Options};
+use hledger_x::fmt::{format_opts_at, format_opts_scanned, Options};
 use similar::TextDiff;
 
 #[derive(Parser)]
@@ -248,9 +248,13 @@ fn add(args: &AddArgs) -> Result<(), Failure> {
     } else {
         main_file
     };
-    // The include tree's declared styles: the target's own text may not
-    // contain the `commodity` directives that govern its amounts.
-    let styles = journal.amount_ctx();
+    // The declared styles in effect where the target file begins: the file's
+    // own text may not contain the `commodity` directives that govern its
+    // amounts, and a style declared after it has not been read yet.
+    let styles: Vec<(usize, AmountCtx)> = journal.file_index(&target).map_or_else(
+        || vec![(0, journal.amount_ctx())],
+        |i| journal.inherited_styles(i),
+    );
     let target_src = fs::read_to_string(&target).map_err(|e| Failure::io(&target, &e))?;
     let map = FileMap::build_with(&target_src, &styles);
 
@@ -344,10 +348,10 @@ fn crossterm_is_tty() -> bool {
 /// The transform applied to a file's contents. With a context, amounts
 /// restyle to the include tree's declared styles; without one, to the styles
 /// declared in the text itself.
-fn transform(opts: Options, src: &str, ctx: Option<&AmountCtx>) -> String {
-    ctx.map_or_else(
+fn transform(opts: Options, src: &str, inherited: Option<&[(usize, AmountCtx)]>) -> String {
+    inherited.map_or_else(
         || format_opts_scanned(src, opts),
-        |c| format_opts(src, c, opts),
+        |i| format_opts_at(src, i, opts),
     )
 }
 
@@ -364,12 +368,19 @@ fn write_diff(out: &mut impl Write, display: &str, before: &str, after: &str) ->
     )
 }
 
-/// The declared commodity styles visible from `path` — its whole include
-/// tree's, the way hledger resolves them. `None` (falling back to the text's
-/// own directives) when the tree cannot be walked; `fmt` never refuses to
-/// format over a parse problem.
-fn include_tree_ctx(path: &Path) -> Option<AmountCtx> {
-    parse_journal(path).ok().map(|j| j.amount_ctx())
+/// The declared commodity styles in effect where `path` *starts* — those its
+/// include tree declares ahead of it, the way hledger reads them. `None`
+/// (falling back to the file's own directives) when the tree cannot be walked
+/// or the file is not in it; `fmt` never refuses to format over a parse
+/// problem.
+///
+/// Only what precedes the file, never the whole tree: hledger parses top to
+/// bottom, so a style declared later has not been read yet, and restyling an
+/// amount by it can change what the amount means.
+fn include_tree_ctx(path: &Path) -> Option<Vec<(usize, AmountCtx)>> {
+    let journal = parse_journal(path).ok()?;
+    let idx = journal.file_index(path)?;
+    Some(journal.inherited_styles(idx))
 }
 
 /// One file to format, and where its declared styles come from.
@@ -387,7 +398,7 @@ struct Job {
 struct Plan {
     /// Declared styles, one entry per include tree walked. Held here rather
     /// than in the jobs so a tree's files share a single copy.
-    ctxs: Vec<Option<AmountCtx>>,
+    ctxs: Vec<Option<Vec<(usize, AmountCtx)>>>,
     jobs: Vec<Job>,
     /// Canonical paths already in `jobs`: a file reachable from two roots, or
     /// named as an operand as well, is formatted once.
@@ -423,8 +434,10 @@ impl Plan {
         for w in &journal.warnings {
             eprintln!("warning: {w}");
         }
-        let ctx = self.push_ctx(Some(journal.amount_ctx()));
-        for file in &journal.files {
+        for (idx, file) in journal.files.iter().enumerate() {
+            // Each file is styled by what the tree declares ahead of it, in
+            // include order — the order hledger reads them in.
+            let ctx = self.push_ctx(Some(journal.inherited_styles(idx)));
             let display = display_path(&file.path);
             self.push_job(file.path.clone(), display, ctx);
         }
@@ -440,7 +453,7 @@ impl Plan {
         self.push_job(path.to_path_buf(), path.display().to_string(), ctx);
     }
 
-    fn push_ctx(&mut self, ctx: Option<AmountCtx>) -> usize {
+    fn push_ctx(&mut self, ctx: Option<Vec<(usize, AmountCtx)>>) -> usize {
         self.ctxs.push(ctx);
         // The index of what was just pushed; 0 only if the vector was empty.
         self.ctxs.len().saturating_sub(1)
@@ -598,7 +611,11 @@ fn run_files(args: &FmtArgs, opts: Options, plan: &Plan) -> Status {
                 continue;
             }
         };
-        let ctx = plan.ctxs.get(job.ctx).and_then(Option::as_ref);
+        let ctx = plan
+            .ctxs
+            .get(job.ctx)
+            .and_then(Option::as_ref)
+            .map(Vec::as_slice);
         let formatted = transform(opts, &src, ctx);
         // Leave an already-formatted file untouched on disk.
         if formatted == src {

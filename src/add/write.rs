@@ -13,7 +13,7 @@ use chrono::NaiveDate;
 
 use super::parser::FileMap;
 use crate::fmt::posting::{parse_posting, render};
-use crate::fmt::{format_sorted_with, format_with, unlines, widths_with};
+use crate::fmt::{format_opts_at, merged_styles, unlines, widths_with_at, Options};
 use crate::lex::{is_blank, split_amount};
 
 /// Where a new transaction goes in the file.
@@ -119,18 +119,18 @@ impl NewTransaction {
 /// entire file *including* the new transactions.
 #[must_use]
 pub fn integrate(src: &str, txns: &[NewTransaction], opts: &WriteOptions) -> Integrated {
-    let ctx = crate::fmt::scan_ctx(&crate::fmt::lines(src));
-    integrate_with(src, txns, opts, &ctx)
+    integrate_with(src, txns, opts, &[])
 }
 
-/// [`integrate`] with the caller's declared styles — the include tree's,
-/// which the target file's own text cannot see.
+/// [`integrate`] with the styles the target file inherits — from the include
+/// tree ahead of it, and from its own `include` lines, each at the line it
+/// arrives on (see `fmt::format_opts_at`).
 #[must_use]
 pub fn integrate_with(
     src: &str,
     txns: &[NewTransaction],
     opts: &WriteOptions,
-    ctx: &crate::amount::AmountCtx,
+    ctx: &[(usize, crate::amount::AmountCtx)],
 ) -> Integrated {
     let mut warnings = Vec::new();
     let map = FileMap::build_with(src, ctx);
@@ -151,9 +151,9 @@ pub fn integrate_with(
     if opts.format_file {
         let joined = unlines(&lines);
         let contents = if opts.sort {
-            format_sorted_with(&joined, ctx)
+            format_opts_at(&joined, ctx, Options::sorted(true))
         } else {
-            format_with(&joined, ctx)
+            format_opts_at(&joined, ctx, Options::default())
         };
         return Integrated { contents, warnings };
     }
@@ -162,7 +162,7 @@ pub fn integrate_with(
     // the whole file including the new transactions.
     let joined = unlines(&lines);
     let all: Vec<&str> = crate::fmt::lines(&joined);
-    let (mut acc_w, mut num_w) = widths_with(&all, ctx);
+    let (mut acc_w, mut num_w) = widths_with_at(&all, ctx);
     for t in txns {
         let (a, n) = t.own_widths();
         acc_w = acc_w.max(a);
@@ -175,7 +175,9 @@ pub fn integrate_with(
         );
     }
 
-    // Re-do the insertion, this time rendering our lines aligned.
+    // Re-do the insertion, this time rendering our lines aligned. Our lines
+    // go at the end of the file, so every inherited style is in effect.
+    let at_eof = merged_styles(ctx);
     let mut lines: Vec<String> = map.lines;
     for txn in txns {
         let at = insertion_index(&FileMap::build(&unlines(&lines)), txn.date, opts.insertion);
@@ -184,7 +186,7 @@ pub fn integrate_with(
             rendered.push(render(
                 acc_w,
                 num_w,
-                &crate::fmt::posting::restyle(parse_posting(raw), ctx),
+                &crate::fmt::posting::restyle(parse_posting(raw), &at_eof),
             ));
         }
         splice(&mut lines, at, &rendered);
