@@ -59,6 +59,17 @@ pub fn opens_txn(s: &str) -> bool {
     s.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Whether a line opens a periodic (`~`) or auto (`=`) transaction *rule*.
+///
+/// A rule is not a transaction — hledger only expands one under `--forecast`
+/// or `--auto` — so nothing in it is balanced, filled in or restyled. Its
+/// postings are laid out and nothing more, which is why this is a separate
+/// question from [`opens_txn`].
+#[must_use]
+pub fn opens_rule(s: &str) -> bool {
+    matches!(s.chars().next(), Some('~' | '='))
+}
+
 /// An indented, non-blank line: a posting or an in-transaction comment.
 #[must_use]
 pub fn is_indented_non_blank(s: &str) -> bool {
@@ -275,6 +286,18 @@ mod tests {
             split_amount(&["100", "USD", "extra"]),
             ("100".to_owned(), "USD".to_owned(), vec!["extra"])
         );
+    }
+
+    #[test]
+    fn rules_are_recognized_but_are_not_transactions() {
+        assert!(opens_rule("~ monthly  rent"));
+        assert!(opens_rule("= expenses:food"));
+        assert!(!opens_rule("2026-01-01 x"));
+        assert!(!opens_rule("    indented"));
+        assert!(!opens_rule("commodity EUR"));
+        // And a rule still does not open a transaction.
+        assert!(!opens_txn("~ monthly  rent"));
+        assert!(!opens_txn("= expenses:food"));
     }
 
     #[test]

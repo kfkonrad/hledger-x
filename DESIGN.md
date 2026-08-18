@@ -612,6 +612,24 @@ precision from the amounts it sees in the journal, so writing a full-precision
 inferred amount changes the display of every amount in that commodity — which
 is why it is the fallback rather than the default.)
 
+## Periodic and auto rules are laid out, nothing more (2026-08-18, with the user)
+
+`~` (periodic) and `=` (auto posting) rules are not transactions — hledger
+only expands them under `--forecast` / `--auto` — and `opens_txn` excludes
+them by a leading ASCII digit. Their postings used to pass through verbatim,
+which left them raggedly indented, tab-separated and outside the alignment
+columns while every real transaction lined up around them.
+
+They now join the file-wide columns, and nothing else: `Class::Rule` is
+parsed and rendered but never restyled, never padded, and invisible to
+`--explicit`'s filling. A rule's amount may be a multiplier (`*2`) rather than
+an amount at all, and a rule does not have to balance, so reading either as a
+value would be wrong. The rule *header* still passes through byte-for-byte —
+the two spaces before a periodic rule's description are syntax.
+
+Verified: `hledger print --forecast --auto` is identical before and after, so
+what the rules generate is unchanged.
+
 ## Sorting (`--sort`)
 
 Stable (equal dates keep source order) and **directive-bounded**: directives
