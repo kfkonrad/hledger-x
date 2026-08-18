@@ -73,6 +73,19 @@ pub struct AmountCtx {
     pub decimal_mark: Option<char>,
     /// Declared display styles by commodity symbol.
     pub styles: HashMap<String, DisplayStyle>,
+    /// The commodity a `D` directive gives to amounts written without one.
+    ///
+    /// **Set by `fmt --explicit` alone.** `D` is a declaration in the journal
+    /// and hledger honours it, so spelling it out is exactly what
+    /// `--explicit` is for. `add` must leave this unset: its default
+    /// commodity comes from the configuration only, so that a bare amount
+    /// somebody types never quietly acquires a commodity from the file
+    /// (the user's call, 2026-08-18).
+    ///
+    /// Unlike a declared *style*, this is **positional**: verified against
+    /// hledger 1.99, a `D` written after a transaction does not apply to it,
+    /// and the last `D` before an amount wins.
+    pub default_commodity: Option<String>,
 }
 
 /// A parsed entered amount: exact value, commodity (may be empty — a
@@ -311,6 +324,14 @@ fn parse_face(num_field: &str, commodity: &str, ctx: &AmountCtx) -> Option<(Deci
         detach_symbol(&num_tok)
     } else {
         (num_tok, commodity)
+    };
+
+    // A `D` directive gives an amount written without a commodity that
+    // commodity. Only `fmt --explicit` puts one here.
+    let commodity = if commodity.is_empty() {
+        ctx.default_commodity.clone().unwrap_or_default()
+    } else {
+        commodity
     };
 
     let mark = ctx

@@ -335,6 +335,19 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
             if let Some(arg) = directive_arg(l, "decimal-mark") {
                 cur.decimal_mark = arg.chars().next().filter(|c| matches!(c, '.' | ','));
             }
+            // `D` names the commodity of amounts written without one, from
+            // here to the end of the file — positional, unlike the style it
+            // also declares. Only `--explicit` acts on it: writing a
+            // commodity into an amount is spelling out what the journal
+            // already says, which is the whole point of the flag, but it is
+            // not something plain `fmt` may do.
+            if opts.explicit {
+                if let Some(arg) = directive_arg(l, "D") {
+                    if let Some((name, _)) = style_from_sample(arg) {
+                        cur.default_commodity = Some(name);
+                    }
+                }
+            }
             close_txn(&mut out, &mut txn, opts);
             out.push(Class::Other);
             in_txn = opens_txn(l);
@@ -873,6 +886,41 @@ mod tests {
             explicit("2026-01-01 x\n    a  10 EUR\n    b\n    ! [c]  4 EUR\n    ! [d]\n"),
             "2026-01-01 x\n    a       10 EUR\n    b      -10 EUR\n    ! [c]    4 EUR\n    ! [d]   -4 EUR\n"
         );
+    }
+
+    #[test]
+    fn explicit_writes_out_the_default_commodity() {
+        // `D` names the commodity of an amount written without one, and
+        // hledger honours it — so spelling it out is what --explicit is for.
+        assert_eq!(
+            explicit("D 1000.00 GBP\n\n2026-01-01 x\n    a  10\n    b\n"),
+            "D 1000.00 GBP\n\n2026-01-01 x\n    a   10.00 GBP\n    b  -10.00 GBP\n"
+        );
+        // An explicit commodity wins over the default.
+        assert_eq!(
+            explicit("D 1000.00 GBP\n\n2026-01-01 x\n    a  10 EUR\n    b\n"),
+            "D 1000.00 GBP\n\n2026-01-01 x\n    a   10 EUR\n    b  -10 EUR\n"
+        );
+    }
+
+    #[test]
+    fn the_default_commodity_is_positional() {
+        // Verified against hledger 1.99: a `D` after a transaction does not
+        // apply to it. The style it declares still does — that is
+        // journal-wide — but the default commodity is not.
+        let src = "2026-01-01 x\n    a  10\n    b\n\nD 1000.00 GBP\n";
+        assert_eq!(
+            explicit(src),
+            "2026-01-01 x\n    a   10\n    b  -10\n\nD 1000.00 GBP\n"
+        );
+    }
+
+    #[test]
+    fn plain_fmt_never_writes_the_default_commodity() {
+        // Only --explicit acts on `D`. Putting a commodity into an amount is
+        // not something the plain formatter may do.
+        let src = "D 1000.00 GBP\n\n2026-01-01 x\n    a  10\n    b\n";
+        assert_eq!(format(src), src);
     }
 
     #[test]

@@ -95,6 +95,11 @@ and `--explicit` opts `fmt` into the same thing.)
   `1.00 EUR` — the same rule `add` applies to an amount you type. The declared places are a minimum, never a maximum,
   so `4.001 EUR` is left alone, and a commodity with no `commodity` directive is left alone entirely.
 
+A `D` directive gives amounts written without a commodity that commodity, so `--explicit` writes it out: under
+`D 1,000.00 GBP`, a bare `10` becomes `10.00 GBP`. `D` applies from its own line onward, so amounts above it keep no
+commodity. `add` does not do this — its default commodity comes from `add.default_commodity` in the configuration
+alone, so an amount you type never quietly picks one up from the journal.
+
 When a commodity has no `commodity` directive, padding simply does not apply — `1 USD` stays `1 USD`. An amount that
 has to be *generated*, though, still has to be written somehow, and its style is taken from the postings it balances
 against: `$10` balances with `$-10`, `10€` with `-10€`, and a typed `1,234.50 USD` keeps its digit grouping. A declared

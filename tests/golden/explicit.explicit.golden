@@ -19,7 +19,11 @@ commodity $1,000.00
 commodity 1_000.00 SEK
 commodity CHF
     format 1,000.000 CHF
-D 1,000.00 GBP
+
+; GBP's style is declared by the `D` further down. A declared *style* is
+; journal-wide whatever its position; `D`'s other effect — naming the
+; commodity of amounts written without one — is positional, which is why it
+; sits below rather than here.
 
 commodity 1 000.00 USD
 
@@ -94,9 +98,8 @@ commodity 1 000.00 USD
     ! [t12:mirror]           -4.00 EUR
 
 2026-01-11 unitless amounts stay unitless
-    ; a commodity is never inferred, so the filled-in amount has none either.
-    ; note that the `D` directive above makes hledger *read* a bare amount as
-    ; GBP — that is hledger applying a default, not hledger-x writing one
+    ; nothing here names a commodity and no `D` is in effect yet — the one
+    ; below is positional — so the filled-in amount has none either
     t11:steps                10000
     t11:balance             -10000
 
@@ -127,8 +130,12 @@ commodity 1 000.00 USD
     t25:assets          -1,234.000 CHF
 
 2026-02-06 a style declared by `D`
-    t26:expenses          1,234.00 GBP
-    t26:assets           -1,234.00 GBP
+    ; seven digits, not four: `1,234` would be a single group mark with three
+    ; digits after it, which hledger reads as a decimal mark unless it already
+    ; knows the style — and this `D` is declared further down. See DESIGN.md
+    ; § restyling can introduce an ambiguous number
+    t26:expenses      1,234,567.00 GBP
+    t26:assets       -1,234,567.00 GBP
 
 2026-02-07 costs and assertions are padded too
     ; both sides of the `@`, and the assertion's own amount
@@ -189,6 +196,30 @@ commodity 1 000.00 USD
     ; answering `$10` with `-10 $`
     t37:steps                1 000
     t37:balance             -1 000
+
+; ---------------------------------------------------------------------------
+; The `D` default commodity. `D` names the commodity of amounts written
+; without one, and --explicit writes that out — spelling out what the journal
+; already says is the whole point of the flag. Unlike a declared style this is
+; positional (verified against hledger 1.99): it applies from this line on, so
+; the unitless amounts above keep no commodity.
+;
+; `add` never does this. Its default commodity comes from the configuration
+; alone, so a bare amount somebody types cannot quietly pick one up from the
+; journal.
+; ---------------------------------------------------------------------------
+
+D 1,000.00 GBP
+
+2026-05-01 a bare amount takes the default commodity
+    t61:expenses             10.00 GBP
+    t61:assets              -10.00 GBP
+
+2026-05-02 an explicit commodity still wins over the default
+    t62:expenses             10.00 GBP
+    t62:expenses              5.00 EUR
+    t62:assets              -10.00 GBP
+    t62:assets               -5.00 EUR
 
 ; ---------------------------------------------------------------------------
 ; Deliberately left alone.
