@@ -343,6 +343,16 @@ const INFERENCE_FIXTURES: &[(&str, &str)] = &[
         "unitless-comma-group",
         "2026-01-01 x\n    a  1,000\n    b\n",
     ),
+    // A status flag is not part of the account, so it must not hide the
+    // brackets that say which group a posting balances in.
+    (
+        "flagged-virtual-posting",
+        "2026-01-01 x\n    a  10 EUR\n    * (v)  3 EUR\n    b\n",
+    ),
+    (
+        "flagged-balanced-virtual",
+        "2026-01-01 x\n    a  10 EUR\n    b\n    ! [c]  4 EUR\n    ! [d]\n",
+    ),
 ];
 
 /// Fixtures where `--explicit` pads decimals out to a declared style. That is

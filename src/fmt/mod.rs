@@ -861,6 +861,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_sees_through_a_status_flag_on_a_virtual_posting() {
+        // `* (v)` is an unbalanced virtual posting that contributes to
+        // nothing. Counting its 3 EUR into the real balance filled `b` with
+        // -13 EUR, which hledger refuses to read.
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR\n    * (v)  3 EUR\n    b\n"),
+            "2026-01-01 x\n    a       10 EUR\n    * (v)    3 EUR\n    b      -10 EUR\n"
+        );
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR\n    b\n    ! [c]  4 EUR\n    ! [d]\n"),
+            "2026-01-01 x\n    a       10 EUR\n    b      -10 EUR\n    ! [c]    4 EUR\n    ! [d]   -4 EUR\n"
+        );
+    }
+
+    #[test]
     fn explicit_is_idempotent() {
         let src = "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234EUR\n    a  5 USD\n    b\n\n2026-01-02 y\n    c  1 EUR\n    d\n";
         let once = explicit(src);
