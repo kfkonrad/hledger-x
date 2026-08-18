@@ -353,14 +353,34 @@ const INFERENCE_FIXTURES: &[(&str, &str)] = &[
         "flagged-balanced-virtual",
         "2026-01-01 x\n    a  10 EUR\n    b\n    ! [c]  4 EUR\n    ! [d]\n",
     ),
+    // `D` names the commodity of a bare amount, and --explicit writes it out.
+    // Positional: the second fixture's `D` comes after the transaction, so
+    // hledger does not apply it and neither may we.
+    (
+        "default-commodity-applies",
+        "D 1000.00 GBP\n\n2026-01-01 x\n    a  10\n    b\n",
+    ),
+    (
+        "default-commodity-is-positional",
+        "2026-01-01 x\n    a  10\n    b\n\nD 1000.00 GBP\n",
+    ),
 ];
 
-/// Fixtures where `--explicit` pads decimals out to a declared style. That is
-/// a deliberate deviation from `hledger print`, which renders a written
-/// `1234 EUR` as `1,234.` under `commodity 1,000.00 EUR` — so the oracle here
-/// is `hledger balance`, which answers the question that actually matters:
-/// did any value move?
-const PADDING_FIXTURES: &[(&str, &str)] = &[
+/// Fixtures where `hledger print -x` legitimately differs from our output, so
+/// the oracle is `hledger balance` — the question that actually matters, did
+/// any value move?
+///
+/// Two reasons it differs. Padding decimals to a declared style is a
+/// deliberate deviation: `print` renders a written `1234 EUR` as `1,234.`
+/// under `commodity 1,000.00 EUR`. And where a remainder spans commodities,
+/// we emit the split postings in the order the commodities first appear in
+/// the transaction, which is the order a person wrote them; hledger emits
+/// them in its own.
+const VALUE_ONLY_FIXTURES: &[(&str, &str)] = &[
+    (
+        "default-commodity-loses-to-an-explicit-one",
+        "D 1000.00 GBP\n\n2026-01-01 x\n    a  10\n    a  5 EUR\n    b\n",
+    ),
     (
         "declared-style-padding",
         "commodity 1,000.00 EUR\n\n2026-01-01 x\n    a  1234 EUR\n    b\n",
@@ -431,17 +451,17 @@ fn explicit_infers_exactly_what_hledger_infers() {
 }
 
 #[test]
-fn explicit_padding_moves_no_value() {
+fn explicit_moves_no_value() {
     if !have_hledger() {
         eprintln!("hledger not on PATH; skipping semantic check");
         return;
     }
-    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-explicit-padding"]
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-explicit-values"]
         .iter()
         .collect();
     fs::create_dir_all(&tmp).unwrap();
 
-    for (name, src) in PADDING_FIXTURES {
+    for (name, src) in VALUE_ONLY_FIXTURES {
         let (before_path, after_path) = explicit_output(&tmp, name, src);
         let before = hledger_balance(&before_path)
             .unwrap_or_else(|| panic!("{name}: hledger rejected the fixture"));

@@ -184,9 +184,14 @@ impl SessionCtx {
             journal.accounts.iter().map(|d| d.name.clone()).collect();
         let strict = config.strict;
 
-        let default_commodity = state
-            .and_then(|s| s.default_commodity)
-            .or_else(|| config.default_commodity.clone());
+        // The configuration alone, deliberately: a journal's `D` directive is
+        // not consulted here. `add` materializes its default into an amount
+        // the user typed, and taking that from the file meant a bare `12.50`
+        // silently acquiring a commodity nobody asked for. Spelling `D` out
+        // is `fmt --explicit`'s job, where it is what was asked for
+        // (the user's call, 2026-08-18).
+        let _ = state;
+        let default_commodity = config.default_commodity.clone();
 
         Self {
             journal,
@@ -1311,6 +1316,16 @@ mod tests {
         session_with(journal_src, Config::default())
     }
 
+    /// A config whose `add.default_commodity` is `sample`. `add` takes its
+    /// default from the configuration alone; a journal's `D` directive is
+    /// `fmt --explicit`'s business, not `add`'s.
+    fn config_with_default(sample: &str) -> Config {
+        Config {
+            default_commodity: Some(sample.to_owned()),
+            ..Config::default()
+        }
+    }
+
     fn session_with(journal_src: &str, config: Config) -> (Session, TempDir) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("main.journal");
@@ -2138,8 +2153,8 @@ mod tests {
 
     #[test]
     fn default_commodity_attaches_to_unitless_balancing_prefills() {
-        let src = "D 1000.00 EUR\n2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
-        let (mut s, _t) = session(src);
+        let src = "2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session_with(src, config_with_default("1000.00 EUR"));
         s.submit();
         type_in(&mut s, "X");
         s.submit();
@@ -2149,14 +2164,14 @@ mod tests {
         s.submit();
         type_in(&mut s, "c:d");
         s.submit();
-        // Balancing suggestion: unitless sum + D commodity.
+        // Balancing suggestion: unitless sum + the configured commodity.
         assert_eq!(s.suggestion().as_deref(), Some("-12.50 EUR"));
     }
 
     #[test]
     fn default_commodity_is_written_into_bare_amounts() {
-        let src = "D 1000.00 EUR\n2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
-        let (mut s, _t) = session(src);
+        let src = "2026-08-01 x\n    a:b  1 EUR\n    c:d  -1 EUR\n";
+        let (mut s, _t) = session_with(src, config_with_default("1000.00 EUR"));
         s.submit();
         type_in(&mut s, "X");
         s.submit();
@@ -2193,8 +2208,8 @@ mod tests {
 
     #[test]
     fn default_commodity_follows_the_declared_style_side() {
-        let src = "commodity $1000.00\nD $1000.00\n";
-        let (mut s, _t) = session(src);
+        let src = "commodity $1000.00\n";
+        let (mut s, _t) = session_with(src, config_with_default("$1000.00"));
         s.submit();
         type_in(&mut s, "X");
         s.submit();

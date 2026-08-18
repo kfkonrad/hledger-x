@@ -387,6 +387,50 @@ Two deliberate deviations from `hledger print`:
    colliding group separator swaps with the displaced mark: `1.000,00` under
    `decimal-mark .` renders as `1,000.00`.
 
+## Known bug: restyling can introduce an ambiguous number
+
+Found 2026-08-18 while moving a `D` directive in the reference journal, and
+**not yet fixed**. It is a plain-`fmt` bug, not an `--explicit` one, and it
+changes values, so it outranks anything else outstanding.
+
+```
+2026-01-01 x            fmt      2026-01-01 x
+    a   1234 GBP        --->         a   1,234 GBP
+    b  -1234 GBP                     b  -1,234 GBP
+
+D 1,000.00 GBP                   D 1,000.00 GBP
+```
+
+hledger reads the input as 1234 and the output as **1.234**. A number with a
+single group mark and exactly three digits after it is ambiguous, and hledger
+resolves it using the style it knows *at that point*; a style declared further
+down the file is not yet known, so the comma reads as a decimal mark. Verified
+with both `commodity` and `D` declarations.
+
+Two things hid it. The rule "styles apply journal-wide regardless of position"
+is true of *display* — which is what was verified when it was written down —
+but not of *parsing*. And the unit test for it uses `10EUR` → `10 EUR`, which
+introduces no group mark and so cannot produce an ambiguous number. The
+semantic tests caught it the moment a fixture had a declaration below its
+amounts.
+
+hledger sidesteps this in its own output by always printing the decimal mark:
+it writes `1,234.`, where the second mark disambiguates.
+
+Candidate fixes, in preference order:
+
+1. **Restyle only with a style declared at or before the amount.** Positional
+   styles for rewriting purposes, the way `decimal-mark` and the `D` default
+   already work in `styled_lines`. Amounts above a late declaration then pass
+   through untouched — less thorough, never wrong.
+2. Refuse to emit a form that would be ambiguous (a single group mark, no
+   decimal part), leaving that amount as written.
+3. Emit hledger's trailing mark (`1,234.`). Round-trip-safe, but it puts a
+   character in the journal no one typed.
+
+Until one lands, a journal that declares a commodity's style *below* the
+amounts using it should not be run through `fmt`.
+
 Restyling is value-preserving by construction (parse to exact decimal,
 re-render; unit tests assert re-parse equality) and `hledger print` output
 is byte-identical before and after (semantic tests plus a real-journal
@@ -528,6 +572,24 @@ token first — which needs a declared style, so undeclared commodities fell
 through. `cost_contribution` now matches against the same `OPS` list, longest
 prefix first, and takes the operator's attached operand as the head of the
 price.
+
+**The `D` default commodity, in `fmt --explicit` only** (2026-08-18, the
+user's call). `D 1,000.00 GBP` says a bare `10` *is* 10 GBP, and hledger reads
+it that way, so writing the commodity out is exactly what `--explicit` means.
+Verified against hledger 1.99, and unlike a declared style this is
+**positional**: a `D` after a transaction does not apply to it, the last `D`
+before an amount wins, and it reaches cost and assertion tails. `AmountCtx`
+gains `default_commodity`, tracked line by line in `styled_lines` the way
+`decimal-mark` already is, and set only when `opts.explicit`.
+
+`add` deliberately does *not* consult it, which is a change: it used to take
+its default from the journal's `D`, falling back to the config. `add`
+materializes its default into an amount the user just typed, so sourcing it
+from the file meant a bare `12.50` silently acquiring a commodity nobody
+asked for. `add.default_commodity` in the config is now the only source. This
+narrows invariant 3 rather than breaking it: a default is still never applied
+silently on the `add` path, and on the `fmt` path it is applied only because
+the invocation asked for the journal's own declarations to be spelled out.
 
 **Costs are deliberately not inferred.** `print -x` turns `10 EUR` / `-11 USD`
 into `10 EUR @@ 11 USD`. That is a claim about what the transaction *was* —

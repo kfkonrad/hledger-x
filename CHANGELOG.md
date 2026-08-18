@@ -15,6 +15,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   work out on its own — two postings missing an amount, an amount it cannot read, a `~` or `=` rule — are left exactly
   as they are
 
+- `fmt`: `--explicit` now writes out the commodity a `D` directive gives to amounts written without one, so `10` becomes
+  `10.00 GBP` under `D 1,000.00 GBP`. `D` applies from its own line onward, so amounts above it are left alone
+
+### Changed
+- `add`: the default commodity now comes from `add.default_commodity` in the configuration only. It used to be taken
+  from the journal's `D` directive when there was one, which meant a bare amount you typed could silently pick up a
+  commodity from the file. Spelling `D` out is `fmt --explicit`'s job now
+
 ### Fixed
 - A posting's own status flag is no longer mistaken for part of its account name. `* (budget:food)` is again an
   unbalanced virtual posting rather than a real one — `fmt --explicit` was counting its amount into the wrong total and
