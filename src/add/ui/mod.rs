@@ -153,10 +153,12 @@ impl SessionCtx {
     ) -> Self {
         let index = Index::build(&journal, today, crate::add::index::DEFAULT_HALF_LIFE_DAYS);
 
-        let mut amount_ctx = journal.amount_ctx();
         let target_file = journal.file(&target).cloned();
         let (insertion_pos, state) =
             target_file.map_or((usize::MAX, None), |f| (f.eof_pos, Some(f.state_at_eof)));
+        // The styles in effect at the insertion point — everything the tree
+        // declares ahead of it, and nothing declared after.
+        let mut amount_ctx = journal.amount_ctx_at(insertion_pos);
         amount_ctx.decimal_mark = state.as_ref().and_then(|s| s.decimal_mark);
 
         let declared_accounts_visible: HashSet<String> = journal

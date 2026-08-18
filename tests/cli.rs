@@ -812,6 +812,27 @@ fn the_ledger_file_precedence_is_flag_then_config_then_env() {
 }
 
 #[test]
+fn fmt_does_not_restyle_by_a_style_included_after_the_amounts() {
+    // hledger reads includes where they stand, so a style pulled in below a
+    // transaction is not known when that transaction is parsed. Restyling by
+    // it would change what the amounts mean: `1,234 GBP` read without the
+    // style is 1.234.
+    let dir = scratch("fmt_include_order");
+    write(&dir, "conf.journal", "commodity 1,000.00 GBP\n");
+    let main = write(
+        &dir,
+        "main.journal",
+        "2026-01-01 x\n    a:b  1234 GBP\n    c:d  -1234 GBP\n\ninclude conf.journal\n",
+    );
+    let out = run(&["fmt", main.to_str().unwrap()], "");
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        fs::read_to_string(&main).unwrap(),
+        "2026-01-01 x\n    a:b   1234 GBP\n    c:d  -1234 GBP\n\ninclude conf.journal\n"
+    );
+}
+
+#[test]
 fn fmt_restyles_amounts_using_styles_from_included_files() {
     let dir = scratch("fmt_include_styles");
     write(&dir, "conf.journal", "commodity 1_000.00 EUR\n");

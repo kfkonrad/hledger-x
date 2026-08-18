@@ -76,7 +76,7 @@ impl Options {
 /// Idempotent: `format(format(x)) == format(x)`.
 #[must_use]
 pub fn format(s: &str) -> String {
-    format_with(s, &scan_ctx(&lines(s)))
+    format_with(s, &AmountCtx::default())
 }
 
 /// Like [`format`], with styles supplied by the caller — the whole include
@@ -94,7 +94,7 @@ pub fn format_with(s: &str, ctx: &AmountCtx) -> String {
 /// positional directives keep their scope. Equal dates keep their source order.
 #[must_use]
 pub fn format_sorted(s: &str) -> String {
-    format_sorted_with(s, &scan_ctx(&lines(s)))
+    format_sorted_with(s, &AmountCtx::default())
 }
 
 /// [`format_sorted`] with caller-supplied styles.
@@ -103,23 +103,39 @@ pub fn format_sorted_with(s: &str, ctx: &AmountCtx) -> String {
     format_opts(s, ctx, Options::sorted(true))
 }
 
-/// The one formatting entry point every other one funnels into: caller-supplied
-/// styles, and everything optional named in [`Options`].
+/// [`format_opts`] with the inherited styles spread over the file's lines.
+///
+/// `inherited` pairs a 0-based line index with the styles that come into
+/// effect *at* it: entry `(0, ..)` is what the include tree declares ahead of
+/// this file, and one entry per `include` line carries what that line pulls
+/// in. The formatter does not follow `include` lines itself, and a style has
+/// to arrive where hledger would read it — a `commodity` directive included
+/// below a transaction must not restyle the amounts above it.
+///
+/// Sorting moves transactions but never crosses a directive, so the line
+/// indices still line up afterwards.
 #[must_use]
-pub fn format_opts(s: &str, ctx: &AmountCtx, opts: Options) -> String {
+pub fn format_opts_at(s: &str, inherited: &[(usize, AmountCtx)], opts: Options) -> String {
     let ls = lines(s);
     let ls = if opts.sort {
         sort::sort_entries(&ls)
     } else {
         ls
     };
-    unlines(&format_lines(&blank::normalize(&ls), ctx, opts))
+    unlines(&format_lines(&blank::normalize(&ls), inherited, opts))
+}
+
+/// The one formatting entry point every other one funnels into: caller-supplied
+/// styles, and everything optional named in [`Options`].
+#[must_use]
+pub fn format_opts(s: &str, ctx: &AmountCtx, opts: Options) -> String {
+    format_opts_at(s, &[(0, ctx.clone())], opts)
 }
 
 /// [`format_opts`] against the styles declared in the text itself.
 #[must_use]
 pub fn format_opts_scanned(s: &str, opts: Options) -> String {
-    format_opts(s, &scan_ctx(&lines(s)), opts)
+    format_opts(s, &AmountCtx::default(), opts)
 }
 
 /// Whether the input is already a fixed point of [`format`]. Drives `--check`.
@@ -132,6 +148,12 @@ pub fn is_formatted(s: &str) -> bool {
 #[must_use]
 pub fn is_formatted_with(s: &str, ctx: &AmountCtx) -> bool {
     format_with(s, ctx) == s
+}
+
+/// [`is_formatted`] with the inherited styles [`format_opts_at`] takes.
+#[must_use]
+pub fn is_formatted_at(s: &str, inherited: &[(usize, AmountCtx)]) -> bool {
+    format_opts_at(s, inherited, Options::default()) == s
 }
 
 /// Whether the input is already a fixed point of [`format_sorted`]. Drives
@@ -152,65 +174,6 @@ pub fn is_formatted_sorted_with(s: &str, ctx: &AmountCtx) -> bool {
 #[must_use]
 pub fn is_formatted_opts(s: &str, ctx: &AmountCtx, opts: Options) -> bool {
     format_opts(s, ctx, opts) == s
-}
-
-/// Collect declared commodity display styles from the text alone: `commodity`
-/// directive samples, their indented `format` subdirectives, and `D`.
-///
-/// Verified against hledger 1.99: styles apply journal-wide regardless of
-/// position, the last declaration of a commodity wins, and a `commodity`
-/// style beats a `D` style even when `D` comes later. A bare `commodity EUR`
-/// declares no style.
-#[must_use]
-pub fn scan_ctx(ls: &[&str]) -> AmountCtx {
-    let mut ctx = AmountCtx::default();
-    let mut declared: Vec<(String, crate::amount::DisplayStyle)> = Vec::new();
-    // The commodity whose indented subdirective block we are inside, waiting
-    // for a `format` line.
-    let mut block: Option<String> = None;
-    // Inside a `comment` block nothing is journal syntax, so no directive in
-    // it may be read.
-    let mut opaque = false;
-    for l in ls {
-        if opaque {
-            opaque = !closes_comment_block(l);
-            continue;
-        }
-        if opens_comment_block(l) {
-            opaque = true;
-            block = None;
-            continue;
-        }
-        if is_indented_non_blank(l) {
-            if let Some(name) = &block {
-                if let Some(sample) = directive_arg(l.trim_start(), "format") {
-                    if let Some((_, style)) = style_from_sample(sample) {
-                        declared.push((name.clone(), style));
-                    }
-                }
-            }
-            continue;
-        }
-        block = None;
-        if let Some(sample) = directive_arg(l, "commodity") {
-            if let Some((name, style)) = style_from_sample(sample) {
-                block = Some(name.clone());
-                declared.push((name, style));
-            } else {
-                block = Some(sample.to_owned());
-            }
-        } else if let Some(sample) = directive_arg(l, "D") {
-            // `D` styles rank below `commodity` styles: they land in the map
-            // first and the `declared` pass below overwrites them.
-            if let Some((name, style)) = style_from_sample(sample) {
-                ctx.styles.insert(name, style);
-            }
-        }
-    }
-    for (name, style) in declared {
-        ctx.styles.insert(name, style);
-    }
-    ctx
 }
 
 /// Split into lines with Haskell `lines` semantics.
@@ -252,14 +215,21 @@ pub fn unlines<S: AsRef<str>>(ls: &[S]) -> String {
 /// its preview and its writes align exactly as `fmt` would.
 #[must_use]
 pub fn widths(ls: &[&str]) -> (usize, usize) {
-    widths_with(ls, &scan_ctx(ls))
+    widths_with(ls, &AmountCtx::default())
 }
 
 /// [`widths`] with caller-supplied styles: the widths of the *restyled*
 /// postings, which is what [`format_with`] aligns to.
 #[must_use]
 pub fn widths_with(ls: &[&str], ctx: &AmountCtx) -> (usize, usize) {
-    widths_of(&styled_lines(ls, ctx, Options::default()))
+    widths_with_at(ls, &[(0, ctx.clone())])
+}
+
+/// [`widths_with`] with the inherited styles spread over the file's lines,
+/// the way [`format_opts_at`] takes them.
+#[must_use]
+pub fn widths_with_at(ls: &[&str], inherited: &[(usize, AmountCtx)]) -> (usize, usize) {
+    widths_of(&styled_lines(ls, inherited, Options::default()))
 }
 
 /// What a physical line is, once classified.
@@ -313,17 +283,30 @@ fn widths_of(styled: &[Class]) -> (usize, usize) {
 /// changes how amounts *parse* from that point on (the declared style still
 /// governs display — verified against hledger 1.99). A `comment` block is
 /// opaque throughout: a posting-looking line inside it is prose.
-fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
-    let mut cur = ctx.clone();
+fn styled_lines(ls: &[&str], inherited: &[(usize, AmountCtx)], opts: Options) -> Vec<Class> {
+    let mut cur = AmountCtx::default();
     let mut in_txn = false;
     let mut in_rule = false;
     let mut opaque = false;
+    // The commodity whose indented subdirective block we are inside, waiting
+    // for a `format` line.
+    let mut block: Option<String> = None;
+    // Commodities whose style came from a `commodity` directive: a `D` style
+    // never displaces one of those, whichever came first (verified, 1.99).
+    let mut from_commodity: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out: Vec<Class> = Vec::with_capacity(ls.len());
+    // Styles the file inherits, each arriving at its own line.
+    let mut pending = inherited.iter().peekable();
     // Where the posting run of the transaction being classified starts, and
     // the styles in effect there: `--explicit` needs the whole transaction at
     // once, so the fill waits until the run ends.
     let mut txn: Option<(usize, AmountCtx)> = None;
-    for l in ls {
+    for (i, l) in ls.iter().enumerate() {
+        while pending.peek().is_some_and(|(line, _)| *line <= i) {
+            if let Some((_, add)) = pending.next() {
+                inherit(&mut cur, add, &mut from_commodity);
+            }
+        }
         if opaque {
             opaque = !closes_comment_block(l);
             out.push(Class::Opaque);
@@ -335,6 +318,18 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
             out.push(Class::Opaque);
         } else if in_rule && is_indented_non_blank(l) {
             out.push(Class::Rule(parse_posting(l)));
+        } else if !in_txn && !in_rule && is_indented_non_blank(l) {
+            // An indented line outside a transaction is a subdirective; the
+            // only one that carries a style is `format`.
+            if let Some(name) = &block {
+                if let Some(sample) = directive_arg(l.trim_start(), "format") {
+                    if let Some((_, style)) = style_from_sample(sample) {
+                        from_commodity.insert(name.clone());
+                        cur.styles.insert(name.clone(), style);
+                    }
+                }
+            }
+            out.push(Class::Other);
         } else if in_txn && is_indented_non_blank(l) {
             out.push(Class::Post(vec![restyle_with(
                 parse_posting(l),
@@ -342,8 +337,36 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
                 opts.places(),
             )]));
         } else {
+            block = None;
             if let Some(arg) = directive_arg(l, "decimal-mark") {
                 cur.decimal_mark = arg.chars().next().filter(|c| matches!(c, '.' | ','));
+            }
+            // A declared style applies from its own declaration onward.
+            // hledger applies it journal-wide when *displaying*, but it parses
+            // a file top to bottom, so an amount written above the directive
+            // is read without it — and restyling such an amount can change its
+            // value: `1234 GBP` grouped to `1,234 GBP` reads back as 1.234
+            // where the style is not yet known. Positional here, therefore:
+            // less thorough than hledger's display, never wrong.
+            if let Some(sample) = directive_arg(l, "commodity") {
+                if let Some((name, style)) = style_from_sample(sample) {
+                    block = Some(name.clone());
+                    from_commodity.insert(name.clone());
+                    cur.styles.insert(name, style);
+                } else {
+                    block = Some(sample.to_owned());
+                }
+            } else if let Some(sample) = directive_arg(l, "D") {
+                if let Some((name, style)) = style_from_sample(sample) {
+                    // `D` declares a style for its own commodity, and supplies
+                    // the decimal mark for reading amounts in any commodity
+                    // that declares none. A `commodity` directive outranks it
+                    // for the style, whichever came first (verified, 1.99).
+                    if !from_commodity.contains(&name) {
+                        cur.styles.insert(name, style.clone());
+                    }
+                    cur.default_style = Some(style);
+                }
             }
             // `D` names the commodity of amounts written without one, from
             // here to the end of the file — positional, unlike the style it
@@ -371,6 +394,46 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
     out
 }
 
+/// Every inherited style at once, as one context.
+///
+/// For a caller that is not walking the file line by line and only needs what
+/// is in effect at its end — rendering lines appended there, say.
+#[must_use]
+pub fn merged_styles(inherited: &[(usize, AmountCtx)]) -> AmountCtx {
+    let mut cur = AmountCtx::default();
+    let mut seen = std::collections::HashSet::new();
+    for (_, add) in inherited {
+        inherit(&mut cur, add, &mut seen);
+    }
+    cur
+}
+
+/// Merge styles arriving from outside the file — the include tree ahead of
+/// it, or one of its own `include` lines — into the state in effect.
+///
+/// They are treated as `commodity`-strength: a `D` further down the file does
+/// not displace one, which is hledger's precedence for the common case of an
+/// included `commodity` directive.
+fn inherit(
+    cur: &mut AmountCtx,
+    add: &AmountCtx,
+    from_commodity: &mut std::collections::HashSet<String>,
+) {
+    for (name, style) in &add.styles {
+        from_commodity.insert(name.clone());
+        cur.styles.insert(name.clone(), style.clone());
+    }
+    if add.decimal_mark.is_some() {
+        cur.decimal_mark = add.decimal_mark;
+    }
+    if let Some(style) = add.default_style.as_ref() {
+        cur.default_style = Some(style.clone());
+    }
+    if let Some(name) = add.default_commodity.as_ref() {
+        cur.default_commodity = Some(name.clone());
+    }
+}
+
 /// End the transaction whose postings start at the recorded index, filling in
 /// its inferred amounts when `--explicit` asked for them.
 fn close_txn(out: &mut [Class], txn: &mut Option<(usize, AmountCtx)>, opts: Options) {
@@ -386,8 +449,8 @@ fn close_txn(out: &mut [Class], txn: &mut Option<(usize, AmountCtx)>, opts: Opti
 }
 
 /// Reflow a list of physical lines against the file-wide widths.
-fn format_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<String> {
-    let styled = styled_lines(ls, ctx, opts);
+fn format_lines(ls: &[&str], inherited: &[(usize, AmountCtx)], opts: Options) -> Vec<String> {
+    let styled = styled_lines(ls, inherited, opts);
     let (acc_w, num_w) = widths_of(&styled);
     ls.iter()
         .zip(styled)
@@ -589,13 +652,95 @@ mod tests {
     }
 
     #[test]
-    fn styles_apply_journal_wide_regardless_of_position() {
-        // Verified: hledger applies a directive declared after the txn.
+    fn a_style_declared_below_an_amount_does_not_reach_it() {
+        // Styles are journal-wide for *display*, but hledger parses a file
+        // top to bottom and a declaration further down is not yet known. So
+        // restyling is positional: above the directive an amount is left
+        // exactly as written.
         let src = "2025-01-01 x\n    a  10EUR\n\ncommodity 1_000.00 EUR\n";
+        assert_eq!(format(src), src);
+    }
+
+    #[test]
+    fn a_style_declared_above_an_amount_reaches_it() {
+        let src = "commodity 1_000.00 EUR\n\n2025-01-01 x\n    a  10EUR\n";
         assert_eq!(
             format(src),
-            "2025-01-01 x\n    a  10 EUR\n\ncommodity 1_000.00 EUR\n"
+            "commodity 1_000.00 EUR\n\n2025-01-01 x\n    a  10 EUR\n"
         );
+    }
+
+    #[test]
+    fn restyling_never_introduces_an_ambiguous_number() {
+        // `1,234 GBP` under a style hledger does not know yet reads as 1.234,
+        // so grouping `1234` here would change the value by a factor of 1000.
+        let src = "2025-01-01 x\n    a   1234 GBP\n    b  -1234 GBP\n\ncommodity 1,000.00 GBP\n";
+        assert_eq!(format(src), src);
+    }
+
+    #[test]
+    fn an_already_grouped_amount_above_its_declaration_is_read_as_hledger_reads_it() {
+        // The other half of the same bug: `1,234` here is 1.234, so --explicit
+        // must balance it with -1.234 and must not pad it to `1,234.00`.
+        let src = "2025-01-01 x\n    a  1,234 GBP\n    b\n\ncommodity 1,000.00 GBP\n";
+        assert_eq!(
+            format_opts_scanned(
+                src,
+                Options {
+                    explicit: true,
+                    ..Options::default()
+                }
+            ),
+            "2025-01-01 x\n    a   1,234 GBP\n    b  -1,234 GBP\n\ncommodity 1,000.00 GBP\n"
+        );
+    }
+
+    #[test]
+    fn a_d_declaration_is_positional_for_its_style_too() {
+        let src = "2025-01-01 x\n    a  10EUR\n\nD 1_000.00 EUR\n\n2025-02-01 y\n    b  10EUR\n";
+        assert_eq!(
+            format(src),
+            // the number column is file-wide, and `10EUR` (left as written,
+            // above the directive) is the widest number field in it
+            "2025-01-01 x\n    a  10EUR\n\nD 1_000.00 EUR\n\n2025-02-01 y\n    b     10 EUR\n"
+        );
+    }
+
+    #[test]
+    fn a_d_style_decides_the_decimal_mark_for_any_commodity_below_it() {
+        // `D` is hledger's only journal-wide *parsing* fallback: under
+        // `D 1.000,00 EUR` the `,` in `1,5 GBP` is the decimal mark, so the
+        // amount is 1.5 and the balancing posting is -1,5 GBP.
+        let src = "D 1.000,00 EUR\n\n2025-01-01 x\n    a  1,5 GBP\n    b\n";
+        assert_eq!(
+            format_opts_scanned(
+                src,
+                Options {
+                    explicit: true,
+                    ..Options::default()
+                }
+            ),
+            "D 1.000,00 EUR\n\n2025-01-01 x\n    a   1,5 GBP\n    b  -1,5 GBP\n"
+        );
+    }
+
+    /// A context declaring one commodity's style, standing in for what an
+    /// include tree declared before this file began.
+    fn ctx_with(sample: &str) -> AmountCtx {
+        let mut ctx = AmountCtx::default();
+        if let Some((name, style)) = style_from_sample(sample) {
+            ctx.styles.insert(name, style);
+        }
+        ctx
+    }
+
+    #[test]
+    fn the_callers_context_is_what_precedes_the_file() {
+        // An include tree's earlier files declare styles this one inherits;
+        // the file's own directives layer on top from their own positions.
+        let ctx = ctx_with("1_000.00 EUR");
+        let src = "2025-01-01 x\n    a  10EUR\n";
+        assert_eq!(format_with(src, &ctx), "2025-01-01 x\n    a  10 EUR\n");
     }
 
     #[test]
@@ -676,7 +821,7 @@ mod tests {
 
     #[test]
     fn format_with_takes_the_callers_styles() {
-        let ctx = scan_ctx(&["commodity 1_000.00 EUR"]);
+        let ctx = ctx_with("1_000.00 EUR");
         let src = "2025-01-01 x\n    a  10EUR\n";
         assert_eq!(format_with(src, &ctx), "2025-01-01 x\n    a  10 EUR\n");
         assert!(!is_formatted_with(src, &ctx));

@@ -86,6 +86,16 @@ pub struct AmountCtx {
     /// hledger 1.99, a `D` written after a transaction does not apply to it,
     /// and the last `D` before an amount wins.
     pub default_commodity: Option<String>,
+    /// The style of the `D` directive in effect, used **only** to decide
+    /// which character is the decimal mark when reading an amount whose
+    /// commodity declares no style of its own.
+    ///
+    /// Verified against hledger 1.99, and asymmetric with `commodity`: a
+    /// `commodity 1,000.00 Bar` directive says nothing about how an amount in
+    /// `Foo` reads, but `D 1,000.00 Bar` does — under it `1,234 Foo` is 1234,
+    /// not 1.234. It is a parsing hint alone; hledger does not *display* other
+    /// commodities in `D`'s style, so nothing is ever restyled from here.
+    pub default_style: Option<DisplayStyle>,
 }
 
 /// A parsed entered amount: exact value, commodity (may be empty — a
@@ -107,6 +117,20 @@ pub struct ParsedAmount {
 /// bare symbol with no number.
 #[must_use]
 pub fn style_from_sample(sample: &str) -> Option<(String, DisplayStyle)> {
+    style_from_sample_with(sample, None)
+}
+
+/// [`style_from_sample`] reading the number under a known decimal mark.
+///
+/// A directive's sample declares its own marks, so it is read with `None`.
+/// A sample taken from a journal amount must be read exactly as that amount
+/// parses — with the `decimal-mark`, declared style or `D` fallback in
+/// effect — or the style deduced from it says something the amount does not.
+#[must_use]
+pub fn style_from_sample_with(
+    sample: &str,
+    forced_mark: Option<char>,
+) -> Option<(String, DisplayStyle)> {
     // The number is everything between the first and last digit, marks and
     // group spaces included; the symbol is whatever sits to one side of it.
     // Scanning for that span rather than splitting on whitespace is what lets
@@ -127,20 +151,26 @@ pub fn style_from_sample(sample: &str) -> Option<(String, DisplayStyle)> {
     }
     if !left.is_empty() {
         let spaced = head.ends_with(char::is_whitespace);
-        let style = style_of_number(digits_on, Side::Left, spaced, left)?;
+        let style = style_of_number(digits_on, Side::Left, spaced, left, forced_mark)?;
         return Some((left.to_owned(), style));
     }
     if !right.is_empty() {
         let spaced = tail.starts_with(char::is_whitespace);
-        let style = style_of_number(digits_on, Side::Right, spaced, right)?;
+        let style = style_of_number(digits_on, Side::Right, spaced, right, forced_mark)?;
         return Some((right.to_owned(), style));
     }
     None // a bare number declares no commodity
 }
 
 /// Derive a style from a sample number like `1_000.00` or `1.234,56`.
-fn style_of_number(num: &str, side: Side, spaced: bool, _symbol: &str) -> Option<DisplayStyle> {
-    let (int_part, frac_part, decimal_mark, group_sep) = split_number(num, None)?;
+fn style_of_number(
+    num: &str,
+    side: Side,
+    spaced: bool,
+    _symbol: &str,
+    forced_mark: Option<char>,
+) -> Option<DisplayStyle> {
+    let (int_part, frac_part, decimal_mark, group_sep) = split_number(num, forced_mark)?;
     let group_sizes = group_sep.map_or_else(Vec::new, |sep| {
         let mut sizes: Vec<usize> = int_part
             .split(sep)
@@ -334,11 +364,21 @@ fn parse_face(num_field: &str, commodity: &str, ctx: &AmountCtx) -> Option<(Deci
         commodity
     };
 
-    let mark = ctx
-        .decimal_mark
-        .or_else(|| ctx.styles.get(&commodity).map(|s| s.decimal_mark));
-    let value = parse_number(&num_tok, mark)?;
+    let value = parse_number(&num_tok, mark_in_effect(ctx, &commodity))?;
     Some((value, commodity))
+}
+
+/// Which character is the decimal mark when reading an amount in `commodity`,
+/// in hledger's precedence: an explicit `decimal-mark` directive, then the
+/// commodity's own declared style, then the `D` fallback.
+///
+/// `None` when nothing declares one, and then the number is read on its own
+/// terms — where a lone `,` or `.` is the decimal mark, the same assumption
+/// hledger makes, so we agree with it about the value.
+fn mark_in_effect(ctx: &AmountCtx, commodity: &str) -> Option<char> {
+    ctx.decimal_mark
+        .or_else(|| ctx.styles.get(commodity).map(|s| s.decimal_mark))
+        .or_else(|| ctx.default_style.as_ref().map(|s| s.decimal_mark))
 }
 
 /// Split an attached symbol off a token: `$100` → (`100`, `$`), `100€` →
@@ -576,9 +616,13 @@ fn amount_groups(text: &str) -> Vec<String> {
 /// decides how to render an amount we are creating from nothing, where the
 /// alternative is not "leave it alone" but a hardcoded guess.
 #[must_use]
-pub fn style_from_amounts(amounts: &[&str], commodity: &str) -> Option<DisplayStyle> {
+pub fn style_from_amounts(
+    amounts: &[&str],
+    commodity: &str,
+    forced_mark: Option<char>,
+) -> Option<DisplayStyle> {
     for group in amounts.iter().flat_map(|t| amount_groups(t)) {
-        match style_from_sample(&group) {
+        match style_from_sample_with(&group, forced_mark) {
             Some((name, style)) if name == commodity => return Some(style),
             // A bare number names no commodity, so it can only speak for a
             // unitless amount — but it does speak for one. The grouping and
@@ -587,7 +631,9 @@ pub fn style_from_amounts(amounts: &[&str], commodity: &str) -> Option<DisplaySt
             // `-10 $`, and copying `1,000` keeps us from answering it with a
             // `-1.000` that says something else in the author's notation.
             None if commodity.is_empty() => {
-                if let Some(style) = style_of_number(group.trim(), Side::Right, true, "") {
+                if let Some(style) =
+                    style_of_number(group.trim(), Side::Right, true, "", forced_mark)
+                {
                     return Some(style);
                 }
             }
@@ -628,7 +674,7 @@ pub fn render_amount_like(
         .styles
         .get(commodity)
         .cloned()
-        .or_else(|| style_from_amounts(siblings, commodity))
+        .or_else(|| style_from_amounts(siblings, commodity, mark_in_effect(ctx, commodity)))
         .map_or_else(
             || DisplayStyle {
                 decimal_mark: ctx.decimal_mark.unwrap_or('.'),
@@ -976,6 +1022,78 @@ mod tests {
         assert_eq!(parsed.contributes, (Decimal::from(13), "EUR".to_owned()));
         let parsed = parse_amount("10 USD =10USD", &ctx).unwrap();
         assert_eq!(parsed.contributes, (Decimal::from(10), "USD".to_owned()));
+    }
+
+    #[test]
+    fn a_lone_separator_is_the_decimal_mark_when_nothing_is_declared() {
+        // hledger 1.99: with no style known at that point, a single `,` or
+        // `.` is the decimal mark whatever follows it — `1,234` is 1.234 and
+        // `12,345` is 12.345. Two or more of the same mark group instead.
+        let ctx = AmountCtx::default();
+        assert_eq!(parse_number("1,234", None), Some(dec("1.234")));
+        assert_eq!(parse_number("12,345", None), Some(dec("12.345")));
+        assert_eq!(parse_number("1,234,567", None), Some(dec("1234567")));
+        assert_eq!(
+            parse_amount("1,234 GBP", &ctx).map(|a| a.value),
+            Some(dec("1.234"))
+        );
+    }
+
+    #[test]
+    fn a_d_style_says_which_mark_is_decimal_for_every_commodity() {
+        // Verified against hledger 1.99: unlike a `commodity` directive,
+        // whose style is per-commodity, a `D` sample supplies the decimal
+        // mark used to read an amount in *any* commodity that declares none.
+        // `D 1,000.00 Bar` makes `1,234 Foo` 1234, not 1.234.
+        let ctx = AmountCtx {
+            default_style: style_from_sample("1,000.00 Bar").map(|(_, s)| s),
+            ..AmountCtx::default()
+        };
+        assert_eq!(
+            parse_amount("1,234 Foo", &ctx).map(|a| a.value),
+            Some(dec("1234"))
+        );
+        // ...and it is only a parsing hint: hledger does not *display* other
+        // commodities in it, so nothing here restyles.
+        assert_eq!(restyle_face_fields("1234", "Foo", &ctx), None);
+    }
+
+    #[test]
+    fn a_sibling_style_is_sampled_with_the_marks_in_effect() {
+        // The sample must be read the way the amount it came from parses, or
+        // a generated amount contradicts the one it balances: under a `D`
+        // saying `,` groups digits, `1,500` is 1500 and its balancing amount
+        // must come out `-1,500`, not `-1500,000`.
+        let ctx = AmountCtx {
+            default_style: style_from_sample("1,000.00 GBP").map(|(_, s)| s),
+            ..AmountCtx::default()
+        };
+        assert_eq!(
+            render_amount_like(dec("-1500"), "PLN", &ctx, &["1,500 PLN"]),
+            "-1,500 PLN"
+        );
+        // With nothing declared, the same text is 1.5 and stays that way.
+        let bare = AmountCtx::default();
+        assert_eq!(
+            render_amount_like(dec("-1.5"), "PLN", &bare, &["1,500 PLN"]),
+            "-1,500 PLN"
+        );
+    }
+
+    #[test]
+    fn a_commoditys_own_style_outranks_the_d_fallback() {
+        let mut ctx = AmountCtx {
+            default_style: style_from_sample("1,000.00 Bar").map(|(_, s)| s),
+            ..AmountCtx::default()
+        };
+        if let Some((name, style)) = style_from_sample("1.000,00 Foo") {
+            ctx.styles.insert(name, style);
+        }
+        // `,` is Foo's decimal mark, so `1,234` is 1.234 despite the D.
+        assert_eq!(
+            parse_amount("1,234 Foo", &ctx).map(|a| a.value),
+            Some(dec("1.234"))
+        );
     }
 
     #[test]

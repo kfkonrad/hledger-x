@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   as they are
 
 - `fmt`: `--explicit` now writes out the commodity a `D` directive gives to amounts written without one, so `10` becomes
-  `10.00 GBP` under `D 1,000.00 GBP`. `D` applies from its own line onward, so amounts above it are left alone
+  `10.00 GBP` under `D 1,000.00 GBP`
 
 ### Changed
 - `fmt`: the postings of `~` (periodic) and `=` (auto posting) rules are now indented and aligned like every other
@@ -27,6 +27,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   commodity from the file. Spelling `D` out is `fmt --explicit`'s job now
 
 ### Fixed
+- A commodity's declared format is now applied only to the amounts written below the directive that declares it, as
+  hledger reads a journal. Under a `commodity 1,000.00 GBP` written at the *bottom* of a file, `1234 GBP` above it used
+  to be rewritten as `1,234 GBP` — which hledger then read as 1.234, a thousandth of what was there. Amounts written
+  above their commodity's declaration are now left exactly as they are, and `include` lines count where they stand
+- An amount written with digit grouping above its commodity's declaration is now read the way hledger reads it. Under
+  a `commodity 1,000.00 GBP` at the bottom of a file, `1,234 GBP` above it is 1.234, not 1234 — so `--explicit` used to
+  balance it against the wrong figure and pad it to `1,234.00`, multiplying it by a thousand
+- `fmt`: a `D` directive now also settles which character is the decimal mark for commodities that declare no format of
+  their own, matching hledger. Under `D 1,000.00 GBP`, an amount written `1,500 PLN` is fifteen hundred, and a
+  balancing amount calculated from it is written `-1,500 PLN` rather than `-1500,000 PLN`
 - A single tab between an account and its amount is now recognised as the separator, as hledger does. Such a posting
   was read as one long account name with no amount at all, so it was never aligned — and `fmt --explicit` wrote a
   second amount next to the one already there, producing a file hledger could not read

@@ -82,6 +82,13 @@ uses, so a comment that heads a transaction travels with it.
 `hledger print` emits. (`add` does fill an amount you type out to the commodity's declared decimal places; see below,
 and `--explicit` opts `fmt` into the same thing.)
 
+A `commodity`, `D` or `decimal-mark` directive governs the amounts written **below** it, and only those — including
+across `include` lines, which take effect where they stand. hledger reads a journal top to bottom, so a style declared
+further down is not yet known when it reaches an amount, and `1,234 GBP` written above `commodity 1,000.00 GBP` means
+1.234 rather than 1234. Amounts above their commodity's declaration are therefore passed through exactly as written,
+by `fmt` and `--explicit` alike. Keeping your declarations at the top of the journal, or in a file you `include`
+first, is what most journals do already and is the layout everything is formatted against.
+
 #### `--explicit`
 
 `--explicit` (`-x`, the same name `hledger print` uses) writes out what the journal leaves implied. It does two things:
@@ -100,9 +107,9 @@ and `--explicit` opts `fmt` into the same thing.)
   so `4.001 EUR` is left alone, and a commodity with no `commodity` directive is left alone entirely.
 
 A `D` directive gives amounts written without a commodity that commodity, so `--explicit` writes it out: under
-`D 1,000.00 GBP`, a bare `10` becomes `10.00 GBP`. `D` applies from its own line onward, so amounts above it keep no
-commodity. `add` does not do this — its default commodity comes from `add.default_commodity` in the configuration
-alone, so an amount you type never quietly picks one up from the journal.
+`D 1,000.00 GBP`, a bare `10` becomes `10.00 GBP`. `add` does not do this — its default commodity comes from
+`add.default_commodity` in the configuration alone, so an amount you type never quietly picks one up from the
+journal.
 
 When a commodity has no `commodity` directive, padding simply does not apply — `1 USD` stays `1 USD`. An amount that
 has to be *generated*, though, still has to be written somehow, and its style is taken from the postings it balances

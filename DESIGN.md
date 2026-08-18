@@ -367,12 +367,18 @@ Where styles come from (verified):
   subdirective. A bare `commodity EUR` declares no style.
 - `D` as a fallback: a `commodity` style beats it even when `D` comes later;
   otherwise the last declaration of a commodity wins.
-- Styles apply journal-wide regardless of position — a directive after a
-  transaction still styles it.
-- Styles cross include boundaries. The `fmt` CLI walks the include tree of
-  each file argument (read-only; on any parse problem it leniently falls
-  back to the text's own directives — `fmt` never refuses to run). Stdin has
-  no include tree, so only in-text directives apply there.
+- Styles are **positional for rewriting**: a declaration takes effect from
+  its own line onward and reaches nothing above it. hledger applies a style
+  journal-wide when it *displays* an amount, but it *parses* a file top to
+  bottom, and a style it has not read yet cannot tell it how to read a
+  number — see § Positional styles below, which is where the reasoning and
+  the bug it fixes are recorded.
+- Styles cross include boundaries, arriving at the `include` line that pulls
+  them in. The `fmt` CLI walks the include tree of each file argument
+  (read-only; on any parse problem it leniently falls back to the text's own
+  directives — `fmt` never refuses to run) and hands the formatter the styles
+  in effect where the file begins, plus one entry per `include` line. Stdin
+  has no include tree, so only in-text directives apply there.
 
 Two deliberate deviations from `hledger print`:
 
@@ -387,54 +393,70 @@ Two deliberate deviations from `hledger print`:
    colliding group separator swaps with the displaced mark: `1.000,00` under
    `decimal-mark .` renders as `1,000.00`.
 
-## Known bug: restyling can introduce an ambiguous number
+## Positional styles (2026-08-18)
 
-Found 2026-08-18 while moving a `D` directive in the reference journal, and
-**not yet fixed**. It is a plain-`fmt` bug, not an `--explicit` one, and it
-changes values, so it outranks anything else outstanding.
+A style declared *below* an amount used to be applied to it anyway, which
+changed values. Two halves, both fixed:
 
 ```
 2026-01-01 x            fmt      2026-01-01 x
     a   1234 GBP        --->         a   1,234 GBP
     b  -1234 GBP                     b  -1,234 GBP
 
-D 1,000.00 GBP                   D 1,000.00 GBP
+commodity 1,000.00 GBP           commodity 1,000.00 GBP
 ```
 
-hledger reads the input as 1234 and the output as **1.234**. A number with a
-single group mark and exactly three digits after it is ambiguous, and hledger
-resolves it using the style it knows *at that point*; a style declared further
-down the file is not yet known, so the comma reads as a decimal mark. Verified
-with both `commodity` and `D` declarations.
+hledger reads the input as 1234 and that output as **1.234**. And the reverse:
+an amount already written `1,234 GBP` above the same declaration *is* 1.234 to
+hledger, where we read 1234 — so `--explicit` balanced it wrongly and padded it
+to `1,234.00`, multiplying it by a thousand.
 
-Two things hid it. The rule "styles apply journal-wide regardless of position"
-is true of *display* — which is what was verified when it was written down —
-but not of *parsing*. And the unit test for it uses `10EUR` → `10 EUR`, which
-introduces no group mark and so cannot produce an ambiguous number. The
-semantic tests caught it the moment a fixture had a declaration below its
-amounts.
+The rule, measured against hledger 1.99 rather than assumed:
 
-hledger sidesteps this in its own output by always printing the decimal mark:
-it writes `1,234.`, where the second mark disambiguates.
+- With no style known at that point, a lone `,` or `.` is the **decimal
+  mark**, whatever follows it: `1,234` is 1.234, `12,345` is 12.345. Two or
+  more of the same mark group instead: `1,234,567` is 1234567.
+- A `decimal-mark` directive settles it; so does the commodity's own declared
+  style, whether from `commodity`, its `format` subdirective, or `D`.
+- `D` is the one *journal-wide* parsing fallback: `D 1,000.00 Bar` makes
+  `1,234 Foo` 1234 even though it names another commodity. A `commodity`
+  directive is not — `commodity 1,000.00 Bar` says nothing about `Foo`. And
+  `D`'s style is a parsing hint only: hledger does not *display* other
+  commodities in it, so nothing is restyled from it.
+- Position spans the include tree: `include decl` then `include txns` reads
+  1234, the reverse order 1.234.
+- `_` and a space are never decimal marks, so they are never ambiguous.
 
-Candidate fixes, in preference order:
+So a style is in effect from its own declaration onward and no earlier, for
+both reading and rewriting. Amounts above a late declaration pass through
+untouched — less thorough than hledger's display, never wrong. Two candidates
+were considered and rejected: refusing only the *ambiguous* renderings (a rule
+nobody can predict from looking at their own number), and emitting hledger's
+disambiguating trailing mark, `1,234.` (a character nobody typed). Both would
+have needed this positional machinery anyway, since neither fixes the reading
+half.
 
-1. **Restyle only with a style declared at or before the amount.** Positional
-   styles for rewriting purposes, the way `decimal-mark` and the `D` default
-   already work in `styled_lines`. Amounts above a late declaration then pass
-   through untouched — less thorough, never wrong.
-2. Refuse to emit a form that would be ambiguous (a single group mark, no
-   decimal part), leaving that amount as written.
-3. Emit hledger's trailing mark (`1,234.`). Round-trip-safe, but it puts a
-   character in the journal no one typed.
+Mechanically: `fmt::format_opts_at` takes the inherited styles as
+`&[(line, AmountCtx)]` — entry `(0, ..)` is what the tree declares ahead of
+the file, then one entry per `include` line — and `styled_lines` merges each
+in as it reaches that line, alongside the file's own directives. The tree side
+is `Journal::inherited_styles`. `add` reads its styles at the insertion point
+(`Journal::amount_ctx_at`), so a directive below it does not reach a typed
+amount either.
 
-Until one lands, a journal that declares a commodity's style *below* the
-amounts using it should not be run through `fmt`.
+Two things had hidden the bug. "Styles apply journal-wide regardless of
+position" is true of *display* — which is what was verified when it was
+written down — but not of parsing. And the unit test for it used `10EUR` →
+`10 EUR`, which introduces no group mark and so cannot produce an ambiguous
+number.
 
 Restyling is value-preserving by construction (parse to exact decimal,
-re-render; unit tests assert re-parse equality) and `hledger print` output
-is byte-identical before and after (semantic tests plus a real-journal
-regression). In `add`, a typed amount is normalized at submit time, so the
+re-render; unit tests assert re-parse equality) and `hledger print` output is
+byte-identical before and after (semantic tests plus a real-journal
+regression) — with the one deliberate exception above: where a style is
+declared below the amounts it governs, `print` displays them styled and we
+leave them as written. Values still agree, which is what the semantic tests
+assert. In `add`, a typed amount is normalized at submit time, so the
 live preview and the written file agree; generated balancing amounts still
 pad to the style's decimal places, while typed amounts keep their typed
 precision — exactly what hledger does with such a file.
@@ -712,6 +734,11 @@ Verified with `hledger check accounts` / `check commodities`:
 
 A and D together are the whole story: same-file backward reference fails, but a
 declaration inside an include *does* survive into the parent's later content.
+
+This model governs **restyling** too, not just the strict-mode guard: a
+`commodity` style rewrites only the amounts written after it. That is the fix
+recorded in § Positional styles — the restyler used to collect styles in a
+pre-pass, which is exactly what test D and test E say hledger does not do.
 
 Note the direct contradiction with model 1 — round-1 test A and round-2 test A
 have identical layout (include at top, use later in parent) and opposite
@@ -1115,9 +1142,9 @@ Interactions:
 | Directive | Use | Scope |
 | --- | --- | --- |
 | `account` | completion pool (incl. accounts never used in a transaction); the set strict mode checks against | declaration — journal-wide, position-sensitive |
-| `commodity` | valid commodities; display style — decimal mark, digit grouping, decimal places, symbol placement and spacing | declaration — journal-wide, position-sensitive |
+| `commodity` | valid commodities; display style — decimal mark, digit grouping, decimal places, symbol placement and spacing | declaration — in effect from its own line onward, across includes |
 | `decimal-mark` | parsing and rendering of typed input | parse state — file-scoped, inherited by includes |
-| `D` | default commodity, surfaced as editable pre-filled text | parse state — file-scoped, inherited by includes |
+| `D` | default commodity (`fmt --explicit` writes it out; `add` takes its default from the configuration instead); display style for its own commodity; the decimal mark for reading an amount in any commodity that declares none | declaration — in effect from its own line onward, across includes |
 | `include` | file graph, nested, globs | — |
 
 None of them count inside a `comment` block — see § `comment` blocks are
