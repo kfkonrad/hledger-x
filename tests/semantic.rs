@@ -360,6 +360,13 @@ const INFERENCE_FIXTURES: &[(&str, &str)] = &[
         "default-commodity-applies",
         "D 1000.00 GBP\n\n2026-01-01 x\n    a  10\n    b\n",
     ),
+    // A single tab separates account from amount. Reading it as part of the
+    // account made the posting look amount-less, so a second amount was
+    // written beside the one already there.
+    (
+        "tab-separated-posting",
+        "2026-01-01 x\n    a:b\t1234 EUR\n    c:d  -1234 EUR\n",
+    ),
     (
         "default-commodity-is-positional",
         "2026-01-01 x\n    a  10\n    b\n\nD 1000.00 GBP\n",
