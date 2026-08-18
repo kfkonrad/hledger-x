@@ -95,22 +95,38 @@ pub fn split_comment(s: &str) -> (&str, Option<&str>) {
 
 /// Split a posting body into account and amount.
 ///
-/// The separator is the first run of two or more whitespace characters. A
-/// *single* space or tab is not a separator — account names may contain single
-/// spaces. No separator means the whole body is the account.
+/// The separator is the first run of two or more spaces, **or a single tab**.
+/// A single *space* is not a separator — account names may contain single
+/// spaces — but a tab always is, which is what hledger accepts (verified
+/// against 1.99). No separator means the whole body is the account.
+///
+/// The tab case matters more than it looks: reading `a:b\t1 EUR` as one long
+/// account name made the posting look amount-less, so `fmt --explicit` filled
+/// in a *second* amount beside the one already there and produced a file
+/// hledger refuses to parse.
 #[must_use]
 pub fn split_account_amount(s: &str) -> (&str, &str) {
     let is_sep = |c: char| c == ' ' || c == '\t';
-    let mut prev: Option<(usize, char)> = None;
+    // The start of the whitespace run being considered, and what it holds so
+    // far. The cut goes at the run's start, so a `space tab` run does not
+    // leave the space on the account.
+    let mut run: Option<(usize, usize, bool)> = None; // (start, len, has_tab)
     for (i, c) in s.char_indices() {
-        if let Some((pi, pc)) = prev {
-            if is_sep(pc) && is_sep(c) {
-                let account = s.get(..pi).unwrap_or_default();
-                let amount = s.get(pi..).unwrap_or_default().trim_start_matches(is_sep);
-                return (account, amount);
-            }
+        if !is_sep(c) {
+            run = None;
+            continue;
         }
-        prev = Some((i, c));
+        let (start, len, has_tab) = run.map_or((i, 0usize, false), |r| r);
+        let (len, has_tab) = (len.saturating_add(1), has_tab || c == '\t');
+        if len >= 2 || has_tab {
+            let account = s.get(..start).unwrap_or_default();
+            let amount = s
+                .get(start..)
+                .unwrap_or_default()
+                .trim_start_matches(is_sep);
+            return (account, amount);
+        }
+        run = Some((start, len, has_tab));
     }
     (s, "")
 }
@@ -359,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn account_amount_separator_is_two_or_more_spaces() {
+    fn account_amount_separator_is_two_spaces_or_a_tab() {
         assert_eq!(
             split_account_amount("Assets:Bank  100 USD"),
             ("Assets:Bank", "100 USD")
@@ -382,10 +398,20 @@ mod tests {
             split_account_amount("Assets:Checking \t100.00 USD"),
             ("Assets:Checking", "100.00 USD")
         );
-        // A single tab is not a separator either.
+        // A single tab *is* a separator — verified against hledger 1.99,
+        // which reads this as the account `Assets:Checking` holding 100 USD.
+        // This test used to assert the opposite, and the mistake was not
+        // cosmetic: the posting looked amount-less, so `fmt --explicit`
+        // wrote a second amount next to the one already there.
         assert_eq!(
             split_account_amount("Assets:Checking\t100.00 USD"),
-            ("Assets:Checking\t100.00 USD", "")
+            ("Assets:Checking", "100.00 USD")
+        );
+        // The cut goes at the start of the run, so a leading space in a
+        // `space tab` run does not stay on the account.
+        assert_eq!(
+            split_account_amount("Assets:Checking \t 100.00 USD"),
+            ("Assets:Checking", "100.00 USD")
         );
     }
 

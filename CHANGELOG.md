@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   commodity from the file. Spelling `D` out is `fmt --explicit`'s job now
 
 ### Fixed
+- A single tab between an account and its amount is now recognised as the separator, as hledger does. Such a posting
+  was read as one long account name with no amount at all, so it was never aligned — and `fmt --explicit` wrote a
+  second amount next to the one already there, producing a file hledger could not read
 - A posting's own status flag is no longer mistaken for part of its account name. `* (budget:food)` is again an
   unbalanced virtual posting rather than a real one — `fmt --explicit` was counting its amount into the wrong total and
   writing a balancing amount that left the transaction unbalanced — and `* assets:bank` is now recognised as
