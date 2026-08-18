@@ -325,6 +325,24 @@ const INFERENCE_FIXTURES: &[(&str, &str)] = &[
         "attached-assertion",
         "2026-01-01 x\n    a  10 USD =10USD\n    b\n",
     ),
+    // A space as the digit group mark: hledger honours it, and a number
+    // containing one is still a single amount.
+    (
+        "space-group-in-the-text",
+        "2026-01-01 x\n    a  1 234.00 USD\n    b\n",
+    ),
+    (
+        "space-group-mixed-widths",
+        "2026-01-01 x\n    a  1 234.00 USD\n    b  -50.00 USD\n    c\n",
+    ),
+    (
+        "unitless-space-group",
+        "2026-01-01 x\n    a  1 000\n    b\n",
+    ),
+    (
+        "unitless-comma-group",
+        "2026-01-01 x\n    a  1,000\n    b\n",
+    ),
 ];
 
 /// Fixtures where `--explicit` pads decimals out to a declared style. That is
@@ -340,6 +358,18 @@ const PADDING_FIXTURES: &[(&str, &str)] = &[
     (
         "padding-is-a-floor-not-a-ceiling",
         "commodity 1,000.00 EUR\n\n2026-01-01 x\n    a  4.0001 EUR\n    b\n",
+    ),
+    (
+        "space-group-declared",
+        "commodity 1 000.00 USD\n\n2026-01-01 x\n    a  1234567 USD\n    b\n",
+    ),
+    (
+        "space-group-symbol-first",
+        "commodity USD 1 000.00\n\n2026-01-01 x\n    a  USD 1234567\n    b\n",
+    ),
+    (
+        "space-group-attached-symbol",
+        "commodity 1 000.00\u{a3}\n\n2026-01-01 x\n    a  1234567\u{a3}\n    b\n",
     ),
     (
         "padding-reaches-cost-tails",

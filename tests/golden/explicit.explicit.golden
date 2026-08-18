@@ -21,7 +21,6 @@ commodity CHF
     format 1,000.000 CHF
 D 1,000.00 GBP
 
-; A space as the digit group mark is *not* supported — see the last section.
 commodity 1 000.00 USD
 
 ; ---------------------------------------------------------------------------
@@ -30,67 +29,67 @@ commodity 1 000.00 USD
 
 2026-01-01 one posting left blank
     ; the classic case: the remainder is worked out and written in
-    t01:expenses     1,234.00 EUR
-    t01:assets      -1,234.00 EUR
+    t01:expenses        1,234.00 EUR
+    t01:assets         -1,234.00 EUR
 
 2026-01-02 inferred through a unit cost
     ; the cost side is what balances, so the blank posting gets EUR
-    t02:broker         10.000 CHF @ 1.10 EUR
-    t02:assets         -11.00 EUR
+    t02:broker            10.000 CHF @ 1.10 EUR
+    t02:assets            -11.00 EUR
 
 2026-01-03 inferred through a total cost
-    t03:broker         10.000 CHF @@ 11.00 EUR
-    t03:assets         -11.00 EUR
+    t03:broker            10.000 CHF @@ 11.00 EUR
+    t03:assets            -11.00 EUR
 
 2026-01-04 a posting carrying only a balance assertion
     ; the amount goes in front of the assertion, which is left alone
-    t04:expenses        10.00 EUR
-    t04:assets         -10.00 EUR = -10.00 EUR
+    t04:expenses           10.00 EUR
+    t04:assets            -10.00 EUR = -10.00 EUR
 
 2026-01-05 all four assertion operators
     ; =, ==, =* and ==* all leave the posting's contribution alone
-    t05:a               10.00 EUR = 10.00 EUR
-    t05:b               10.00 EUR == 10.00 EUR
-    t05:c               10.00 EUR =* 10.00 EUR
-    t05:d               10.00 EUR ==* 10.00 EUR
-    t05:equity         -40.00 EUR
+    t05:a                  10.00 EUR = 10.00 EUR
+    t05:b                  10.00 EUR == 10.00 EUR
+    t05:c                  10.00 EUR =* 10.00 EUR
+    t05:d                  10.00 EUR ==* 10.00 EUR
+    t05:equity            -40.00 EUR
 
 2026-01-06 a cost with its amount attached
     ; `@1.1EUR` is one token, not three
-    t06:broker         10.000 CHF @ 1.10 EUR
-    t06:assets         -11.00 EUR
+    t06:broker            10.000 CHF @ 1.10 EUR
+    t06:assets            -11.00 EUR
 
 2026-01-07 an assertion with its amount attached
-    t07:expenses        10.00 EUR
-    t07:assets         -10.00 EUR = -10.00 EUR
+    t07:expenses           10.00 EUR
+    t07:assets            -10.00 EUR = -10.00 EUR
 
 2026-01-08 everything already balances
     ; the remainder is zero, and an explicit zero is still written
-    t08:expenses        10.00 EUR
-    t08:assets         -10.00 EUR
-    t08:rounding         0.00 EUR
+    t08:expenses           10.00 EUR
+    t08:assets            -10.00 EUR
+    t08:rounding            0.00 EUR
 
 2026-01-09 a remainder spanning two commodities
     ; the blank posting becomes one posting per commodity
-    t09:broker          10.00 EUR
-    t09:broker          10.00 GBP
-    t09:assets         -10.00 EUR
-    t09:assets         -10.00 GBP
+    t09:broker             10.00 EUR
+    t09:broker             10.00 GBP
+    t09:assets            -10.00 EUR
+    t09:assets            -10.00 GBP
 
 2026-01-10 the three posting kinds balance separately
     ; (...) contributes to nothing; [...] balances among its own kind
-    t10:expenses        10.00 EUR
-    (t10:budget)        10.00 EUR
-    t10:assets         -10.00 EUR
-    [t10:tracked]        4.00 EUR
-    [t10:mirror]        -4.00 EUR
+    t10:expenses           10.00 EUR
+    (t10:budget)           10.00 EUR
+    t10:assets            -10.00 EUR
+    [t10:tracked]           4.00 EUR
+    [t10:mirror]           -4.00 EUR
 
 2026-01-11 unitless amounts stay unitless
     ; a commodity is never inferred, so the filled-in amount has none either.
     ; note that the `D` directive above makes hledger *read* a bare amount as
     ; GBP — that is hledger applying a default, not hledger-x writing one
-    t11:steps           10000
-    t11:balance        -10000
+    t11:steps              10000
+    t11:balance           -10000
 
 ; ---------------------------------------------------------------------------
 ; Padding to the commodity's declared decimal places. `fmt` on its own never
@@ -98,40 +97,52 @@ commodity 1 000.00 USD
 ; ---------------------------------------------------------------------------
 
 2026-02-01 a declared right-side style
-    t21:expenses     1,234.00 EUR
-    t21:assets      -1,234.00 EUR
+    t21:expenses        1,234.00 EUR
+    t21:assets         -1,234.00 EUR
 
 2026-02-02 a declared attached-left style
-    t22:expenses    $1,234.00
-    t22:assets     $-1,234.00
+    t22:expenses       $1,234.00
+    t22:assets        $-1,234.00
 
 2026-02-03 the sign written before the symbol
     ; `-$1234` and `$-1234` are one commodity, and both render hledger's way
-    t23:expenses   $-1,234.00
-    t23:assets      $1,234.00
+    t23:expenses      $-1,234.00
+    t23:assets         $1,234.00
 
 2026-02-04 an underscore as the digit group mark
-    t24:expenses     1_234.00 SEK
-    t24:assets      -1_234.00 SEK
+    t24:expenses        1_234.00 SEK
+    t24:assets         -1_234.00 SEK
 
 2026-02-05 a style declared by a `format` subdirective
-    t25:expenses    1,234.000 CHF
-    t25:assets     -1,234.000 CHF
+    t25:expenses       1,234.000 CHF
+    t25:assets        -1,234.000 CHF
 
 2026-02-06 a style declared by `D`
-    t26:expenses     1,234.00 GBP
-    t26:assets      -1,234.00 GBP
+    t26:expenses        1,234.00 GBP
+    t26:assets         -1,234.00 GBP
 
 2026-02-07 costs and assertions are padded too
     ; both sides of the `@`, and the assertion's own amount
-    t27:broker         10.000 CHF @ 1.10 EUR
-    t27:assets         -11.00 EUR = -11.00 EUR
+    t27:broker            10.000 CHF @ 1.10 EUR
+    t27:assets            -11.00 EUR = -11.00 EUR
+
+2026-02-09 a space as the digit group mark
+    ; a space between digit groups is part of the number, not the boundary
+    ; with the commodity — `1 234.00 USD` is one amount
+    t29:expenses    1 234 567.00 USD
+    t29:assets     -1 234 567.00 USD
+
+2026-02-10 a space-grouped amount already in the journal
+    ; and it lines up with an ungrouped one in the same column
+    t30:expenses        1 234.00 USD
+    t30:assets            -50.00 USD
+    t30:rest           -1 184.00 USD
 
 2026-02-08 more precision than declared is kept
     ; the declared places are a floor, never a ceiling: rounding would lose
     ; value, so 4.0001 is left exactly as written
-    t28:expenses       4.0001 EUR
-    t28:assets        -4.0001 EUR
+    t28:expenses          4.0001 EUR
+    t28:assets           -4.0001 EUR
 
 ; ---------------------------------------------------------------------------
 ; Commodities with no directive. Nothing is padded — but an amount that has to
@@ -140,28 +151,35 @@ commodity 1 000.00 USD
 ; ---------------------------------------------------------------------------
 
 2026-03-01 undeclared, symbol on the right with a space
-    t31:crypto            0.5 BTC
-    t31:equity           -0.5 BTC
+    t31:crypto               0.5 BTC
+    t31:equity              -0.5 BTC
 
 2026-03-02 undeclared, symbol attached on the left
-    t32:expenses         Kc10
-    t32:assets          Kc-10
+    t32:expenses            Kc10
+    t32:assets             Kc-10
 
 2026-03-03 undeclared, symbol attached on the right
-    t33:expenses        10sat
-    t33:assets         -10sat
+    t33:expenses           10sat
+    t33:assets            -10sat
 
 2026-03-04 undeclared, symbol first
-    t34:expenses       NOK 10
-    t34:assets        NOK -10
+    t34:expenses          NOK 10
+    t34:assets           NOK -10
 
 2026-03-05 typed digit grouping is carried into the generated amount
-    t35:expenses     1,234.50 JPY
-    t35:assets      -1,234.50 JPY
+    t35:expenses        1,234.50 JPY
+    t35:assets         -1,234.50 JPY
 
 2026-03-06 the style may come from a cost tail rather than a face
-    t36:broker             10 DKK @ Kc1.1
-    t36:assets        Kc-11.0
+    t36:broker                10 DKK @ Kc1.1
+    t36:assets           Kc-11.0
+
+2026-03-07 a unitless amount keeps the grouping it was written with
+    ; no commodity to declare a style, so the sibling's own notation is
+    ; copied — answering `1 000` with a bare `-1000` read as badly as
+    ; answering `$10` with `-10 $`
+    t37:steps              1 000
+    t37:balance           -1 000
 
 ; ---------------------------------------------------------------------------
 ; Deliberately left alone.
@@ -169,22 +187,15 @@ commodity 1 000.00 USD
 
 2026-04-01 an undeclared commodity is never padded
     ; `1 PLN` stays `1 PLN`; only a declared style says what "filled out" means
-    t41:expenses            1 PLN
-    t41:assets             -1 PLN
+    t41:expenses               1 PLN
+    t41:assets                -1 PLN
 
-2026-04-02 a space as the digit group mark is not supported
-    ; `commodity 1 000.00 USD` above declares one. hledger honours it and
-    ; prints `1 234. USD`; hledger-x does not read that declaration, so these
-    ; amounts pass through untouched rather than being rewritten wrongly
-    t42:expenses         1234 USD
-    t42:assets          -1234 USD
-
-2026-04-03 lot notation is not understood
+2026-04-02 lot notation is not understood
     ; hledger would fill `$-50` here from the lot cost. hledger-x cannot read
     ; `{...}`, so the amount does not parse and the whole transaction is left
     ; as it stands rather than guessed at
-    t43:shares             10 AAPL {$5}
-    t43:cash
+    t42:shares                10 AAPL {$5}
+    t42:cash
 
 ~ monthly  rent
     ; a periodic rule is not a transaction, and is never touched

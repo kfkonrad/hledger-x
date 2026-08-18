@@ -461,15 +461,35 @@ including the cases deliberately left alone, so a future fix shows up as a
 visible golden change rather than a silent one. It is valid hledger, so
 `hledger print -x` can be run against it directly.
 
-**Known gap: a space as the digit group mark.** `commodity 1 000.00 USD` is
-valid and hledger honours it; `style_from_sample` splits its sample on
-whitespace and so reads nothing. Amounts of such a commodity are therefore
-never restyled or padded — they pass through byte-for-byte, which is the safe
-failure. Closing it means teaching `split_amount` that a space inside a number
-is not the account/amount separator, which is the core of `fmt`'s line layout;
-that is a bigger change than it looks and is not worth making speculatively.
-Note we already handle such amounts *safely* when they appear in a posting
-(verified: they align correctly and hledger reads the result back unchanged).
+**A space as the digit group mark** (2026-08-18, with the user). hledger
+accepts `1 234.00 USD` and honours `commodity 1 000.00 USD`; we read neither,
+and the consequence was worse than "unsupported". `split_amount` encodes
+`fmt`'s model — first whitespace token is the number, second is the commodity
+— so `1 234.00 USD` parsed as the number `1` with a commodity `234.00`, and
+such amounts came out *misaligned* whenever their widths differed. Values were
+never wrong, but the column was.
+
+Both halves had to land together: reading the declaration alone would have had
+us emitting space-grouped numbers we then mis-parse, spreading the
+misalignment to amounts we wrote ourselves.
+
+The disambiguation is exact, not heuristic: an unquoted hledger commodity
+symbol cannot contain a digit, so a token following a number that *starts*
+with a digit can only be the rest of that number. `lex::is_digit_group` is
+therefore just "begins with a digit", deliberately unconstrained after that so
+the last group may carry an attached symbol (`1 234 567.00£`). Anything that
+then fails to parse simply does not restyle — the same safe outcome as any
+other unreadable amount. `style_from_sample` was rewritten to find the number
+as the span between the first and last digit rather than by counting
+whitespace tokens, which also made the symbol-side and spacing rules fall out
+uniformly for every placement.
+
+**Unitless amounts copy their sibling's notation too.** A commodity-less
+amount has no declaration to consult, and the fallback answered `1 000` with a
+bare `-1000` and `1,000` with `-1.000` — the second saying something different
+in the author's notation, and only surviving because hledger happened to
+resolve it back. `style_from_amounts` now samples the bare number's own
+grouping and decimal mark when the commodity is empty.
 
 **Known gap: lot notation.** `10 AAPL {$5}` carries a lot cost that hledger
 balances against (`print -x` fills `$-50`); we read the `{...}` token as an

@@ -110,9 +110,14 @@ What it deliberately does *not* do:
 
 - It never infers a conversion cost. `hledger print -x` turns `10 EUR` / `-11 USD` into `10 EUR @@ 11 USD`; that is a
   claim about the transaction rather than a value already implied by it, so `fmt` leaves it out.
+- Lot notation (`10 AAPL {$5}`) is not read, so a transaction using one is passed through rather than balanced from
+  the lot cost.
 - It never guesses. A transaction with two amount-less postings, an amount that does not parse, or a periodic (`~`) or
   auto (`=`) rule is passed through untouched — `fmt` is not a validator, and a wrong amount would be far worse than
   no amount.
+
+When a commodity has no `commodity` directive, padding simply does not apply, and an amount that has to be generated
+copies the notation of the posting it balances — including a unitless one, so `1 000` balances with `-1 000`.
 
 `tests/golden/explicit.in.ledger` is a reference journal with one annotated transaction per case, if you want to see
 all of this at once — including what is deliberately left alone. It is valid hledger, so
