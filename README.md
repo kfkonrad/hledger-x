@@ -62,6 +62,10 @@ the configured `sort`.
 Alignment is computed file-wide, so one long account name or number reflows every posting in the file — expect
 occasional diffs much larger than the edit.
 
+The postings of `~` (periodic) and `=` (auto posting) rules are indented and aligned with everything else, but nothing
+more is done to them: a rule is not a transaction, so no amount in one is padded, restyled or filled in, and a `*2`
+multiplier is only lined up. The rule's own header line passes through untouched.
+
 A `comment` … `end comment` block is opaque. Its contents are prose, not journal syntax, so nothing in it is
 reformatted, restyled, re-spaced or reordered — the lines pass through byte-for-byte — and nothing in it counts towards
 the alignment columns. Declarations inside a block declare nothing, and an `include` inside one is not followed, which

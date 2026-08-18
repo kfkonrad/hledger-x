@@ -238,14 +238,15 @@ D 1,000.00 GBP
     t42:cash
 
 ~ monthly  rent
-    ; a periodic rule is not a transaction, and is never touched
-    t51:expenses  1234 EUR
+    ; a periodic rule's postings are laid out like any others, but a rule is
+    ; not a transaction: nothing in it is balanced, filled in or restyled
+    t51:expenses              1234 EUR
     t51:assets
 
 = t52:expenses
-    ; an auto-posting rule is not a transaction either, and its `*2`
-    ; multiplier is not an amount
-    (t52:budget)  *2
+    ; an auto-posting rule is not a transaction either. Its `*2` is a
+    ; multiplier rather than an amount, and is only right-aligned
+    (t52:budget)                *2
 
 comment
 A comment block is prose, not journal syntax. Nothing in here is filled in,

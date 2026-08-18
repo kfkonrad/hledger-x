@@ -200,7 +200,9 @@ fn apply(ps: &[Posting], filled: &[String]) -> Vec<Posting> {
 const fn postings_of(c: &Class) -> &[Posting] {
     match c {
         Class::Post(ps) => ps.as_slice(),
-        Class::Other | Class::Opaque => &[],
+        // A rule is not a transaction and nothing in it balances, so its
+        // postings are invisible here even though they are laid out.
+        Class::Rule(_) | Class::Other | Class::Opaque => &[],
     }
 }
 

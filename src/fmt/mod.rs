@@ -30,7 +30,7 @@ pub mod sort;
 use crate::amount::{style_from_sample, AmountCtx, Places};
 use crate::lex::{
     closes_comment_block, directive_arg, is_blank, is_indented_non_blank, opens_comment_block,
-    opens_txn, rstrip,
+    opens_rule, opens_txn, rstrip,
 };
 use posting::{account_of, parse_posting, render, restyle_with, Posting};
 
@@ -270,6 +270,11 @@ enum Class {
     /// an inferred amount that spans commodities turns the line into several,
     /// which is what `hledger print -x` does with the same input.
     Post(Vec<Posting>),
+    /// A posting of a periodic (`~`) or auto (`=`) rule: laid out to the same
+    /// columns as everything else, but never restyled and never filled in.
+    /// A rule is not a transaction — its amounts may be multipliers (`*2`)
+    /// rather than amounts at all, and nothing in it has to balance.
+    Rule(Posting),
     /// Anything else the formatter may touch — see [`format_other`].
     Other,
     /// A line inside a `comment` block, or one of its delimiters: passed
@@ -281,6 +286,7 @@ enum Class {
 fn widths_of(styled: &[Class]) -> (usize, usize) {
     let posts = styled.iter().flat_map(|c| match c {
         Class::Post(ps) => ps.as_slice(),
+        Class::Rule(p) => std::slice::from_ref(p),
         Class::Other | Class::Opaque => &[],
     });
     let acc_w = posts
@@ -310,6 +316,7 @@ fn widths_of(styled: &[Class]) -> (usize, usize) {
 fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
     let mut cur = ctx.clone();
     let mut in_txn = false;
+    let mut in_rule = false;
     let mut opaque = false;
     let mut out: Vec<Class> = Vec::with_capacity(ls.len());
     // Where the posting run of the transaction being classified starts, and
@@ -323,8 +330,11 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
         } else if opens_comment_block(l) {
             opaque = true;
             in_txn = false;
+            in_rule = false;
             close_txn(&mut out, &mut txn, opts);
             out.push(Class::Opaque);
+        } else if in_rule && is_indented_non_blank(l) {
+            out.push(Class::Rule(parse_posting(l)));
         } else if in_txn && is_indented_non_blank(l) {
             out.push(Class::Post(vec![restyle_with(
                 parse_posting(l),
@@ -351,6 +361,7 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
             close_txn(&mut out, &mut txn, opts);
             out.push(Class::Other);
             in_txn = opens_txn(l);
+            in_rule = opens_rule(l);
             if in_txn {
                 txn = Some((out.len(), cur.clone()));
             }
@@ -382,6 +393,7 @@ fn format_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<String> {
         .zip(styled)
         .flat_map(|(l, c)| match c {
             Class::Post(ps) => ps.iter().map(|p| render(acc_w, num_w, p)).collect(),
+            Class::Rule(p) => vec![render(acc_w, num_w, &p)],
             Class::Other => vec![format_other(l)],
             Class::Opaque => vec![(*l).to_owned()],
         })
@@ -838,8 +850,23 @@ mod tests {
     }
 
     #[test]
-    fn explicit_never_touches_periodic_or_auto_transactions() {
-        let src = "~ monthly\n    a  10 EUR\n    b\n\n= a\n    c  *2\n    d\n";
+    fn rule_postings_are_laid_out_but_never_balanced_or_restyled() {
+        // A `~` or `=` rule is not a transaction: hledger only expands one
+        // under --forecast / --auto. Its postings join the file's alignment
+        // columns, and nothing else happens to them — no amount is filled in,
+        // and the `*2` multiplier is left exactly as written even though a
+        // declared style is in scope.
+        let src = "commodity 1_000.00 EUR\n\n~ monthly  rent\n  a\t\t1234 EUR\n     b\n\n= a\n   (c)  *2\n";
+        assert_eq!(
+            explicit(src),
+            "commodity 1_000.00 EUR\n\n~ monthly  rent\n    a    1234 EUR\n    b\n\n= a\n    (c)    *2\n"
+        );
+    }
+
+    #[test]
+    fn a_rule_header_passes_through_verbatim() {
+        // The two spaces before a periodic rule's description are syntax.
+        let src = "~ monthly  rent\n    a  1 EUR\n";
         assert_eq!(explicit(src), src);
     }
 

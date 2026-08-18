@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   `10.00 GBP` under `D 1,000.00 GBP`. `D` applies from its own line onward, so amounts above it are left alone
 
 ### Changed
+- `fmt`: the postings of `~` (periodic) and `=` (auto posting) rules are now indented and aligned like every other
+  posting, instead of being left exactly as typed. Nothing else about them changes — a rule is not a transaction, so no
+  amount in one is padded, restyled or filled in, and a `*2` multiplier is only lined up
 - `add`: the default commodity now comes from `add.default_commodity` in the configuration only. It used to be taken
   from the journal's `D` directive when there was one, which meant a bare amount you typed could silently pick up a
   commodity from the file. Spelling `D` out is `fmt --explicit`'s job now
