@@ -105,7 +105,9 @@ pub fn style_from_sample(sample: &str) -> Option<(String, DisplayStyle)> {
             let tail: String = t.get(num_end.saturating_add(1)..).unwrap_or("").to_owned();
             // The number part may carry marks *inside* digits_on only; a
             // leading sign belongs to the number, not the symbol.
-            let symbol_left = head.trim_start_matches(['+', '-']).to_owned();
+            // The sign belongs to the number on either side of the symbol:
+            // both `-$10` and `$-10` sample the commodity `$`.
+            let symbol_left = head.trim_matches(['+', '-']).to_owned();
             if !symbol_left.is_empty() {
                 let style = style_of_number(digits_on, Side::Left, false, &symbol_left)?;
                 return Some((symbol_left, style));
@@ -329,7 +331,13 @@ fn detach_symbol(tok: &str) -> (String, String) {
     let leading: String = body.chars().take_while(|c| !is_numchar(*c)).collect();
     if !leading.is_empty() {
         let rest: String = body.chars().skip(leading.chars().count()).collect();
-        return (format!("{sign}{rest}"), leading);
+        // A sign may sit *between* a left-side symbol and its digits: `$-10`
+        // is how hledger writes a negative dollar amount, and it is one
+        // commodity `$`, not a commodity `$-` (verified against 1.99). The
+        // sign belongs to the number wherever it was written.
+        let symbol = leading.trim_end_matches(['+', '-']);
+        let inner: String = leading.chars().skip(symbol.chars().count()).collect();
+        return (format!("{sign}{inner}{rest}"), symbol.to_owned());
     }
     let trailing: String = body
         .chars()
@@ -360,21 +368,34 @@ fn cost_contribution(
     rest: &[&str],
     ctx: &AmountCtx,
 ) -> Option<(Decimal, String)> {
-    let mut it = rest.iter();
-    let Some(op) = it.next() else {
+    let Some(first) = rest.first() else {
         return Some((value, commodity.to_owned()));
     };
-    if *op == "=" || *op == "==" {
+    // The operator may have its amount attached (`@1.1EUR`, `=5USD`), so it
+    // is a prefix of the token rather than the whole of it. Matched against
+    // the shared [`OPS`] list, longest first — hledger has four assertion
+    // operators, not two, and reading `=*` as an unknown tail used to make
+    // the whole amount unparseable.
+    let op = OPS.iter().find(|o| first.starts_with(**o))?;
+    // A balance assertion says what the account holds afterwards; it does
+    // not change what this posting contributes.
+    if op.starts_with('=') {
         return Some((value, commodity.to_owned()));
     }
-    if *op != "@" && *op != "@@" {
-        return None;
-    }
-    // The price: a number token and optional commodity, up to a further tail.
-    let price_toks: Vec<&str> = it
-        .take_while(|t| !t.starts_with('=') && !t.starts_with('@'))
-        .copied()
-        .collect();
+    // The price: the operator's attached operand, if any, then tokens up to
+    // a further tail.
+    let attached = first.get(op.len()..).unwrap_or("");
+    let mut price_toks: Vec<&str> = if attached.is_empty() {
+        Vec::new()
+    } else {
+        vec![attached]
+    };
+    price_toks.extend(
+        rest.iter()
+            .skip(1)
+            .take_while(|t| !crate::lex::is_rest_start(t))
+            .copied(),
+    );
     let (num_field, price_commodity, _r) = split_amount(&price_toks);
     let (price, price_commodity) = parse_face(&num_field, &price_commodity, ctx)?;
     let contributed = if *op == "@" {
@@ -484,9 +505,68 @@ pub fn equity_conversions(amounts: &[&str], ctx: &AmountCtx) -> Vec<String> {
     sums.into_iter()
         .filter_map(|(commodity, value)| {
             let negated = Decimal::ZERO.checked_sub(value)?;
-            Some(render_amount(negated, &commodity, ctx))
+            Some(render_amount_like(negated, &commodity, ctx, amounts))
         })
         .collect()
+}
+
+/// The cost and assertion operators, longest first so a prefix match picks
+/// the right one.
+const OPS: [&str; 6] = ["==*", "=*", "==", "=", "@@", "@"];
+
+/// Split an amount field into the amount samples it contains: the face, and
+/// each amount in its cost/assertion tail. `10 EUR @ 1.1 USD` yields
+/// `["10 EUR", "1.1 USD"]`, and an amount attached to its operator (`=5EUR`)
+/// joins that operator's group.
+fn amount_groups(text: &str) -> Vec<String> {
+    let mut groups: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for tok in text.split_whitespace() {
+        if !crate::lex::is_rest_start(tok) {
+            cur.push(tok);
+            continue;
+        }
+        if !cur.is_empty() {
+            groups.push(cur.join(" "));
+            cur = Vec::new();
+        }
+        if let Some(op) = OPS.iter().find(|o| tok.starts_with(**o)) {
+            let attached = tok.get(op.len()..).unwrap_or("");
+            if !attached.is_empty() {
+                cur.push(attached);
+            }
+        }
+    }
+    if !cur.is_empty() {
+        groups.push(cur.join(" "));
+    }
+    groups
+}
+
+/// Learn a display style for `commodity` from amounts as they are written
+/// nearby — the other postings of the transaction being balanced.
+///
+/// The first amount in that commodity wins, matching how hledger picks up a
+/// style from the first amount it sees. `None` for a unitless amount, for a
+/// commodity that appears in none of the samples, and for anything that does
+/// not parse.
+///
+/// This is **not** the journal-wide style inference `DESIGN.md` rules out.
+/// That rule protects amounts a person wrote from being reflowed by someone
+/// else's sloppy entry; nothing here restyles an existing amount. It only
+/// decides how to render an amount we are creating from nothing, where the
+/// alternative is not "leave it alone" but a hardcoded guess.
+#[must_use]
+pub fn style_from_amounts(amounts: &[&str], commodity: &str) -> Option<DisplayStyle> {
+    if commodity.is_empty() {
+        return None;
+    }
+    amounts
+        .iter()
+        .flat_map(|t| amount_groups(t))
+        .filter_map(|g| style_from_sample(&g))
+        .find(|(name, _)| name == commodity)
+        .map(|(_, style)| style)
 }
 
 /// Render a value in a commodity's declared style — or, absent a declared
@@ -498,15 +578,38 @@ pub fn equity_conversions(amounts: &[&str], ctx: &AmountCtx) -> Vec<String> {
 /// round it.
 #[must_use]
 pub fn render_amount(value: Decimal, commodity: &str, ctx: &AmountCtx) -> String {
-    let style = ctx.styles.get(commodity).map_or_else(
-        || DisplayStyle {
-            decimal_mark: ctx.decimal_mark.unwrap_or('.'),
-            group_sep: None,
-            decimal_places: value.scale(),
-            ..DisplayStyle::default()
-        },
-        |s| effective_style(s, ctx),
-    );
+    render_amount_like(value, commodity, ctx, &[])
+}
+
+/// [`render_amount`], falling back to the style of the amounts it is
+/// balancing against when the commodity declares none.
+///
+/// A generated amount has to be rendered *somehow*, and a hardcoded guess
+/// puts `$10` and `-10 $` side by side in one transaction. So when no
+/// `commodity` directive settles it, the sibling postings do: `$10` balances
+/// with `$-10`, `10€` with `-10€`, and a typed `1,234.50` keeps its digit
+/// grouping. A declared style still wins over anything observed.
+#[must_use]
+pub fn render_amount_like(
+    value: Decimal,
+    commodity: &str,
+    ctx: &AmountCtx,
+    siblings: &[&str],
+) -> String {
+    let style = ctx
+        .styles
+        .get(commodity)
+        .cloned()
+        .or_else(|| style_from_amounts(siblings, commodity))
+        .map_or_else(
+            || DisplayStyle {
+                decimal_mark: ctx.decimal_mark.unwrap_or('.'),
+                group_sep: None,
+                decimal_places: value.scale(),
+                ..DisplayStyle::default()
+            },
+            |s| effective_style(&s, ctx),
+        );
     // `value` is computed, so its scale is an artefact of the arithmetic that
     // produced it: 10.00 × 1.105 lands at scale 5 and would print
     // `11.05000`. Trailing zeros carry no information here — unlike in text a
@@ -702,7 +805,6 @@ pub fn restyle_tail(rest: &[&str], ctx: &AmountCtx) -> Vec<String> {
 /// [`restyle_tail`] with an explicit precision policy.
 #[must_use]
 pub fn restyle_tail_with(rest: &[&str], ctx: &AmountCtx, places: Places) -> Vec<String> {
-    const OPS: [&str; 6] = ["==*", "=*", "==", "=", "@@", "@"];
     let mut out: Vec<String> = Vec::new();
     let mut i = 0usize;
     while let Some(tok) = rest.get(i) {
@@ -817,6 +919,60 @@ fn group_digits(digits: &str, sep: char, sizes: &[usize]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_four_assertion_operators_leave_the_contribution_alone() {
+        // hledger has `=`, `==` and their subaccount-inclusive `=*`/`==*`
+        // forms (verified against 1.99). Reading `=*` as an unknown tail used
+        // to make the whole amount unparseable, which silently blocked
+        // `fmt --explicit` from filling in the other posting and made `add`
+        // report the imbalance as unknown.
+        let ctx = AmountCtx::default();
+        for tail in ["= 10 USD", "== 10 USD", "=* 10 USD", "==* 10 USD"] {
+            let text = format!("10 USD {tail}");
+            let parsed = parse_amount(&text, &ctx).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(parsed.contributes.0, Decimal::from(10), "{text}");
+            assert_eq!(parsed.contributes.1, "USD", "{text}");
+        }
+    }
+
+    #[test]
+    fn an_operator_with_its_amount_attached_still_parses() {
+        // `@1.1EUR` is one token. It used to parse only by luck, when
+        // restyling happened to split it first — which needs a declared
+        // style, so an undeclared commodity fell through the gap.
+        let ctx = AmountCtx::default();
+        let parsed = parse_amount("10 USD @1.1EUR", &ctx).unwrap();
+        assert_eq!(parsed.contributes, (Decimal::new(11, 0), "EUR".to_owned()));
+        let parsed = parse_amount("10 USD @@13EUR", &ctx).unwrap();
+        assert_eq!(parsed.contributes, (Decimal::from(13), "EUR".to_owned()));
+        let parsed = parse_amount("10 USD =10USD", &ctx).unwrap();
+        assert_eq!(parsed.contributes, (Decimal::from(10), "USD".to_owned()));
+    }
+
+    #[test]
+    fn a_sign_between_symbol_and_digits_belongs_to_the_number() {
+        // `$-10` is how hledger writes a negative dollar amount: one
+        // commodity `$`, not a commodity `$-` (verified against 1.99).
+        assert_eq!(detach_symbol("$-10"), ("-10".to_owned(), "$".to_owned()));
+        assert_eq!(detach_symbol("-$10"), ("-10".to_owned(), "$".to_owned()));
+        assert_eq!(detach_symbol("$+10"), ("+10".to_owned(), "$".to_owned()));
+        assert_eq!(detach_symbol("$10"), ("10".to_owned(), "$".to_owned()));
+        assert_eq!(detach_symbol("10€"), ("10".to_owned(), "€".to_owned()));
+        assert_eq!(detach_symbol("-10€"), ("-10".to_owned(), "€".to_owned()));
+
+        // So the two forms sum as one commodity rather than cancelling into
+        // two bogus ones.
+        let ctx = AmountCtx::default();
+        assert_eq!(
+            balance(&["$10", "$-10"], &ctx),
+            Some(vec![("$".to_owned(), Decimal::ZERO)])
+        );
+        assert_eq!(
+            style_from_sample("$-10").map(|(name, _)| name),
+            Some("$".to_owned())
+        );
+    }
 
     fn dec(s: &str) -> Decimal {
         s.parse().unwrap()

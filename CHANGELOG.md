@@ -15,6 +15,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   work out on its own — two postings missing an amount, an amount it cannot read, a `~` or `=` rule — are left exactly
   as they are
 
+### Fixed
+- `fmt`/`add`: a cost written with its amount attached to the operator (`@1.1EUR`) is now understood. Before, a posting
+  using one was treated as unreadable
+- Balance assertions written `=*` or `==*`, and a cost or assertion with its amount written right up against the
+  operator (`@1.1EUR`, `=10USD`), are now understood. Before, a posting using any of these forms was treated as
+  unreadable: `add` reported the imbalance as unknown, and `fmt --explicit` quietly declined to fill in the other
+  posting's amount
+- A negative amount written the way hledger writes it, with the sign between the symbol and the digits (`$-10`), is no
+  longer read as a separate commodity from `$10`. This made `add` report an imbalance on a transaction that balanced
+  fine
+- `add`: a calculated balancing amount is now written the way the postings it balances are written. Entering `$10`
+  gives you `$-10` rather than `-10 $`, `10€` gives `-10€`, and a typed `1,234.50 USD` keeps its digit grouping. A
+  `commodity` directive, where you have one, still decides
+
 ## [0.2.0] - 2026-08-17
 
 ### Fixed

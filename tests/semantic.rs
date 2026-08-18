@@ -42,16 +42,41 @@ fn hledger_print_explicit(path: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The commodities hledger finds in a journal.
+fn hledger_commodities(path: &Path) -> Vec<String> {
+    Command::new("hledger")
+        .args(["commodities", "-f"])
+        .arg(path)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `hledger balance`: every account's total. Padding an amount to its
 /// declared decimal places changes what `print` emits by design, so
 /// `--explicit` is held to the stronger and more meaningful question — did
 /// any *value* move?
+///
+/// Every commodity's display style is pinned with `-c` first. hledger derives
+/// a commodity's report precision from the amounts it finds in the journal,
+/// so writing one full-precision inferred amount silently grows the decimals
+/// of *every* amount in that commodity — which reads as a value change in the
+/// output and is nothing of the kind. Pinning the style removes that
+/// confound and leaves the question the oracle is actually asking.
 fn hledger_balance(path: &Path) -> Option<String> {
-    let out = Command::new("hledger")
-        .args(["balance", "--no-total", "-f"])
-        .arg(path)
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("hledger");
+    cmd.args(["balance", "--no-total", "-f"]).arg(path);
+    for c in hledger_commodities(path) {
+        cmd.arg("-c").arg(format!("{c} 1000.00000000"));
+    }
+    let out = cmd.output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -244,6 +269,62 @@ const INFERENCE_FIXTURES: &[(&str, &str)] = &[
         "2026-01-01 x\n    a  10 EUR\n    b  -10 EUR\n    [v]  3 EUR\n    [w]\n",
     ),
     ("unitless", "2026-01-01 x\n    a  10\n    b\n"),
+    // No `commodity` directive settles these, so the style of the generated
+    // amount comes from the postings it balances against. `print -x` is still
+    // the oracle: it makes the same choice.
+    ("attached-left-symbol", "2026-01-01 x\n    a  $10\n    b\n"),
+    (
+        "sign-between-symbol-and-digits",
+        "2026-01-01 x\n    a  $-10\n    b\n",
+    ),
+    (
+        "attached-right-symbol",
+        "2026-01-01 x\n    a  10\u{20ac}\n    b\n",
+    ),
+    ("symbol-first", "2026-01-01 x\n    a  USD 10\n    b\n"),
+    (
+        "typed-digit-grouping",
+        "2026-01-01 x\n    a  1,234.50 USD\n    b\n",
+    ),
+    (
+        "zero-remainder-keeps-the-style",
+        "2026-01-01 x\n    a  $10\n    b  $-10\n    c\n",
+    ),
+    (
+        "style-from-a-cost-tail",
+        "2026-01-01 x\n    a  10 EUR @ $1.1\n    b\n",
+    ),
+    // All four assertion operators, and operators with their amount attached.
+    // Each of these used to leave the whole amount unparseable, so nothing
+    // was filled in at all.
+    (
+        "assertion-eq",
+        "2026-01-01 x\n    a  10 USD = 10 USD\n    b\n",
+    ),
+    (
+        "assertion-eqeq",
+        "2026-01-01 x\n    a  10 USD == 10 USD\n    b\n",
+    ),
+    (
+        "assertion-subaccount",
+        "2026-01-01 x\n    a  10 USD =* 10 USD\n    b\n",
+    ),
+    (
+        "assertion-subaccount-strict",
+        "2026-01-01 x\n    a  10 USD ==* 10 USD\n    b\n",
+    ),
+    (
+        "attached-cost",
+        "2026-01-01 x\n    a  10 USD @1.1EUR\n    b\n",
+    ),
+    (
+        "attached-total-cost",
+        "2026-01-01 x\n    a  10 USD @@13EUR\n    b\n",
+    ),
+    (
+        "attached-assertion",
+        "2026-01-01 x\n    a  10 USD =10USD\n    b\n",
+    ),
 ];
 
 /// Fixtures where `--explicit` pads decimals out to a declared style. That is

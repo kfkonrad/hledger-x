@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
 use super::write::NewTransaction;
-use crate::amount::{imbalance, parse_amount, render_amount, AmountCtx};
+use crate::amount::{imbalance, parse_amount, render_amount_like, AmountCtx};
 use crate::config::{Completion, Config};
 use crate::fmt::posting::{parse_posting, render};
 
@@ -647,7 +647,14 @@ impl Session {
         } else {
             commodity.clone()
         };
-        Some(render_amount(negated, &commodity, &self.ctx.amount_ctx))
+        // The other postings settle how this commodity is written when no
+        // `commodity` directive does, so `$10` balances with `$-10`.
+        Some(render_amount_like(
+            negated,
+            &commodity,
+            &self.ctx.amount_ctx,
+            &amounts,
+        ))
     }
 
     /// Ranked completion candidates for the current field and buffer.
@@ -1005,7 +1012,7 @@ impl Session {
                 if !sums.is_empty() {
                     let detail: Vec<String> = sums
                         .iter()
-                        .map(|(c, v)| render_amount(*v, c, &self.ctx.amount_ctx))
+                        .map(|(c, v)| render_amount_like(*v, c, &self.ctx.amount_ctx, &amounts))
                         .collect();
                     return Submit::Invalid(format!(
                         "transaction does not balance (off by {})",

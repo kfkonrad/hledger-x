@@ -32,7 +32,7 @@ use rust_decimal::Decimal;
 
 use super::posting::Posting;
 use super::Class;
-use crate::amount::{balance, render_amount, split_rendered, AmountCtx};
+use crate::amount::{balance, render_amount_like, split_rendered, AmountCtx};
 
 /// Which set of postings a posting balances against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +91,7 @@ fn fill_group(txn: &mut [Class], ctx: &AmountCtx, group: Group) {
     let Some(sums) = balance(&refs, ctx) else {
         return;
     };
-    let Some(filled) = remainder(&sums, ctx) else {
+    let Some(filled) = remainder(&sums, ctx, &refs) else {
         return;
     };
 
@@ -105,7 +105,14 @@ fn fill_group(txn: &mut [Class], ctx: &AmountCtx, group: Group) {
 /// Zero sums drop out, since a commodity that already balances needs no
 /// posting — except when *everything* balances, where hledger still writes an
 /// explicit zero in the first commodity seen.
-fn remainder(sums: &[(String, Decimal)], ctx: &AmountCtx) -> Option<Vec<String>> {
+///
+/// `siblings` are the amounts being balanced against, which supply the
+/// display style for any commodity that declares none.
+fn remainder(
+    sums: &[(String, Decimal)],
+    ctx: &AmountCtx,
+    siblings: &[&str],
+) -> Option<Vec<String>> {
     let (first, _) = sums.first()?;
     let negated: Vec<(String, Decimal)> = sums
         .iter()
@@ -113,12 +120,17 @@ fn remainder(sums: &[(String, Decimal)], ctx: &AmountCtx) -> Option<Vec<String>>
         .map(|(c, v)| Decimal::ZERO.checked_sub(*v).map(|n| (c.clone(), n)))
         .collect::<Option<_>>()?;
     if negated.is_empty() {
-        return Some(vec![render_amount(Decimal::ZERO, first, ctx)]);
+        return Some(vec![render_amount_like(
+            Decimal::ZERO,
+            first,
+            ctx,
+            siblings,
+        )]);
     }
     Some(
         negated
             .iter()
-            .map(|(c, v)| render_amount(*v, c, ctx))
+            .map(|(c, v)| render_amount_like(*v, c, ctx, siblings))
             .collect(),
     )
 }
@@ -273,6 +285,6 @@ mod tests {
     fn an_all_zero_remainder_still_names_the_commodity() {
         let ctx = AmountCtx::default();
         let sums = vec![("EUR".to_owned(), Decimal::ZERO)];
-        assert_eq!(remainder(&sums, &ctx), Some(vec!["0 EUR".to_owned()]));
+        assert_eq!(remainder(&sums, &ctx, &[]), Some(vec!["0 EUR".to_owned()]));
     }
 }
