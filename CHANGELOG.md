@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Added
+- `fmt`: a new `--explicit` (`-x`) flag writes out what your journal leaves implied. Where a transaction omits one
+  posting's amount and lets hledger work it out, that amount is written into the file; and amounts are padded to the
+  decimals their commodity declares, so with `commodity 1_000.00 EUR` a written `1 EUR` becomes `1.00 EUR`.
+  `--check --explicit` fails on a journal that still leaves an amount implied. `--explicit` is a command-line flag only
+  and cannot be set in the config file, since it rewrites amounts rather than just their layout. Transactions it cannot
+  work out on its own — two postings missing an amount, an amount it cannot read, a `~` or `=` rule — are left exactly
+  as they are
+
 ## [0.2.0] - 2026-08-17
 
 ### Fixed

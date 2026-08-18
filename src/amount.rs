@@ -592,18 +592,37 @@ fn effective_style(style: &DisplayStyle, ctx: &AmountCtx) -> DisplayStyle {
     s
 }
 
-/// The core of restyling: parse the face, require a declared style, render
-/// with the value's own scale.
 /// How much precision a restyle should produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Places {
-    /// Exactly what was written. Required anywhere `fmt` can reach: changing
-    /// the precision of an amount already in the journal changes what
-    /// `hledger print` emits, which the semantic invariant forbids.
+pub enum Places {
+    /// Exactly what was written. `fmt`'s default: changing the precision of
+    /// an amount already in the journal changes what `hledger print` emits,
+    /// which the semantic invariant forbids.
     AsWritten,
     /// The commodity's declared places, or the amount's own if it carries
-    /// more. A floor, never a ceiling — see [`restyle_entered`].
+    /// more. A floor, never a ceiling — see [`restyle_entered`]. `add` always
+    /// uses this; `fmt` only under `--explicit`, where the user has asked for
+    /// exactly that rewrite.
     AtLeastDeclared,
+}
+
+impl Places {
+    /// The number of fraction digits to render `value` with under this
+    /// policy, given its commodity's declared style.
+    const fn of(self, value: Decimal, style: &DisplayStyle) -> u32 {
+        match self {
+            Self::AsWritten => value.scale(),
+            Self::AtLeastDeclared => {
+                let declared = style.decimal_places;
+                let written = value.scale();
+                if declared > written {
+                    declared
+                } else {
+                    written
+                }
+            }
+        }
+    }
 }
 
 fn restyle_pair(
@@ -617,10 +636,7 @@ fn restyle_pair(
         return None;
     }
     let style = effective_style(ctx.styles.get(&commodity)?, ctx);
-    let places = match places {
-        Places::AsWritten => value.scale(),
-        Places::AtLeastDeclared => style.decimal_places.max(value.scale()),
-    };
+    let places = places.of(value, &style);
     Some(render_styled(value, &commodity, &style, places))
 }
 
@@ -637,19 +653,42 @@ pub fn restyle_face_fields(
     commodity: &str,
     ctx: &AmountCtx,
 ) -> Option<(String, String)> {
+    restyle_face_fields_with(num, commodity, ctx, Places::AsWritten)
+}
+
+/// [`restyle_face_fields`] with an explicit precision policy.
+#[must_use]
+pub fn restyle_face_fields_with(
+    num: &str,
+    commodity: &str,
+    ctx: &AmountCtx,
+    places: Places,
+) -> Option<(String, String)> {
     let (value, name) = parse_face(num, commodity, ctx)?;
     if name.is_empty() {
         return None;
     }
     let style = effective_style(ctx.styles.get(&name)?, ctx);
+    let places = places.of(value, &style);
     if style.symbol_side == Side::Right && style.symbol_space {
-        Some((render_styled(value, "", &style, value.scale()), name))
+        Some((render_styled(value, "", &style, places), name))
     } else {
-        Some((
-            render_styled(value, &name, &style, value.scale()),
-            String::new(),
-        ))
+        Some((render_styled(value, &name, &style, places), String::new()))
     }
+}
+
+/// Split a rendered amount back into the (number field, commodity) pair the
+/// column renderer wants — the inverse of [`restyle_face_fields`]'s output
+/// shape, for an amount produced by [`render_amount`].
+///
+/// A right-side spaced style leaves the symbol in its own column; anything
+/// attached or symbol-first keeps the whole rendering in the number field,
+/// the way `$100` is aligned.
+#[must_use]
+pub fn split_rendered(rendered: &str) -> (String, String) {
+    let toks: Vec<&str> = rendered.split_whitespace().collect();
+    let (num, commodity, _rest) = split_amount(&toks);
+    (num, commodity)
 }
 
 /// Restyle the amounts inside a cost/assertion tail. Operator tokens pass
@@ -660,9 +699,9 @@ pub fn restyle_tail(rest: &[&str], ctx: &AmountCtx) -> Vec<String> {
     restyle_tail_with(rest, ctx, Places::AsWritten)
 }
 
-/// [`restyle_tail`] with an explicit precision policy. `fmt` must always pass
-/// [`Places::AsWritten`]; only an amount being entered may be padded.
-fn restyle_tail_with(rest: &[&str], ctx: &AmountCtx, places: Places) -> Vec<String> {
+/// [`restyle_tail`] with an explicit precision policy.
+#[must_use]
+pub fn restyle_tail_with(rest: &[&str], ctx: &AmountCtx, places: Places) -> Vec<String> {
     const OPS: [&str; 6] = ["==*", "=*", "==", "=", "@@", "@"];
     let mut out: Vec<String> = Vec::new();
     let mut i = 0usize;

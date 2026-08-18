@@ -17,7 +17,7 @@ use hledger_x::add::write::{integrate_with, Recovery};
 use hledger_x::amount::AmountCtx;
 use hledger_x::config::Config;
 use hledger_x::errors::{display_path, io_reason};
-use hledger_x::fmt::{format, format_sorted, format_sorted_with, format_with};
+use hledger_x::fmt::{format_opts, format_opts_scanned, Options};
 use similar::TextDiff;
 
 #[derive(Parser)]
@@ -48,6 +48,10 @@ struct AddArgs {
 }
 
 #[derive(clap::Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one field per command-line flag; a state machine would only hide the CLI's shape"
+)]
 struct FmtArgs {
     /// Write nothing; exit 1 if any file is not already formatted.
     #[arg(long)]
@@ -55,6 +59,14 @@ struct FmtArgs {
     /// Print a unified diff of every change, instead of just naming the files.
     #[arg(long)]
     diff: bool,
+    /// Write out what the journal leaves implied: fill in each transaction's
+    /// inferred amount, and pad amounts to their commodity's declared decimal
+    /// places (`1 EUR` becomes `1.00 EUR`). Honoured by `--check` too.
+    ///
+    /// This rewrites amounts, not just their layout, so it is a flag only —
+    /// never a config setting.
+    #[arg(short = 'x', long)]
+    explicit: bool,
     /// Format this journal together with every file it includes. Repeatable,
     /// and combinable with FILE operands.
     #[arg(short = 'f', long = "follow", value_name = "ROOT")]
@@ -329,16 +341,14 @@ fn crossterm_is_tty() -> bool {
     io::stdin().is_tty()
 }
 
-/// The transform applied to a file's contents, per `--sort`. With a context,
-/// amounts restyle to the include tree's declared styles; without one, to
-/// the styles declared in the text itself.
-fn transform(sort: bool, src: &str, ctx: Option<&AmountCtx>) -> String {
-    match (sort, ctx) {
-        (true, Some(c)) => format_sorted_with(src, c),
-        (true, None) => format_sorted(src),
-        (false, Some(c)) => format_with(src, c),
-        (false, None) => format(src),
-    }
+/// The transform applied to a file's contents. With a context, amounts
+/// restyle to the include tree's declared styles; without one, to the styles
+/// declared in the text itself.
+fn transform(opts: Options, src: &str, ctx: Option<&AmountCtx>) -> String {
+    ctx.map_or_else(
+        || format_opts_scanned(src, opts),
+        |c| format_opts(src, c, opts),
+    )
 }
 
 /// A unified diff of one file's before and after, headed the way `git diff`
@@ -487,11 +497,16 @@ fn fmt_status(args: &FmtArgs) -> Status {
     // Sorting is part of the canonical form, so it lives in the config: a
     // pre-commit hook and a bare `fmt` cannot disagree about what "formatted"
     // means unless a flag says so explicitly.
-    let sort = args.sort.resolve(config.sort);
+    // `--explicit` is deliberately absent from the config: it rewrites
+    // amounts rather than layout, so every run that does it says so.
+    let opts = Options {
+        sort: args.sort.resolve(config.sort),
+        explicit: args.explicit,
+    };
     match select(args, &config) {
         Err(status) => status,
-        Ok(Target::Stdin) => run_stdin(args, sort),
-        Ok(Target::Files(plan)) => run_files(args, sort, &plan),
+        Ok(Target::Stdin) => run_stdin(args, opts),
+        Ok(Target::Files(plan)) => run_files(args, opts, &plan),
     }
 }
 
@@ -535,13 +550,13 @@ fn select(args: &FmtArgs, config: &Config) -> Result<Target, Status> {
     Ok(Target::Files(plan))
 }
 
-fn run_stdin(args: &FmtArgs, sort: bool) -> Status {
+fn run_stdin(args: &FmtArgs, opts: Options) -> Status {
     let mut src = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut src) {
         eprintln!("hledger-x fmt: cannot read stdin: {}", io_reason(&e));
         return Status::Error;
     }
-    let formatted = transform(sort, &src, None);
+    let formatted = transform(opts, &src, None);
     let changed = formatted != src;
     let mut out = io::stdout().lock();
     // There is no file to write here, so a diff takes the place of the
@@ -571,7 +586,7 @@ fn run_stdin(args: &FmtArgs, sort: bool) -> Status {
 /// Format or check each file. One that cannot be read or written is reported
 /// and skipped; the run then fails, but the remaining files are still
 /// processed.
-fn run_files(args: &FmtArgs, sort: bool, plan: &Plan) -> Status {
+fn run_files(args: &FmtArgs, opts: Options, plan: &Plan) -> Status {
     let mut status = plan.status;
     let mut out = io::stdout().lock();
     for job in &plan.jobs {
@@ -584,7 +599,7 @@ fn run_files(args: &FmtArgs, sort: bool, plan: &Plan) -> Status {
             }
         };
         let ctx = plan.ctxs.get(job.ctx).and_then(Option::as_ref);
-        let formatted = transform(sort, &src, ctx);
+        let formatted = transform(opts, &src, ctx);
         // Leave an already-formatted file untouched on disk.
         if formatted == src {
             continue;

@@ -16,11 +16,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hledger_x::fmt::{format, format_sorted};
+use hledger_x::fmt::{format, format_opts_scanned, format_sorted, Options};
 
 fn hledger_print(path: &Path) -> Option<String> {
     let out = Command::new("hledger")
         .args(["print", "-f"])
+        .arg(path)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `hledger print -x`: what the journal says once every inferred amount is
+/// spelled out. The reference for `fmt --explicit`'s filling-in.
+fn hledger_print_explicit(path: &Path) -> Option<String> {
+    let out = Command::new("hledger")
+        .args(["print", "-x", "-f"])
+        .arg(path)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `hledger balance`: every account's total. Padding an amount to its
+/// declared decimal places changes what `print` emits by design, so
+/// `--explicit` is held to the stronger and more meaningful question — did
+/// any *value* move?
+fn hledger_balance(path: &Path) -> Option<String> {
+    let out = Command::new("hledger")
+        .args(["balance", "--no-total", "-f"])
         .arg(path)
         .output()
         .ok()?;
@@ -184,4 +212,182 @@ fn hledger_print_is_unchanged_by_formatting() {
         checked += 1;
     }
     assert!(checked > 0, "no fixtures were checked");
+}
+
+/// Every shape of inference `--explicit` claims to handle. None of these
+/// declares a commodity style, so `hledger print -x` is an exact oracle:
+/// writing the inferred amounts in must leave hledger nothing left to infer.
+const INFERENCE_FIXTURES: &[(&str, &str)] = &[
+    ("one-elided", "2026-01-01 x\n    a  10 EUR\n    b\n"),
+    (
+        "through-a-cost",
+        "2026-01-01 x\n    a  10 EUR @ 1.1 USD\n    b\n",
+    ),
+    (
+        "assertion-only",
+        "2026-01-01 x\n    a  10 EUR\n    b   = -10 EUR\n",
+    ),
+    (
+        "zero-remainder",
+        "2026-01-01 x\n    a  10 EUR\n    b  -10 EUR\n    c\n",
+    ),
+    (
+        "multi-commodity-split",
+        "2026-01-01 x\n    a  10 EUR\n    a  5 USD\n    b\n",
+    ),
+    (
+        "unbalanced-virtual-is-excluded",
+        "2026-01-01 x\n    a  10 EUR\n    (v)  3 EUR\n    b\n",
+    ),
+    (
+        "balanced-virtual-balances-alone",
+        "2026-01-01 x\n    a  10 EUR\n    b  -10 EUR\n    [v]  3 EUR\n    [w]\n",
+    ),
+    ("unitless", "2026-01-01 x\n    a  10\n    b\n"),
+];
+
+/// Fixtures where `--explicit` pads decimals out to a declared style. That is
+/// a deliberate deviation from `hledger print`, which renders a written
+/// `1234 EUR` as `1,234.` under `commodity 1,000.00 EUR` — so the oracle here
+/// is `hledger balance`, which answers the question that actually matters:
+/// did any value move?
+const PADDING_FIXTURES: &[(&str, &str)] = &[
+    (
+        "declared-style-padding",
+        "commodity 1,000.00 EUR\n\n2026-01-01 x\n    a  1234 EUR\n    b\n",
+    ),
+    (
+        "padding-is-a-floor-not-a-ceiling",
+        "commodity 1,000.00 EUR\n\n2026-01-01 x\n    a  4.0001 EUR\n    b\n",
+    ),
+    (
+        "padding-reaches-cost-tails",
+        "commodity 1,000.00 EUR\ncommodity 1,000.00 USD\n\n2026-01-01 x\n    a  10 EUR @ 1.1 USD\n    b\n",
+    ),
+];
+
+const EXPLICIT: Options = Options {
+    sort: false,
+    explicit: true,
+};
+
+/// Format with `--explicit`, checking it is a fixed point of itself, and
+/// write the result out for hledger to read.
+fn explicit_output(tmp: &Path, name: &str, src: &str) -> (PathBuf, PathBuf) {
+    let before_path = tmp.join(format!("{name}.before.journal"));
+    fs::write(&before_path, src).unwrap();
+    let out = format_opts_scanned(src, EXPLICIT);
+    assert_ne!(out, *src, "{name}: fixture was expected to change");
+    assert_eq!(
+        format_opts_scanned(&out, EXPLICIT),
+        out,
+        "{name}: --explicit is not idempotent"
+    );
+    let after_path = tmp.join(format!("{name}.after.journal"));
+    fs::write(&after_path, &out).unwrap();
+    (before_path, after_path)
+}
+
+#[test]
+fn explicit_infers_exactly_what_hledger_infers() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-explicit"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+
+    for (name, src) in INFERENCE_FIXTURES {
+        let (before_path, after_path) = explicit_output(&tmp, name, src);
+        let before = hledger_print_explicit(&before_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected the fixture"));
+        let after = hledger_print_explicit(&after_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected the output"));
+        assert_eq!(after, before, "{name}: inferred amounts differ");
+    }
+}
+
+#[test]
+fn explicit_padding_moves_no_value() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-explicit-padding"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+
+    for (name, src) in PADDING_FIXTURES {
+        let (before_path, after_path) = explicit_output(&tmp, name, src);
+        let before = hledger_balance(&before_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected the fixture"));
+        let after = hledger_balance(&after_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected the output"));
+        assert_eq!(after, before, "{name}: balances changed");
+    }
+}
+
+#[test]
+fn explicit_leaves_the_golden_fixtures_inferring_the_same_amounts() {
+    if !have_hledger() {
+        eprintln!("hledger not on PATH; skipping semantic check");
+        return;
+    }
+    let data: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "golden"]
+        .iter()
+        .collect();
+    let tmp: PathBuf = [env!("CARGO_TARGET_TMPDIR"), "semantic-explicit-golden"]
+        .iter()
+        .collect();
+    fs::create_dir_all(&tmp).unwrap();
+
+    let mut checked = 0;
+    for entry in fs::read_dir(&data).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".in.ledger") {
+            continue;
+        }
+        let src = fs::read_to_string(&path).unwrap();
+        if src.lines().any(|l| l.trim_start().starts_with("include ")) {
+            continue;
+        }
+        let Some(before) = hledger_print_explicit(&path) else {
+            continue; // not a standalone journal
+        };
+        let out = format_opts_scanned(&src, EXPLICIT);
+        let after_path = tmp.join(&name);
+        fs::write(&after_path, &out).unwrap();
+        assert_eq!(
+            format_opts_scanned(&out, EXPLICIT),
+            out,
+            "{name}: --explicit is not idempotent"
+        );
+        let after = hledger_print_explicit(&after_path)
+            .unwrap_or_else(|| panic!("{name}: hledger rejected --explicit output"));
+        // A fixture that declares a commodity style is padded on purpose, so
+        // only its *values* have to match; anything else must be identical.
+        if declares_a_style(&src) {
+            assert_eq!(
+                hledger_balance(&after_path),
+                hledger_balance(&path),
+                "{name}: balances changed under --explicit"
+            );
+        } else {
+            assert_eq!(after, before, "{name}: inferred amounts differ");
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixtures were checked");
+}
+
+/// Whether a journal declares any commodity display style, and so is subject
+/// to `--explicit`'s decimal padding.
+fn declares_a_style(src: &str) -> bool {
+    src.lines().any(|l| {
+        l.starts_with("commodity ") || l.starts_with("D ") || l.trim_start().starts_with("format ")
+    })
 }

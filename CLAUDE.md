@@ -109,7 +109,12 @@ style choice.
    one sanctioned semantic *reading* (2026-08, with the user) is declared
    commodity display styles — `commodity`, its `format` subdirective, `D`,
    `decimal-mark` — used to restyle amounts as `hledger print` would (see
-   `DESIGN.md` § Amount restyling). `fmt` never interprets anything else.
+   `DESIGN.md` § Amount restyling). The second (2026-08-18, at the user's
+   request) is `fmt --explicit`, which reads a transaction as a whole to fill
+   in the one amount hledger would infer, and is the only place `fmt` turns
+   one line into several (a multi-commodity remainder). It is opt-in per
+   invocation and deliberately *not* configurable — see `DESIGN.md`
+   § `--explicit`. `fmt` never interprets anything else.
    `add` depends on `fmt`; `fmt` must never depend on `add` (shared amount
    machinery lives in the crate-level `amount` module).
 2. **Amounts are only ever rewritten value-preservingly**, and **precision is
@@ -117,6 +122,9 @@ style choice.
    amount's decimal places exactly (changing them changes `hledger print`
    output — verified, and the semantic test catches it); `add` pads an amount
    the user just typed up to the commodity's declared places, never down.
+   `fmt --explicit` is the one sanctioned way to ask `fmt` for `add`'s policy,
+   and only because the invocation said so; the default path must stay
+   `Places::AsWritten`.
    `amount::Places` names the two policies so a shared helper cannot silently
    apply the wrong one. An amount is
    re-rendered only when its commodity has a *declared* style, via exact
@@ -127,7 +135,9 @@ style choice.
    pre-fills in `add` remain the raw text as it stands in the journal.
 3. **Never infer a commodity.** A unitless amount is valid. A default may be
    offered as editable pre-filled text, never applied silently at write time.
-4. **Balancing amounts are always explicit**, never elided.
+4. **Balancing amounts are always explicit**, never elided — `add` writes
+   every one it generates, and `fmt --explicit` writes out the ones already
+   in the journal.
 5. **`add` is an entry tool, not a validator.** It must never refuse to run
    because the journal contains something it does not understand.
 6. **Exact decimals only.** Never floating point for amounts.

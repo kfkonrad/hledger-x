@@ -1,6 +1,6 @@
 //! Posting parsing and rendering.
 
-use crate::amount::{restyle_face_fields, restyle_tail, AmountCtx};
+use crate::amount::{restyle_face_fields_with, restyle_tail_with, AmountCtx, Places};
 use crate::lex::{
     is_number_like, is_rest_start, rstrip, split_account_amount, split_amount, split_comment,
 };
@@ -66,6 +66,17 @@ pub fn parse_posting(raw: &str) -> Posting {
 /// does not parse stay exactly as written.
 #[must_use]
 pub fn restyle(p: Posting, ctx: &AmountCtx) -> Posting {
+    restyle_with(p, ctx, Places::AsWritten)
+}
+
+/// [`restyle`] under an explicit precision policy.
+///
+/// [`Places::AsWritten`] is the only one `fmt` may use by default: padding an
+/// amount already in the journal changes what `hledger print` emits.
+/// [`Places::AtLeastDeclared`] is `fmt --explicit`, where that rewrite is
+/// exactly what was asked for.
+#[must_use]
+pub fn restyle_with(p: Posting, ctx: &AmountCtx, places: Places) -> Posting {
     match p {
         Posting::Amount {
             account,
@@ -75,9 +86,9 @@ pub fn restyle(p: Posting, ctx: &AmountCtx) -> Posting {
             comment,
         } => {
             let rest_refs: Vec<&str> = rest.iter().map(String::as_str).collect();
-            let rest = restyle_tail(&rest_refs, ctx);
+            let rest = restyle_tail_with(&rest_refs, ctx, places);
             let (num, commodity) =
-                restyle_face_fields(&num, &commodity, ctx).unwrap_or((num, commodity));
+                restyle_face_fields_with(&num, &commodity, ctx, places).unwrap_or((num, commodity));
             Posting::Amount {
                 account,
                 num,

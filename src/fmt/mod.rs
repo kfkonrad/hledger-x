@@ -23,15 +23,51 @@
 //! number is right-aligned to one shared column across all transactions.
 
 pub mod blank;
+mod explicit;
 pub mod posting;
 pub mod sort;
 
-use crate::amount::{style_from_sample, AmountCtx};
+use crate::amount::{style_from_sample, AmountCtx, Places};
 use crate::lex::{
     closes_comment_block, directive_arg, is_blank, is_indented_non_blank, opens_comment_block,
     opens_txn, rstrip,
 };
-use posting::{account_of, parse_posting, render, restyle, Posting};
+use posting::{account_of, parse_posting, render, restyle_with, Posting};
+
+/// What a formatting run should do beyond the canonical layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Options {
+    /// Stably sort transactions by date, within directive-bounded runs.
+    pub sort: bool,
+    /// Spell out what the journal leaves implied: fill in each transaction's
+    /// one inferred amount, and pad every restyled amount to its commodity's
+    /// declared number of decimal places.
+    ///
+    /// This rewrites amounts rather than only their layout, so it is never a
+    /// default and never configurable — it happens because the invocation
+    /// asked for it.
+    pub explicit: bool,
+}
+
+impl Options {
+    /// Sorting only: the shape of a plain `fmt --sort`.
+    #[must_use]
+    pub const fn sorted(sort: bool) -> Self {
+        Self {
+            sort,
+            explicit: false,
+        }
+    }
+
+    /// The precision policy restyling runs under.
+    const fn places(self) -> Places {
+        if self.explicit {
+            Places::AtLeastDeclared
+        } else {
+            Places::AsWritten
+        }
+    }
+}
 
 /// Format a whole file's contents, restyling amounts to the styles declared
 /// in the text itself.
@@ -48,7 +84,7 @@ pub fn format(s: &str) -> String {
 /// caller's context is authoritative.
 #[must_use]
 pub fn format_with(s: &str, ctx: &AmountCtx) -> String {
-    unlines(&format_lines(&blank::normalize(&lines(s)), ctx))
+    format_opts(s, ctx, Options::default())
 }
 
 /// Like [`format`], but also stably sorts transactions by date.
@@ -64,10 +100,26 @@ pub fn format_sorted(s: &str) -> String {
 /// [`format_sorted`] with caller-supplied styles.
 #[must_use]
 pub fn format_sorted_with(s: &str, ctx: &AmountCtx) -> String {
-    unlines(&format_lines(
-        &blank::normalize(&sort::sort_entries(&lines(s))),
-        ctx,
-    ))
+    format_opts(s, ctx, Options::sorted(true))
+}
+
+/// The one formatting entry point every other one funnels into: caller-supplied
+/// styles, and everything optional named in [`Options`].
+#[must_use]
+pub fn format_opts(s: &str, ctx: &AmountCtx, opts: Options) -> String {
+    let ls = lines(s);
+    let ls = if opts.sort {
+        sort::sort_entries(&ls)
+    } else {
+        ls
+    };
+    unlines(&format_lines(&blank::normalize(&ls), ctx, opts))
+}
+
+/// [`format_opts`] against the styles declared in the text itself.
+#[must_use]
+pub fn format_opts_scanned(s: &str, opts: Options) -> String {
+    format_opts(s, &scan_ctx(&lines(s)), opts)
 }
 
 /// Whether the input is already a fixed point of [`format`]. Drives `--check`.
@@ -93,6 +145,13 @@ pub fn is_formatted_sorted(s: &str) -> bool {
 #[must_use]
 pub fn is_formatted_sorted_with(s: &str, ctx: &AmountCtx) -> bool {
     format_sorted_with(s, ctx) == s
+}
+
+/// Whether the input is already a fixed point of [`format_opts`]. Drives
+/// `--check` under any combination of flags.
+#[must_use]
+pub fn is_formatted_opts(s: &str, ctx: &AmountCtx, opts: Options) -> bool {
+    format_opts(s, ctx, opts) == s
 }
 
 /// Collect declared commodity display styles from the text alone: `commodity`
@@ -200,13 +259,17 @@ pub fn widths(ls: &[&str]) -> (usize, usize) {
 /// postings, which is what [`format_with`] aligns to.
 #[must_use]
 pub fn widths_with(ls: &[&str], ctx: &AmountCtx) -> (usize, usize) {
-    widths_of(&styled_lines(ls, ctx))
+    widths_of(&styled_lines(ls, ctx, Options::default()))
 }
 
 /// What a physical line is, once classified.
 enum Class {
     /// A posting line, parsed and restyled: the only kind that is reflowed.
-    Post(Posting),
+    ///
+    /// Normally one posting, and always one without `--explicit`. Filling in
+    /// an inferred amount that spans commodities turns the line into several,
+    /// which is what `hledger print -x` does with the same input.
+    Post(Vec<Posting>),
     /// Anything else the formatter may touch — see [`format_other`].
     Other,
     /// A line inside a `comment` block, or one of its delimiters: passed
@@ -216,9 +279,9 @@ enum Class {
 
 /// The alignment widths of an already-classified line list.
 fn widths_of(styled: &[Class]) -> (usize, usize) {
-    let posts = styled.iter().filter_map(|c| match c {
-        Class::Post(p) => Some(p),
-        Class::Other | Class::Opaque => None,
+    let posts = styled.iter().flat_map(|c| match c {
+        Class::Post(ps) => ps.as_slice(),
+        Class::Other | Class::Opaque => &[],
     });
     let acc_w = posts
         .clone()
@@ -244,11 +307,15 @@ fn widths_of(styled: &[Class]) -> (usize, usize) {
 /// changes how amounts *parse* from that point on (the declared style still
 /// governs display — verified against hledger 1.99). A `comment` block is
 /// opaque throughout: a posting-looking line inside it is prose.
-fn styled_lines(ls: &[&str], ctx: &AmountCtx) -> Vec<Class> {
+fn styled_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<Class> {
     let mut cur = ctx.clone();
     let mut in_txn = false;
     let mut opaque = false;
-    let mut out = Vec::with_capacity(ls.len());
+    let mut out: Vec<Class> = Vec::with_capacity(ls.len());
+    // Where the posting run of the transaction being classified starts, and
+    // the styles in effect there: `--explicit` needs the whole transaction at
+    // once, so the fill waits until the run ends.
+    let mut txn: Option<(usize, AmountCtx)> = None;
     for l in ls {
         if opaque {
             opaque = !closes_comment_block(l);
@@ -256,30 +323,54 @@ fn styled_lines(ls: &[&str], ctx: &AmountCtx) -> Vec<Class> {
         } else if opens_comment_block(l) {
             opaque = true;
             in_txn = false;
+            close_txn(&mut out, &mut txn, opts);
             out.push(Class::Opaque);
         } else if in_txn && is_indented_non_blank(l) {
-            out.push(Class::Post(restyle(parse_posting(l), &cur)));
+            out.push(Class::Post(vec![restyle_with(
+                parse_posting(l),
+                &cur,
+                opts.places(),
+            )]));
         } else {
             if let Some(arg) = directive_arg(l, "decimal-mark") {
                 cur.decimal_mark = arg.chars().next().filter(|c| matches!(c, '.' | ','));
             }
+            close_txn(&mut out, &mut txn, opts);
             out.push(Class::Other);
             in_txn = opens_txn(l);
+            if in_txn {
+                txn = Some((out.len(), cur.clone()));
+            }
         }
     }
+    close_txn(&mut out, &mut txn, opts);
     out
 }
 
+/// End the transaction whose postings start at the recorded index, filling in
+/// its inferred amounts when `--explicit` asked for them.
+fn close_txn(out: &mut [Class], txn: &mut Option<(usize, AmountCtx)>, opts: Options) {
+    let Some((start, ctx)) = txn.take() else {
+        return;
+    };
+    if !opts.explicit {
+        return;
+    }
+    if let Some(run) = out.get_mut(start..) {
+        explicit::fill(run, &ctx);
+    }
+}
+
 /// Reflow a list of physical lines against the file-wide widths.
-fn format_lines(ls: &[&str], ctx: &AmountCtx) -> Vec<String> {
-    let styled = styled_lines(ls, ctx);
+fn format_lines(ls: &[&str], ctx: &AmountCtx, opts: Options) -> Vec<String> {
+    let styled = styled_lines(ls, ctx, opts);
     let (acc_w, num_w) = widths_of(&styled);
     ls.iter()
         .zip(styled)
-        .map(|(l, c)| match c {
-            Class::Post(p) => render(acc_w, num_w, &p),
-            Class::Other => format_other(l),
-            Class::Opaque => (*l).to_owned(),
+        .flat_map(|(l, c)| match c {
+            Class::Post(ps) => ps.iter().map(|p| render(acc_w, num_w, p)).collect(),
+            Class::Other => vec![format_other(l)],
+            Class::Opaque => vec![(*l).to_owned()],
         })
         .collect()
 }
@@ -579,5 +670,159 @@ mod tests {
         assert!(is_formatted("2025-01-01 x\n    A:B  1 USD\n"));
         assert!(!is_formatted("2025-01-01 x\n  A:B  1 USD\n"));
         assert!(is_formatted(""));
+    }
+
+    // ---- --explicit ----
+
+    fn explicit(s: &str) -> String {
+        format_opts_scanned(
+            s,
+            Options {
+                sort: false,
+                explicit: true,
+            },
+        )
+    }
+
+    #[test]
+    fn explicit_fills_in_the_one_inferred_amount() {
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR\n    b\n"),
+            "2026-01-01 x\n    a   10 EUR\n    b  -10 EUR\n"
+        );
+    }
+
+    #[test]
+    fn explicit_infers_through_a_cost() {
+        // hledger 1.99 `print -x` fills `b` with the cost side, -11 USD.
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR @ 1.1 USD\n    b\n"),
+            "2026-01-01 x\n    a     10 EUR @ 1.1 USD\n    b  -11.0 USD\n"
+        );
+    }
+
+    #[test]
+    fn explicit_fills_a_posting_that_carries_only_an_assertion() {
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR\n    b   = -10 EUR\n"),
+            "2026-01-01 x\n    a   10 EUR\n    b  -10 EUR = -10 EUR\n"
+        );
+    }
+
+    #[test]
+    fn explicit_writes_a_zero_remainder_rather_than_nothing() {
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR\n    b  -10 EUR\n    c\n"),
+            "2026-01-01 x\n    a   10 EUR\n    b  -10 EUR\n    c    0 EUR\n"
+        );
+    }
+
+    #[test]
+    fn explicit_splits_a_multi_commodity_remainder_into_one_posting_each() {
+        assert_eq!(
+            explicit("2026-01-01 x\n    a  10 EUR\n    a  5 USD\n    b\n"),
+            "2026-01-01 x\n    a   10 EUR\n    a    5 USD\n    b  -10 EUR\n    b   -5 USD\n"
+        );
+    }
+
+    #[test]
+    fn explicit_leaves_a_transaction_it_cannot_resolve_alone() {
+        // Two amount-less postings: an hledger error, and not `fmt`'s to
+        // guess at.
+        let src = "2026-01-01 x\n    a  10 EUR\n    b\n    c\n";
+        assert_eq!(explicit(src), src);
+        // An unparseable amount makes the remainder unknown.
+        let src = "2026-01-01 x\n    a  wat EUR\n    b\n";
+        assert_eq!(explicit(src), src);
+        // Nothing to infer from at all.
+        let src = "2026-01-01 x\n    a\n";
+        assert_eq!(explicit(src), src);
+    }
+
+    #[test]
+    fn explicit_balances_the_three_posting_kinds_separately() {
+        // `(v)` contributes to nothing; `[v]`/`[w]` balance among themselves.
+        assert_eq!(
+            explicit(
+                "2026-01-01 x\n    a  10 EUR\n    (v)  3 EUR\n    b\n    [c]  4 EUR\n    [d]\n"
+            ),
+            "2026-01-01 x\n    a     10 EUR\n    (v)    3 EUR\n    b    -10 EUR\n    [c]    4 EUR\n    [d]   -4 EUR\n"
+        );
+    }
+
+    #[test]
+    fn explicit_pads_amounts_to_the_declared_decimal_places() {
+        assert_eq!(
+            explicit("commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234 EUR @ 1.1 USD\n    b  -4 EUR\n"),
+            "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1_234.00 EUR @ 1.1 USD\n    b     -4.00 EUR\n"
+        );
+        // A floor, never a ceiling: more precision than declared survives.
+        assert_eq!(
+            explicit(
+                "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  4.001 EUR\n    b  -4.001 EUR\n"
+            ),
+            "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a   4.001 EUR\n    b  -4.001 EUR\n"
+        );
+    }
+
+    #[test]
+    fn explicit_leaves_undeclared_commodities_unpadded() {
+        let src = "2026-01-01 x\n    a   1 USD\n    b  -1 USD\n";
+        assert_eq!(explicit(src), src);
+    }
+
+    #[test]
+    fn explicit_never_touches_periodic_or_auto_transactions() {
+        let src = "~ monthly\n    a  10 EUR\n    b\n\n= a\n    c  *2\n    d\n";
+        assert_eq!(explicit(src), src);
+    }
+
+    #[test]
+    fn explicit_keeps_the_comment_on_the_posting_it_was_written_for() {
+        assert_eq!(
+            explicit("2026-01-01 x\n    ; note\n    a  10 EUR\n    b  ; why\n"),
+            "2026-01-01 x\n    ; note\n    a   10 EUR\n    b  -10 EUR  ; why\n"
+        );
+    }
+
+    #[test]
+    fn explicit_is_idempotent() {
+        let src = "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234EUR\n    a  5 USD\n    b\n\n2026-01-02 y\n    c  1 EUR\n    d\n";
+        let once = explicit(src);
+        assert_eq!(explicit(&once), once);
+    }
+
+    #[test]
+    fn explicit_is_off_by_default() {
+        let src = "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1234 EUR\n    b\n";
+        assert_eq!(
+            format(src),
+            "commodity 1_000.00 EUR\n\n2026-01-01 x\n    a  1_234 EUR\n    b\n"
+        );
+    }
+
+    #[test]
+    fn explicit_composes_with_sorting() {
+        let opts = Options {
+            sort: true,
+            explicit: true,
+        };
+        assert_eq!(
+            format_opts_scanned("2026-02-02 b\n    a  2 EUR\n    b\n\n2026-01-01 a\n    a  1 EUR\n    b\n", opts),
+            "2026-01-01 a\n    a   1 EUR\n    b  -1 EUR\n\n2026-02-02 b\n    a   2 EUR\n    b  -2 EUR\n"
+        );
+    }
+
+    #[test]
+    fn explicit_check_is_the_same_fixed_point_question() {
+        let ctx = AmountCtx::default();
+        let opts = Options {
+            sort: false,
+            explicit: true,
+        };
+        let src = "2026-01-01 x\n    a  10 EUR\n    b\n";
+        assert!(!is_formatted_opts(src, &ctx, opts));
+        assert!(is_formatted(src)); // already formatted without --explicit
+        assert!(is_formatted_opts(&explicit(src), &ctx, opts));
     }
 }
