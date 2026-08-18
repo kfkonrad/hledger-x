@@ -48,6 +48,7 @@ hledger-x fmt - < main.journal           # stdin to stdout
 hledger-x fmt --check                    # write nothing, exit non-zero if anything needs formatting
 hledger-x fmt --diff                     # show a unified diff of the changes
 hledger-x fmt --sort                     # sort transactions by date in addition to formatting them
+hledger-x fmt --explicit                 # write out inferred amounts and pad decimals
 hledger-x fmt --quiet                    # do not print a list of changed files
 ```
 
@@ -74,7 +75,43 @@ block directly above a transaction heads it, so the blank line goes above the co
 uses, so a comment that heads a transaction travels with it.
 
 `fmt` never changes an amount's precision — that belongs to whoever wrote it, and altering it would change what
-`hledger print` emits. (`add` does fill an amount you type out to the commodity's declared decimal places; see below.)
+`hledger print` emits. (`add` does fill an amount you type out to the commodity's declared decimal places; see below,
+and `--explicit` opts `fmt` into the same thing.)
+
+#### `--explicit`
+
+`--explicit` (`-x`, the same name `hledger print` uses) writes out what the journal leaves implied. It does two things:
+
+- **Fills in the amount you left off.** A transaction may omit one posting's amount and let hledger work it out;
+  `--explicit` writes that amount into the file, exactly as `hledger print -x` would show it.
+
+  ```txt
+  2026-01-01 groceries        2026-01-01 groceries
+      expenses:food  10 EUR  →     expenses:food   10 EUR
+      assets:cash                  assets:cash    -10 EUR
+  ```
+
+- **Pads amounts to their commodity's declared decimal places.** With `commodity 1_000.00 EUR`, `1 EUR` becomes
+  `1.00 EUR` — the same rule `add` applies to an amount you type. The declared places are a minimum, never a maximum,
+  so `4.001 EUR` is left alone, and a commodity with no `commodity` directive is left alone entirely.
+
+`--check` honours `--explicit`: `hledger-x fmt --check --explicit` fails on a journal that still leaves an amount
+implied, which is what you want in a pre-commit hook or CI.
+
+Unlike `sort`, `--explicit` is a flag only and cannot be set in the configuration file. It rewrites amounts rather than
+just their layout, so every run that does it says so on the command line.
+
+What it deliberately does *not* do:
+
+- It never infers a conversion cost. `hledger print -x` turns `10 EUR` / `-11 USD` into `10 EUR @@ 11 USD`; that is a
+  claim about the transaction rather than a value already implied by it, so `fmt` leaves it out.
+- It never guesses. A transaction with two amount-less postings, an amount that does not parse, or a periodic (`~`) or
+  auto (`=`) rule is passed through untouched — `fmt` is not a validator, and a wrong amount would be far worse than
+  no amount.
+
+Real, `[balanced virtual]` and `(unbalanced virtual)` postings balance separately, the way hledger balances them: an
+unbalanced virtual posting contributes to nothing and never receives an inferred amount. When the remainder spans
+several commodities the inferred posting is split into one posting per commodity, again matching `hledger print -x`.
 
 #### Exit codes
 

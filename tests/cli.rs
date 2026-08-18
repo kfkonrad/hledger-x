@@ -1060,3 +1060,73 @@ fn add_reports_a_bad_config_without_a_report_banner() {
     assert!(out.stderr.starts_with("hledger-x add: "), "{}", out.stderr);
     assert_no_leaks(&out.stderr);
 }
+
+/// A journal that both leaves an amount to be inferred and writes one short
+/// of its commodity's declared decimal places — the two things `--explicit`
+/// changes.
+const IMPLIED: &str = "commodity 1,000.00 EUR\n\n2025-01-01 x\n    A:B  1 EUR\n    C:D\n";
+const SPELLED_OUT: &str =
+    "commodity 1,000.00 EUR\n\n2025-01-01 x\n    A:B   1.00 EUR\n    C:D  -1.00 EUR\n";
+
+#[test]
+fn explicit_fills_in_and_pads_on_stdin() {
+    let out = run(&["fmt", "--explicit", "-"], IMPLIED);
+    assert_eq!(out.code, 0);
+    assert_eq!(out.stdout, SPELLED_OUT);
+    // And `-x`, the way hledger spells the same flag.
+    assert_eq!(run(&["fmt", "-x", "-"], IMPLIED).stdout, SPELLED_OUT);
+}
+
+#[test]
+fn without_explicit_nothing_is_filled_in_or_padded() {
+    let out = run(&["fmt", "-"], IMPLIED);
+    assert_eq!(out.code, 0);
+    assert_eq!(out.stdout, IMPLIED);
+}
+
+#[test]
+fn check_honours_explicit() {
+    let dir = scratch("check-explicit");
+    let path = write(&dir, "a.journal", IMPLIED);
+
+    // The file is already formatted, so a plain --check is happy with it.
+    let plain = run_in(&dir, &["fmt", "--check", "a.journal"], "");
+    assert_eq!(plain.code, 0, "{}", plain.stderr);
+
+    // --explicit raises the bar, and --check has to apply the same bar.
+    let strict = run_in(&dir, &["fmt", "--check", "--explicit", "a.journal"], "");
+    assert_eq!(strict.code, 1);
+    assert!(
+        strict.stderr.contains("would reformat: a.journal"),
+        "{}",
+        strict.stderr
+    );
+    // --check still writes nothing.
+    assert_eq!(fs::read_to_string(&path).unwrap(), IMPLIED);
+
+    // Once spelled out, --check --explicit passes.
+    write(&dir, "a.journal", SPELLED_OUT);
+    let after = run_in(&dir, &["fmt", "--check", "--explicit", "a.journal"], "");
+    assert_eq!(after.code, 0, "{}", after.stderr);
+}
+
+#[test]
+fn explicit_rewrites_the_file_in_place() {
+    let dir = scratch("explicit-in-place");
+    let path = write(&dir, "a.journal", IMPLIED);
+    let out = run_in(&dir, &["fmt", "--explicit", "a.journal"], "");
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(fs::read_to_string(&path).unwrap(), SPELLED_OUT);
+}
+
+#[test]
+fn explicit_cannot_be_turned_on_from_the_config() {
+    // It rewrites amounts rather than layout, so it is a flag only: a config
+    // naming it is a config error, not a silent no-op.
+    let dir = scratch("explicit-not-configurable");
+    write(&dir, ".hledger-x.toml", "explicit = true\n");
+    write(&dir, "a.journal", IMPLIED);
+    let out = run_in(&dir, &["fmt", "a.journal"], "");
+    assert_ne!(out.code, 0, "an unknown config key should be rejected");
+    assert!(out.stderr.contains("config"), "{}", out.stderr);
+}

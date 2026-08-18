@@ -328,6 +328,7 @@ assertion tails restyle too.
 | | precision |
 | --- | --- |
 | `fmt`, on text already in the journal | exactly as written |
+| `fmt --explicit`, on the same text | at least the declared places |
 | `add`, on an amount just entered | at least the declared places |
 
 `fmt` must leave it alone. Verified: under `commodity 1_000.00 EUR` a written
@@ -393,6 +394,69 @@ regression). In `add`, a typed amount is normalized at submit time, so the
 live preview and the written file agree; generated balancing amounts still
 pad to the style's decimal places, while typed amounts keep their typed
 precision — exactly what hledger does with such a file.
+
+## `--explicit` (2026-08-18, at the user's request)
+
+`fmt -x` / `fmt --explicit` writes out what the journal leaves implied. The
+name is taken from `hledger print -x`, which does the same job to a report;
+this does it to the file. Two things happen under it:
+
+1. **Inferred amounts are filled in.** A transaction may omit one posting's
+   amount; `--explicit` computes it and writes it.
+2. **Amounts are padded to their commodity's declared decimal places** —
+   `add`'s `Places::AtLeastDeclared` policy, applied to text already in the
+   journal.
+
+**Why it is a flag and never a config key** (the user's constraint, and the
+right one): everything in the config describes a *canonical layout*, so a
+pre-commit hook and a bare `fmt` cannot disagree about what "formatted" means.
+`--explicit` is not layout. It rewrites amounts, and item 2 in particular is a
+deliberate deviation from `hledger print` — under `commodity 1_000.00 EUR` a
+written `1234 EUR` prints as `1_234.`, so padding it to `1_234.00` changes
+print output. That is exactly the rewrite the flag asks for, but it must never
+happen because of a file somebody forgot about. `--check` does honour the flag:
+`fmt --check --explicit` is the CI gate for "this journal leaves nothing
+implied", and it falls out of `--check` comparing against whatever transform
+the run selected.
+
+**The inference rules**, all verified against hledger 1.99:
+
+- Real, `[balanced virtual]` and `(unbalanced virtual)` postings balance in
+  three separate groups. An unbalanced virtual posting contributes to no sum
+  and never receives an inferred amount.
+- Exactly one posting per group may be missing its amount. Zero means there is
+  nothing to do; two or more is an hledger error and is passed through — `fmt`
+  is not a validator (invariant 5's spirit applied to `fmt`).
+- A posting carrying only a balance assertion (`assets:cash  = 0 EUR`) is
+  missing its amount too, and gets one in front of the assertion.
+- The inferred amount is the negated sum at *cost*, so `10 EUR @ 1.1 USD`
+  against a bare posting fills `-11.0 USD`, matching `print -x` exactly.
+- A remainder spanning several commodities splits the posting into one posting
+  per commodity — also what `print -x` does. This is the one place `fmt` turns
+  one line into several; a posting carrying a cost or assertion tail is never
+  split, since duplicating the tail would assert something nobody wrote.
+- A remainder of zero is still written (`0 EUR`), not omitted.
+
+**Costs are deliberately not inferred.** `print -x` turns `10 EUR` / `-11 USD`
+into `10 EUR @@ 11 USD`. That is a claim about what the transaction *was* —
+a conversion rather than two independent legs — and inventing it in the user's
+file goes past "write down what is already implied".
+
+**Never guess** (invariant 2 and 3's spirit): an unparseable amount elsewhere
+in the transaction, or an already-unbalanced transaction, leaves the whole
+transaction untouched. Periodic (`~`) and auto (`=`) transactions do not open a
+transaction as far as `fmt` is concerned, so their multiplier amounts and their
+different meaning of elision are out of reach by construction.
+
+**How it is tested.** The unit tests pin every rule above. The semantic tests
+use two oracles, because one no longer suffices: for journals with no declared
+style, `hledger print -x` must be byte-identical before and after — hledger
+inferred exactly what we wrote. Where padding applies, `print -x` differs by
+design, so the oracle is `hledger balance`: did any *value* move? (`balance` is
+the weaker of the two in general — hledger derives a commodity's report
+precision from the amounts it sees in the journal, so writing a full-precision
+inferred amount changes the display of every amount in that commodity — which
+is why it is the fallback rather than the default.)
 
 ## Sorting (`--sort`)
 
