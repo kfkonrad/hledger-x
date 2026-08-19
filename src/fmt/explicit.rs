@@ -68,8 +68,25 @@ impl Group {
 /// `txn` is the classified line run following a transaction header; lines that
 /// are not postings are ignored.
 pub(super) fn fill(txn: &mut [Class], ctx: &AmountCtx) {
+    if txn.iter().flat_map(postings_of).any(is_ambiguous) {
+        return;
+    }
     fill_group(txn, ctx, Group::Real);
     fill_group(txn, ctx, Group::Balanced);
+}
+
+/// Whether a posting means different things to different hledgers, which
+/// happens when a lone tab sits inside what we read as the account name.
+///
+/// Released hledger (checked against 1.52.1 and 1.99.3) reads `a\t10 EUR` as
+/// one long account name with no amount, so the amount to infer is `-10 EUR`
+/// from elsewhere in the transaction; an unreleased build on hledger's master
+/// branch reads it as `a` already holding `10 EUR`, so there is nothing to
+/// infer at all. Either amount we wrote would be wrong under the other
+/// reading — and one of the two files does not parse — so the whole
+/// transaction is left as it stands.
+fn is_ambiguous(p: &Posting) -> bool {
+    super::posting::account_of(p).is_some_and(|a| a.contains('\t'))
 }
 
 fn fill_group(txn: &mut [Class], ctx: &AmountCtx, group: Group) {

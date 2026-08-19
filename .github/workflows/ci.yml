@@ -5,14 +5,23 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Test (hledger ${{ matrix.hledger }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The semantic-equivalence tests ask a real hledger what a journal
+        # means, and hledger's answer has changed between releases (a lone tab
+        # between account and amount, for one). Run them against both current
+        # release lines so a divergence shows up here rather than in someone's
+        # journal.
+        hledger: ["1.52.1", "1.99.3"]
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
       - name: Install hledger
         env:
-          HLEDGER_VERSION: 1.52.1
+          HLEDGER_VERSION: ${{ matrix.hledger }}
         run: |
           set -euxo pipefail
           # The semantic-equivalence tests skip themselves when hledger is not

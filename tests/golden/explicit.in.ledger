@@ -252,6 +252,14 @@ D 1,000.00 GBP
     t42:shares  10 AAPL {$5}
     t42:cash
 
+2026-04-04 a lone tab means different things to different hledgers
+    ; every released hledger reads the first account here as `t44:a<tab>1 EUR`
+    ; holding no amount; an unreleased build on hledger's master branch reads
+    ; it as `t44:a` holding `1 EUR`. The two disagree about which posting is
+    ; waiting for an amount, so neither gets one written in
+    t44:a	1 EUR
+    t44:b  -1 EUR
+
 ~ monthly  rent
     ; a periodic rule's postings are laid out like any others, but a rule is
     ; not a transaction: nothing in it is balanced, filled in or restyled

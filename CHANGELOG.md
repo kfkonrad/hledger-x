@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   - `--check` succeeds on a journal formatted with `--explicit` (that is: `fmt --explicit` is more strict and regular
     `fmt` but still compatible)
   - Transactions it cannot work out on its own — two postings missing an amount, an amount it cannot read, a `~` or `=`
-    rule — are left exactly as they are
+    rule, a posting whose account and amount are separated by a single tab — are left exactly as they are
   - It is a command-line flag only and cannot be set in the config file, since it rewrites amounts rather than just
     their layout
 
@@ -40,11 +40,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 - `commodity` directives are now properly scoped and only applied after they are declared
 - `fmt`: a `D` directive now also settles which character is the decimal mark for commodities that declare no format of
   their own, matching hledger
-- Several postings that used to be treated as unreadable are now understood: a single tab between the account and the
-  amount, a cost or assertion written up against its operator (`@1.1EUR`, `=10USD`), a `=*` or `==*` assertion, and a
-  space as the digit group mark (`1 234.00 USD`, including a `commodity 1 000.00 USD` declaring one). Such postings
-  previously went unaligned and unrestyled, `add` reported the imbalance as unknown, and `fmt --explicit` declined to
-  fill in the other amount
+- Several postings that used to be treated as unreadable are now understood: a cost or assertion written up against
+  its operator (`@1.1EUR`, `=10USD`), a `=*` or `==*` assertion, and a space as the digit group mark (`1 234.00 USD`,
+  including a `commodity 1 000.00 USD` declaring one). Such postings previously went unaligned and unrestyled, `add`
+  reported the imbalance as unknown, and `fmt --explicit` declined to fill in the other amount
 - A negative amount written the way hledger writes it, with the sign between the symbol and the digits (`$-10`), is no
   longer read as a separate commodity from `$10`. This made `add` report an imbalance on a transaction that balanced
   fine

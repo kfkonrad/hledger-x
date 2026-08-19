@@ -134,6 +134,10 @@ What it deliberately does *not* do:
 - It never guesses. A transaction with two amount-less postings, an amount that does not parse, or a periodic (`~`) or
   auto (`=`) rule is passed through untouched — `fmt` is not a validator, and a wrong amount would be far worse than
   no amount.
+- A posting whose account and amount are separated by a *single tab* is passed through with its transaction. hledger
+  itself has changed its mind here: releases read the tab as part of the account name, so the posting has no amount at
+  all, while an unreleased development build reads it as a separator. Whichever amount was filled in would be wrong
+  under the other reading, so none is. Two spaces, or a space and a tab, are unambiguous everywhere.
 
 When a commodity has no `commodity` directive, padding simply does not apply, and an amount that has to be generated
 copies the notation of the posting it balances — including a unitless one, so `1 000` balances with `-1 000`.

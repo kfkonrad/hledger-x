@@ -910,6 +910,28 @@ mod tests {
     }
 
     #[test]
+    fn explicit_leaves_a_transaction_holding_a_lone_tab_posting_alone() {
+        // Released hledger reads `a\t10 EUR` as one long account name with
+        // no amount; an unreleased build on hledger's master branch reads it
+        // as `a` holding `10 EUR`. Whichever amount we filled in would be
+        // wrong under one of them, so we fill in none.
+        let src = "2026-01-01 x\n    a\t10 EUR\n    b\n";
+        assert_eq!(explicit(src), src);
+        // The ambiguity is the transaction's, not the posting's: an
+        // untouchable sibling makes the whole sum unreliable.
+        assert_eq!(
+            explicit("2026-01-01 x\n    a\t10 EUR\n    b  -10 EUR\n    c\n"),
+            "2026-01-01 x\n    a\t10 EUR\n    b         -10 EUR\n    c\n"
+        );
+        // Two whitespace characters are a separator in every hledger, so
+        // there is nothing ambiguous to step around.
+        assert_eq!(
+            explicit("2026-01-01 x\n    a \t10 EUR\n    b\n"),
+            "2026-01-01 x\n    a   10 EUR\n    b  -10 EUR\n"
+        );
+    }
+
+    #[test]
     fn explicit_balances_the_three_posting_kinds_separately() {
         // `(v)` contributes to nothing; `[v]`/`[w]` balance among themselves.
         assert_eq!(
