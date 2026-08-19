@@ -36,9 +36,8 @@ interchangeable.
 
 ### fmt
 
-An opinionated formatter heavily inspired by [`hledger-fmt`](https://github.com/mikluko/hledger-fmt). The output format
-should be similar to hledger print, except `hledger-x fmt` preserves directives and only changes transaction formatting.
-`hledger-x fmt` fixes indentation as well as amount formatting.
+An opinionated formatter heavily inspired by [`hledger-fmt`](https://github.com/mikluko/hledger-fmt). It fixes
+indentation and amount formatting, leaving directives untouched, so the result reads much like `hledger print`.
 
 ```sh
 hledger-x fmt                            # the configured ledger_file (or $LEDGER_FILE) and its includes
@@ -53,115 +52,28 @@ hledger-x fmt --quiet                    # do not print a list of changed files
 ```
 
 `-f`/`--follow` is repeatable and can be combined with plain, non-following file arguments. Unreadable files are
-reported and skipped.
+reported and skipped, so one bad file does not abort the run.
 
-<details><summary>Details about the formatting rules</summary>
 Sorting is directive-bounded: directives and standalone comment blocks act as barriers, so transactions only reorder
-within the runs between them. A comment directly above a transaction travels with it. `--sort` and `--no-sort` override
-the configured `sort`.
-
-Alignment is computed file-wide, so one long account name or number reflows every posting in the file — expect
-occasional diffs much larger than the edit.
-
-The postings of `~` (periodic) and `=` (auto posting) rules are indented and aligned with everything else, but nothing
-more is done to them: a rule is not a transaction, so no amount in one is padded, restyled or filled in, and a `*2`
-multiplier is only lined up. The rule's own header line passes through untouched.
-
-A `comment` … `end comment` block is opaque. Its contents are prose, not journal syntax, so nothing in it is
-reformatted, restyled, re-spaced or reordered — the lines pass through byte-for-byte — and nothing in it counts towards
-the alignment columns. Declarations inside a block declare nothing, and an `include` inside one is not followed, which
-is what hledger does too.
-
-Blank lines are normalized. A run of them collapses to exactly one, leading and trailing ones go, and one is inserted
-wherever a transaction directly abuts the block above or below it. Consecutive directives, `P` price lines and
-`include`s stay dense — only boundaries involving a transaction gain a blank line. Comments attach downward: a comment
-block directly above a transaction heads it, so the blank line goes above the comment, and a comment written directly
-*below* a transaction's last posting is pushed away from it by one blank line. This is the same attachment `--sort`
-uses, so a comment that heads a transaction travels with it.
-
-`fmt` never changes an amount's precision — that belongs to whoever wrote it, and altering it would change what
-`hledger print` emits. (`add` does fill an amount you type out to the commodity's declared decimal places; see below,
-and `--explicit` opts `fmt` into the same thing.)
-
-A `commodity`, `D` or `decimal-mark` directive governs the amounts written **below** it, and only those — including
-across `include` lines, which take effect where they stand. hledger reads a journal top to bottom, so a style declared
-further down is not yet known when it reaches an amount, and `1,234 GBP` written above `commodity 1,000.00 GBP` means
-1.234 rather than 1234. Amounts above their commodity's declaration are therefore passed through exactly as written,
-by `fmt` and `--explicit` alike. Keeping your declarations at the top of the journal, or in a file you `include`
-first, is what most journals do already and is the layout everything is formatted against.
-</details>
+within the runs between them, and a comment directly above a transaction travels with it. An amount's precision is
+never changed — that belongs to whoever wrote it. A `commodity`, `D` or `decimal-mark` directive governs the amounts
+*below* it and only those, so keep your declarations at the top of the journal or in a file you `include` first.
 
 #### `--explicit`
 
-`--explicit` writes out what the journal leaves implied. It does two things:
+`--explicit` writes out what the journal leaves implied — the amount you left off, exactly as `hledger print -x`
+would show it:
 
-- **Fills in the amount you left off.** A transaction may omit one posting's amount and let hledger work it out;
-  `--explicit` writes that amount into the file, exactly as `hledger print -x` would show it.
+```txt
+2026-01-01 groceries        2026-01-01 groceries
+    expenses:food  10 EUR  →     expenses:food   10 EUR
+    assets:cash                  assets:cash    -10 EUR
+```
 
-  ```txt
-  2026-01-01 groceries        2026-01-01 groceries
-      expenses:food  10 EUR  →     expenses:food   10 EUR
-      assets:cash                  assets:cash    -10 EUR
-  ```
-
-- **Pads amounts to their commodity's declared decimal places.** With `commodity 1_000.00 EUR`, `1 EUR` becomes
-  `1.00 EUR` — the same rule `add` applies to an amount you type. The declared places are a minimum, never a maximum,
-  so `4.001 EUR` is left alone, and a commodity with no `commodity` directive is left alone entirely.
-
-<details><summary>Details about explicit formatting rules</summary>
-A `D` directive gives amounts written without a commodity that commodity, so `--explicit` writes it out: under
-`D 1,000.00 GBP`, a bare `10` becomes `10.00 GBP`. `add` does not do this — its default commodity comes from
-`add.default_commodity` in the configuration alone, so an amount you type never quietly picks one up from the
-journal.
-
-When a commodity has no `commodity` directive, padding simply does not apply — `1 USD` stays `1 USD`. An amount that
-has to be *generated*, though, still has to be written somehow, and its style is taken from the postings it balances
-against: `$10` balances with `$-10`, `10€` with `-10€`, and a typed `1,234.50 USD` keeps its digit grouping. A declared
-style always wins over what the neighbours happen to look like.
-
-`--check` honours `--explicit`: `hledger-x fmt --check --explicit` fails on a journal that still leaves an amount
-implied, which is what you want in a pre-commit hook or CI.
-
-Unlike `sort`, `--explicit` is a flag only and cannot be set in the configuration file. It rewrites amounts rather than
-just their layout, so every run that does it says so on the command line.
-
-What it deliberately does *not* do:
-
-- It never infers a conversion cost. `hledger print -x` turns `10 EUR` / `-11 USD` into `10 EUR @@ 11 USD`; that is a
-  claim about the transaction rather than a value already implied by it, so `fmt` leaves it out.
-- Lot notation (`10 AAPL {$5}`) is not read, so a transaction using one is passed through rather than balanced from
-  the lot cost.
-- It never guesses. A transaction with two amount-less postings, an amount that does not parse, or a periodic (`~`) or
-  auto (`=`) rule is passed through untouched — `fmt` is not a validator, and a wrong amount would be far worse than
-  no amount.
-- A posting whose account and amount are separated by a *single tab* is passed through with its transaction. hledger
-  itself has changed its mind here: releases read the tab as part of the account name, so the posting has no amount at
-  all, while an unreleased development build reads it as a separator. Whichever amount was filled in would be wrong
-  under the other reading, so none is. Two spaces, or a space and a tab, are unambiguous everywhere.
-
-When a commodity has no `commodity` directive, padding simply does not apply, and an amount that has to be generated
-copies the notation of the posting it balances — including a unitless one, so `1 000` balances with `-1 000`.
-
-`tests/golden/explicit.in.ledger` is a reference journal with one annotated transaction per case, if you want to see
-all of this at once — including what is deliberately left alone. It is valid hledger, so
-`hledger print -x -f tests/golden/explicit.in.ledger` shows the comparison directly.
-
-Real, `[balanced virtual]` and `(unbalanced virtual)` postings balance separately, the way hledger balances them: an
-unbalanced virtual posting contributes to nothing and never receives an inferred amount. When the remainder spans
-several commodities the inferred posting is split into one posting per commodity, again matching `hledger print -x`.
-</details>
-
-#### Exit codes
-
-| Code | Meaning                                         |
-|------|-------------------------------------------------|
-| 0    | success                                         |
-| 1    | `fmt --check` found files that need formatting  |
-| 2    | the invocation or the configuration was invalid |
-| 3    | a file could not be read, written or walked     |
-
-A `fmt` run that both finds unformatted files and hits an error reports the error. Unreadable files are reported and
-skipped rather than aborting the run, so a single bad file still yields exit 3 with every other file formatted.
+It also pads amounts to their commodity's declared decimal places, the same rule `add` applies to an amount you type:
+under `commodity 1_000.00 EUR`, `1 EUR` becomes `1.00 EUR`. The declared places are a minimum, so `4.001 EUR` is left
+alone, as is a commodity with no `commodity` directive. It never guesses — no conversion cost is inferred, and a
+transaction it cannot work out with certainty is passed through untouched. `--check` honours `--explicit`.
 
 ### add
 
@@ -175,53 +87,25 @@ hledger-x add -f 2025/main.journal --to 2025/inbox.journal # -f and --to can be 
 ```
 
 `add` reads the journal from `-f`/`--file`, the `ledger_file` configuration or `$LEDGER_FILE` (in that order of
-precedence) and all included files to provide completions for descriptions, payees, tags, commodities and accounts as
-well as format amounts correctly when `commodity`/`decimal-mark`/`D` directives specify formatting.
-
-Note that for `hledger-x add` the `-f` flag may only be used once while `hledger-x fmt` supports it multiple times.
+precedence) and all included files, and honours the directives that change what a transaction means — `account`,
+`commodity`/`D`/`decimal-mark`, `payee`, `tag`, `Y`, `apply account`, `alias` and `include`. Unlike `fmt`, `add`
+accepts `-f` only once.
 
 #### Completion
 
-`hledger-x add` offers completions and pre-fills transactions from the most recent transaction of the same descriptions.
-The fields, in the order you visit them:
+`hledger-x add` walks you through date, description, account and amount, showing the transaction as it grows. Each
+field offers a greyed-out suggestion you can accept or type over: today's date (or a partial date, with the year and
+month filled in), completions for descriptions and declared `payee`s on `Tab`, and the account and amount of the last
+transaction with that payee. An empty account closes the transaction, as does accepting the calculated balancing
+amount on the last posting. A payee that is new to your journal is accepted with a note and a "did you mean …?", so
+typing `bahn` when you meant `Deutsche Bahn` does not quietly fork it.
 
-- Date: The current date is suggested as a greyed out text. Press enter to accept or enter a partial date where
-  `hledger-x` will fill in the current year or month if left out.
-- Description: Use `Tab` to get completions for descriptions and declared `payee`s. A payee that is neither declared
-  nor used anywhere in your journal is accepted with a note and a "did you mean …?" — so typing `bahn` when you meant
-  `Deutsche Bahn` no longer quietly forks the payee. See below on how `payee | note` is handled.
-- Account: the account of the previous transaction with that payee is suggested as greyed out text. `Enter`, `Tab` or
-  `→` accept it; typing replaces it. See completions subsection for how to configure completion behavior. `Ctrl-U`
-  dismisses the suggestion, and an empty account (nothing suggested, nothing typed) closes the transaction.
-- Amount: suggested as greyed out text the same way — from the template, or the calculated balancing amount on the last
-  posting. `Enter`, `Tab` or `→` accept it, and accepting the balancing amount also closes the transaction.
+An amount you enter is filled out to the decimal places its commodity declares — with `commodity 1_000.00 EUR`, typing
+`4 EUR` writes `4.00 EUR` — as are prices and balance assertions.
 
-An amount you enter is filled out to the decimal places its commodity declares: with `commodity 1_000.00 EUR`, both
-`4 EUR` and `4.0 EUR` are written as `4.00 EUR` — the same form the calculated balancing amount takes. The declared
-places are a minimum, never a maximum, so `4.000 EUR` and `4.001 EUR` are written exactly as typed; hledger accepts
-more precision than a commodity declares, and rounding would lose value. Commodities with no `commodity` directive are
-left alone entirely.
-
-A price or balance assertion is filled out the same way, against its own commodity's declared style, so
-`10 EUR @ 1.1 USD` is written as `10.00 EUR @ 1.10 USD`.
-
-#### Payees and notes
-
-hledger splits a description at the first `|` into a payee and a note, and `hledger-x` follows it. Everything that
-treats a description as an *identity* uses the payee half:
-
-| | uses |
-|---|---|
-| the "new to this journal" note, and its "did you mean …?" | payee |
-| the `strict` check, matching `hledger check payees` | payee |
-| the transaction template that pre-fills your postings | payee |
-| account ranking, conditioned on what you entered | payee |
-| description completion (`Tab`) | whole descriptions, plus declared payees |
-| what gets written to the file | whole description, verbatim as typed |
-
-So `payee Deutsche Bahn` covers `Deutsche Bahn | ticket to Köln`, and a distinct note on every entry — an invoice
-number, a trip — does not stop the template from matching. `hledger-x` never rewrites a description, not even to
-normalise the spacing around the `|`.
+hledger splits a description at the first `|` into payee and note; `hledger-x` uses the payee half wherever a
+description acts as an identity (the new-payee note, `strict`, the template, account ranking) and writes the whole
+description to the file.
 
 #### Comments and tags
 
@@ -241,54 +125,24 @@ writes
     assets:bank:checking -18.20 EUR
 ```
 
-Past the `;`, `Tab` completes tag names — from `tag` directives and from tags already used in your journal — and appends
-the `:`. A tag's value is free text and is not completed. A posting's comment belongs to its line, so it can be typed on
-either the account or the amount; the amount is where it ends up being shown and edited.
-
-Comments are never pre-filled from the previous transaction — they describe the occasion, not the shape of the entry.
+Past the `;`, `Tab` completes tag names — from `tag` directives and from tags already used in your journal. Comments
+are never pre-filled from the previous transaction.
 
 #### Navigating `hledger-x add`
 
-| Key                                                                | Action                                                           |
-|--------------------------------------------------------------------|------------------------------------------------------------------|
-| `Enter`                                                            | accept the field as typed, or the grey suggestion if it is empty |
-| `↑` / `↓`                                                          | move between fields                                              |
-| `Tab` / `Shift-Tab`                                                | complete, then open and cycle the menu                           |
-| `Tab` / `→`                                                        | pick up the grey suggestion to edit it                           |
-| `Ctrl-U`                                                           | clear the buffer, or dismiss an account suggestion               |
-| `Ctrl-W`                                                           | delete one word, or one `:`-segment on accounts                  |
-| `Ctrl-E`                                                           | open the current transaction draft in `$VISUAL`/`$EDITOR`        |
-| `Ctrl-C`                                                           | abort the current transaction                                    |
-| `Ctrl-D`, or `q`+`Enter` at the date prompt                        | quit                                                             |
-| `u`+`Enter` at the date prompt                                     | undo the last completed transaction                              |
-| `y`/`n` at the strict mode's confirmation prompt                   | accept/don't accept a new payee/account/commodity in strict mode |
-
-#### Journal directives
-
-`add` honours the directives that change what a transaction *means*, so what it
-writes reads back as what you entered:
-
-| Directive                | Effect                                                                            |
-|--------------------------|-----------------------------------------------------------------------------------|
-| `account`                | completion pool; the set `strict` checks against                                   |
-| `commodity`, `D`, `decimal-mark` | amount display style — decimal mark, grouping, decimal places, symbol side |
-| `payee`                  | description completion pool; the set `strict` checks descriptions against          |
-| `tag`                    | tag-name completion inside comments                                                |
-| `Y` / `year`             | resolves partial dates like `01-15` when reading                                   |
-| `apply account`, `alias` | account names are resolved on read and written back in the form the region needs   |
-| `include`                | followed, nested, globs expanded                                                   |
-
-Inside an `apply account assets:bank` region, a posting written `checking` *is*
-`assets:bank:checking`. `add` shows you the full name everywhere and writes the
-remainder into the file, so hledger reads back the account you picked. This
-applies to `insertion = "chronological"` landing inside a region as much as to
-appending at the end of one. If an account cannot be written where it would go
-— the region rewrites every spelling of it — `add` says so and writes nothing,
-rather than silently entering a different account; your entries stay in the
-recovery journal.
-
-Dates are always written in full `YYYY-MM-DD` form, even where a `Y` directive
-would let the year be omitted.
+| Key                                              | Action                                                           |
+|--------------------------------------------------|------------------------------------------------------------------|
+| `Enter`                                          | accept the field as typed, or the grey suggestion if it is empty |
+| `↑` / `↓`                                        | move between fields                                              |
+| `Tab` / `Shift-Tab`                              | complete, then open and cycle the menu                           |
+| `Tab` / `→`                                      | pick up the grey suggestion to edit it                           |
+| `Ctrl-U`                                         | clear the buffer, or dismiss an account suggestion               |
+| `Ctrl-W`                                         | delete one word, or one `:`-segment on accounts                  |
+| `Ctrl-E`                                         | open the current transaction draft in `$VISUAL`/`$EDITOR`        |
+| `Ctrl-C`                                         | abort the current transaction                                    |
+| `Ctrl-D`, or `q`+`Enter` at the date prompt      | quit                                                             |
+| `u`+`Enter` at the date prompt                   | undo the last completed transaction                              |
+| `y`/`n` at the strict mode's confirmation prompt | accept/don't accept a new payee/account/commodity in strict mode |
 
 #### Recovery
 
@@ -318,45 +172,24 @@ equity_conversion = false            # add equity postings for multi-commodity t
 equity_conversion_account = "equity:conversion"
 ```
 
-`ledger_file` and `add.default_commodity` have no default. If `ledger_file` is unset, `-f main.journal` has to be passed
-or `$LEDGER_FILE` needs to be set.
+- `ledger_file` and `add.default_commodity` have no default. If `ledger_file` is unset, `-f main.journal` has to be
+  passed or `$LEDGER_FILE` needs to be set.
+- `format_file = false` writes only the new lines and warns when the file's existing lines become stale; combining it
+  with `sort = true` is rejected.
+- `substring` and `fuzzy` account completions don't complete cross `:`-boundaries. That means, `ac` doesn't complete to
+  `assets:cash` but `a:c` does.
+- With `equity_conversion = true`, each `@`/`@@` cost gets a pair of postings to `equity_conversion_account` cancelling
+  it, written after the postings that conversion covers:
 
-`format_file = false` writes only the new lines and warns when the file's existing lines become stale; combining it with
-`sort = true` is rejected.
+  ```txt
+  2001-01-01 Example
+      expenses:foo            10 USD @@ 9.06 EUR
+      assets:cash          -9.06 EUR
+      equity:conversion      -10 USD
+      equity:conversion     9.06 EUR
+  ```
 
-Note that `substring` and `fuzzy` account completions don't complete cross `:`-boundaries. That means, `ac` doesn't
-complete to `assets:cash` but `a:c` does.
-
-With `equity_conversion = true`, each `@`/`@@` cost gets a pair of postings to `equity_conversion_account` cancelling
-it, written after the postings that conversion covers:
-
-```txt
-2001-01-01 Example
-    expenses:foo            10 USD @@ 9.06 EUR
-    assets:cash          -9.06 EUR
-    equity:conversion      -10 USD
-    equity:conversion     9.06 EUR
-```
-
-A transaction with several conversions is written as one group per conversion, separated by a `;` line. A posting joins
-the conversion whose commodities include its own, so the groups read in order however you typed the postings:
-
-```txt
-2001-01-01 Example
-    assets:dollars       $-135
-    assets:euros          €100 @ $1.35
-    equity:conversion    €-100
-    equity:conversion     $135
-    ;
-    assets:yen           ¥-100
-    assets:euros            €1 @@ ¥100
-    equity:conversion      €-1
-    equity:conversion     ¥100
-```
-
-The pairing matters: hledger only recognises equity postings as cancelling a cost when the two sit next to each other,
-so a single summed posting per commodity would make the transaction unbalanced. A posting that funds more than one
-conversion belongs to none of them and is written last, after every group.
+  A transaction with several conversions is written as one group per conversion, separated by a `;` line.
 
 ## Maintainers
 
