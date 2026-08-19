@@ -21,7 +21,7 @@ use super::index::Index;
 use super::parser::{FileMap, Journal, Transaction};
 use super::write::{comment_suffix, NewTransaction, Posting};
 use crate::amount::{imbalance, parse_amount, render_amount_like, AmountCtx};
-use crate::config::{Completion, Config};
+use crate::config::{Completion, Config, StrictChecks};
 use crate::fmt::posting::{parse_posting, render};
 
 /// The bare comment line written between conversion groups. A posting with
@@ -189,8 +189,9 @@ pub struct SessionCtx {
     /// Declared accounts (full pool — offering a name is harmless even when
     /// it is declared below the insertion point).
     pub declared_accounts: Vec<String>,
-    /// Strict mode: prompt before using undeclared accounts/commodities.
-    pub strict: bool,
+    /// Strict mode, per check: prompt before using an undeclared account,
+    /// commodity or payee.
+    pub strict: StrictChecks,
     /// Default commodity sample: the target file's `D` directive, falling
     /// back to the configured default.
     pub default_commodity: Option<String>,
@@ -1043,7 +1044,7 @@ impl Session {
         // to pick defaults and then writing the literal `bahn`.
         let mut note = None;
         if !confirmed && !payee.is_empty() {
-            if self.ctx.strict && !self.ctx.declared_payees_visible.contains(&payee) {
+            if self.ctx.strict.payees && !self.ctx.declared_payees_visible.contains(&payee) {
                 let hint = self
                     .near_payee(&payee)
                     .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
@@ -1108,7 +1109,7 @@ impl Session {
         // An account accepted earlier in this session counts as settled:
         // asking about `expenses:coffee` on every posting would be noise.
         if !confirmed
-            && self.ctx.strict
+            && self.ctx.strict.accounts
             && !self.ctx.declared_accounts_visible.contains(&text)
             && !self.entered_accounts.iter().any(|a| a == &text)
         {
@@ -1217,7 +1218,7 @@ impl Session {
                     names.push(c);
                 }
             }
-            if self.ctx.strict {
+            if self.ctx.strict.commodities {
                 let undeclared = names
                     .iter()
                     .find(|c| !self.ctx.declared_commodities_visible.contains(*c));
@@ -2071,7 +2072,7 @@ mod tests {
     #[test]
     fn strict_mode_asks_before_using_an_undeclared_payee() {
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with("payee Deutsche Bahn\n", cfg);
@@ -2092,6 +2093,48 @@ mod tests {
         assert!(s.payee_known("bahn"));
     }
 
+    #[test]
+    fn a_check_left_out_of_the_strict_list_does_not_fire() {
+        // The motivating case: payees used as free-form notes, accounts and
+        // commodities still guarded.
+        let cfg = Config {
+            strict: StrictChecks {
+                accounts: true,
+                commodities: true,
+                payees: false,
+            },
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with("payee Deutsche Bahn\naccount expenses:travel\n", cfg);
+        s.submit();
+        // An undeclared payee passes — with the passing note, not a prompt.
+        type_in(&mut s, "bahn");
+        assert!(matches!(s.submit(), Submit::AdvancedWithNote(_)));
+        // The account check is untouched by that.
+        type_in(&mut s, "expenses:zzz");
+        assert!(matches!(s.submit(), Submit::Confirm { .. }));
+    }
+
+    #[test]
+    fn strict_payees_alone_leaves_the_account_check_off() {
+        let cfg = Config {
+            strict: StrictChecks {
+                payees: true,
+                ..StrictChecks::default()
+            },
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with("payee X\naccount expenses:travel\n", cfg);
+        s.submit();
+        type_in(&mut s, "X");
+        assert_eq!(s.submit(), Submit::Advanced);
+        type_in(&mut s, "expenses:zzz");
+        assert!(
+            matches!(s.submit(), Submit::AdvancedWithNote(_)),
+            "the account check was not asked for"
+        );
+    }
+
     // ---- epic 3: payee | note ----
 
     #[test]
@@ -2100,7 +2143,7 @@ mod tests {
         // `check payees` for `Deutsche Bahn | ticket`, and declaring the
         // whole string instead does *not*.
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with("payee Deutsche Bahn\n", cfg.clone());
@@ -2533,7 +2576,7 @@ mod tests {
     fn strict_mode_asks_before_using_undeclared_accounts() {
         let src = "payee X\naccount expenses:travel:train\naccount expenses:groceries\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with(src, cfg);
@@ -2561,7 +2604,7 @@ mod tests {
     fn strict_mode_asks_before_using_undeclared_commodities() {
         let src = "payee X\naccount a:b\naccount c:d\ncommodity 1.00 EUR\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with(src, cfg);
@@ -2592,7 +2635,7 @@ mod tests {
     fn strict_mode_checks_tail_commodities_too() {
         let src = "payee X\naccount a:b\naccount c:d\ncommodity 1.00 EUR\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with(src, cfg);
@@ -2623,7 +2666,7 @@ mod tests {
     fn strict_mode_never_questions_unitless_amounts() {
         let src = "payee X\naccount a:b\naccount c:d\ncommodity 1.00 EUR\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with(src, cfg);
@@ -2747,7 +2790,7 @@ mod tests {
     fn strict_mode_asks_about_a_session_account_only_once() {
         let src = "payee X\naccount a:b\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let (mut s, _t) = session_with(src, cfg);

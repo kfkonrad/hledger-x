@@ -25,6 +25,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   region at the insertion point requires. Where an account cannot be expressed there at all, `add` refuses and says
   which directive is responsible instead of silently entering a different account
 
+### Changed
+- `add`: the `strict` configuration supports a list in addition to `true` or `false` to enable selected checks instead
+  of all of them or none, i.e. `strict = ["accounts", "commodities", "payees"]` is now equivalent to `strict = true`
+
 ### Fixed
 - `add`: a transaction that lands inside an `apply account` region — placed there by `insertion = "chronological"`, or
   appended into one the file never closes — is now written with the names that region requires, so hledger reads back
