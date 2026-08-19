@@ -49,6 +49,48 @@ pub enum Completion {
     Fuzzy,
 }
 
+/// Which of the undeclared-name guards `add` runs.
+///
+/// Three independent checks, named after the `hledger check` subcommands
+/// they mirror — `accounts`, `commodities`, `payees` — because that is what
+/// each one is: the same question, asked while the name is being typed
+/// rather than after the fact.
+///
+/// A struct of flags rather than a set, so a call site reads
+/// `strict.payees` and adding a fourth check is a compiler error at every
+/// place that has to decide about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StrictChecks {
+    /// Ask before using an account that is not declared at the insertion
+    /// point (`hledger check accounts`).
+    pub accounts: bool,
+    /// Ask before using an undeclared commodity (`hledger check
+    /// commodities`). A unitless amount is always valid.
+    pub commodities: bool,
+    /// Ask before using an undeclared payee (`hledger check payees`), tested
+    /// against the payee half of the description.
+    pub payees: bool,
+}
+
+impl StrictChecks {
+    /// Every check there is — what `strict = true` means, now and after a
+    /// fourth check is added. Spelling the list out instead pins it.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            accounts: true,
+            commodities: true,
+            payees: true,
+        }
+    }
+
+    /// Whether any check is on.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.accounts || self.commodities || self.payees
+    }
+}
+
 /// The resolved configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -63,12 +105,12 @@ pub struct Config {
     pub sort: bool,
     /// Where new transactions are inserted.
     pub insertion: Insertion,
-    /// Strict mode: entering an account or commodity that is not declared
-    /// (via `account` / `commodity` directives visible at the insertion
-    /// point) asks for confirmation first. Off by default — then undeclared
-    /// names are accepted, with a passing note when they are new to the
-    /// journal.
-    pub strict: bool,
+    /// Strict mode, per check: entering a name that is not declared (via the
+    /// `account` / `commodity` / `payee` directives visible at the insertion
+    /// point) asks for confirmation first. All off by default — then
+    /// undeclared names are accepted, with a passing note when they are new
+    /// to the journal.
+    pub strict: StrictChecks,
     /// Completion style for the account field, matched segment by segment.
     pub account_completion: Completion,
     /// Completion style for the description field. Descriptions are plain
@@ -93,7 +135,7 @@ impl Default for Config {
             format_file: true,
             sort: false,
             insertion: Insertion::Append,
-            strict: false,
+            strict: StrictChecks::default(),
             account_completion: Completion::Substring,
             description_completion: Completion::Substring,
             default_commodity: None,
@@ -144,7 +186,7 @@ struct Raw {
 struct RawAdd {
     format_file: Option<bool>,
     insertion: Option<RawInsertion>,
-    strict: Option<bool>,
+    strict: Option<RawStrict>,
     account_completion: Option<Completion>,
     description_completion: Option<Completion>,
     default_commodity: Option<String>,
@@ -157,6 +199,79 @@ struct RawAdd {
 enum RawInsertion {
     Append,
     Chronological,
+}
+
+/// `strict` as written in the file: `true`/`false`, or a list of check names.
+///
+/// The two forms mean different things and both are worth having. `true` is
+/// "every check hledger-x has", including any added later; a list is exactly
+/// these, pinned. `false` and `[]` both mean none.
+#[derive(Debug, Clone)]
+enum RawStrict {
+    Every(bool),
+    Only(Vec<RawCheck>),
+}
+
+impl RawStrict {
+    fn resolve(self) -> StrictChecks {
+        match self {
+            Self::Every(true) => StrictChecks::all(),
+            Self::Every(false) => StrictChecks::default(),
+            Self::Only(list) => {
+                let mut checks = StrictChecks::default();
+                for c in list {
+                    match c {
+                        RawCheck::Accounts => checks.accounts = true,
+                        RawCheck::Commodities => checks.commodities = true,
+                        RawCheck::Payees => checks.payees = true,
+                    }
+                }
+                checks
+            }
+        }
+    }
+}
+
+/// Hand-written rather than `#[serde(untagged)]`: untagged collapses every
+/// failure into "data did not match any variant", which would lose both the
+/// name of the bad check and the span [`crate::errors::toml_error`] needs.
+impl<'de> serde::Deserialize<'de> for RawStrict {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = RawStrict;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("true, false, or a list of checks")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(RawStrict::Every(v))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut list = Vec::new();
+                while let Some(c) = seq.next_element()? {
+                    list.push(c);
+                }
+                Ok(RawStrict::Only(list))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// One entry of the `strict` list. Named for the `hledger check` subcommand
+/// it mirrors, plural and only plural — one spelling, no aliases.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RawCheck {
+    Accounts,
+    Commodities,
+    Payees,
 }
 
 /// A configuration problem worth stopping for.
@@ -281,7 +396,7 @@ fn apply_add(cfg: &mut Config, raw: RawAdd) {
         };
     }
     if let Some(v) = raw.strict {
-        cfg.strict = v;
+        cfg.strict = v.resolve();
     }
     if let Some(v) = raw.account_completion {
         cfg.account_completion = v;
@@ -338,7 +453,7 @@ mod tests {
         assert!(cfg.format_file);
         assert!(!cfg.sort);
         assert_eq!(cfg.insertion, Insertion::Append);
-        assert!(!cfg.strict);
+        assert!(!cfg.strict.any());
         assert_eq!(cfg.account_completion, Completion::Substring);
         assert_eq!(cfg.description_completion, Completion::Substring);
         assert_eq!(cfg.default_commodity, None);
@@ -396,7 +511,7 @@ mod tests {
         let local = "[add]\ninsertion = \"append\"\n";
         let cfg = load_str(Some(user), Some(local)).unwrap();
         assert!(cfg.sort); // untouched by local
-        assert!(cfg.strict); // untouched by the local [add] table
+        assert!(cfg.strict.any()); // untouched by the local [add] table
         assert_eq!(cfg.insertion, Insertion::Append);
     }
 
@@ -409,9 +524,91 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(cfg.strict);
+        assert_eq!(cfg.strict, StrictChecks::all());
         assert_eq!(cfg.insertion, Insertion::Chronological);
         assert_eq!(cfg.account_completion, Completion::Fuzzy);
+    }
+
+    #[test]
+    fn strict_true_turns_on_every_check() {
+        let cfg = load_str(Some("[add]\nstrict = true\n"), None).unwrap();
+        assert_eq!(cfg.strict, StrictChecks::all());
+        assert!(cfg.strict.any());
+    }
+
+    #[test]
+    fn strict_takes_a_list_of_checks() {
+        let cfg = load_str(
+            Some("[add]\nstrict = [\"accounts\", \"commodities\"]\n"),
+            None,
+        )
+        .unwrap();
+        assert!(cfg.strict.accounts);
+        assert!(cfg.strict.commodities);
+        assert!(!cfg.strict.payees, "payees was not asked for");
+    }
+
+    #[test]
+    fn an_empty_strict_list_is_off() {
+        let cfg = load_str(Some("[add]\nstrict = []\n"), None).unwrap();
+        assert_eq!(cfg.strict, StrictChecks::default());
+        assert!(!cfg.strict.any());
+    }
+
+    #[test]
+    fn a_repeated_strict_check_is_harmless() {
+        let cfg = load_str(Some("[add]\nstrict = [\"payees\", \"payees\"]\n"), None).unwrap();
+        assert!(cfg.strict.payees);
+        assert!(!cfg.strict.accounts);
+    }
+
+    #[test]
+    fn strict_false_is_still_accepted() {
+        let cfg = load_str(
+            Some("[add]\nstrict = true\n"),
+            Some("[add]\nstrict = false\n"),
+        )
+        .unwrap();
+        assert!(!cfg.strict.any());
+    }
+
+    #[test]
+    fn a_list_replaces_an_earlier_strict_setting_wholesale() {
+        let cfg = load_str(
+            Some("[add]\nstrict = true\n"),
+            Some("[add]\nstrict = [\"accounts\"]\n"),
+        )
+        .unwrap();
+        assert!(cfg.strict.accounts);
+        assert!(!cfg.strict.payees);
+        assert!(!cfg.strict.commodities);
+    }
+
+    #[test]
+    fn an_unknown_strict_check_is_rejected() {
+        // A tolerated typo would silently switch a guard off, so it stops.
+        let err = load_str(Some("[add]\nstrict = [\"wibble\"]\n"), None).unwrap_err();
+        assert!(err.0.contains("`wibble` is not a valid value"), "{}", err.0);
+        assert!(err.0.contains("accounts"), "{}", err.0);
+        assert!(err.0.contains("commodities"), "{}", err.0);
+        assert!(err.0.contains("payees"), "{}", err.0);
+    }
+
+    #[test]
+    fn a_singular_check_name_is_rejected_and_pointed_at_the_plural() {
+        let err = load_str(Some("[add]\nstrict = [\"payee\"]\n"), None).unwrap_err();
+        assert!(err.0.contains("`payee` is not a valid value"), "{}", err.0);
+        assert!(err.0.contains("did you mean `payees`?"), "{}", err.0);
+    }
+
+    #[test]
+    fn strict_as_a_bare_string_says_what_it_wanted() {
+        let err = load_str(Some("[add]\nstrict = \"accounts\"\n"), None).unwrap_err();
+        assert!(
+            err.0.contains("true, false, or a list of checks"),
+            "{}",
+            err.0
+        );
     }
 
     #[test]

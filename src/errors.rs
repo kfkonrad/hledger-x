@@ -121,10 +121,14 @@ fn humanize(msg: &str) -> (String, Option<String>) {
         return (format!("unknown setting `{field}`"), Some(hint));
     }
     if let Some((variant, valid)) = parse_backticked(msg, "unknown variant `", ", expected ") {
-        return (
-            format!("`{variant}` is not a valid value"),
-            Some(format!("expected {valid}")),
+        // `expected one of `a`, `b`` for a multi-variant enum, plain
+        // ``a`` for a single one; the near-miss reads either.
+        let list = valid.strip_prefix("one of ").unwrap_or(valid);
+        let hint = suggest(variant, list).map_or_else(
+            || format!("expected {valid}"),
+            |near| format!("did you mean `{near}`?"),
         );
+        return (format!("`{variant}` is not a valid value"), Some(hint));
     }
     if let Some(rest) = msg.strip_prefix("invalid type: ") {
         if let Some((found, want)) = rest.rsplit_once(", expected ") {
@@ -160,15 +164,27 @@ fn misplaced(field: &str) -> Option<&'static str> {
         .find(|s| squash(s) == target)
 }
 
-/// The valid setting a typo most likely meant. Deliberately narrow: it matches
-/// only on separators and case, which covers the mistakes people actually make
-/// (`formatfile`, `formatFile`, `format-file`) and never guesses wildly.
+/// The valid setting or value a typo most likely meant. Deliberately narrow:
+/// it matches on separators, case, and a missing or spare trailing `s`, which
+/// covers the mistakes people actually make (`formatfile`, `formatFile`,
+/// `format-file`, `payee` for `payees`) and never guesses wildly.
 fn suggest<'a>(field: &str, valid: &'a str) -> Option<&'a str> {
     let target = squash(field);
-    valid
+    // serde joins two alternatives with ` or `, more than two with `, `.
+    let mut candidates = valid
         .split(", ")
-        .map(|c| c.trim_matches('`'))
+        .flat_map(|c| c.split(" or "))
+        .map(|c| c.trim_matches('`'));
+    candidates
+        .clone()
         .find(|c| squash(c) == target)
+        .or_else(|| candidates.find(|c| plural_of(&squash(c), &target)))
+}
+
+/// Whether two squashed names differ only by a trailing `s`.
+fn plural_of(a: &str, b: &str) -> bool {
+    let longer_is = |long: &str, short: &str| long.strip_suffix('s') == Some(short);
+    longer_is(a, b) || longer_is(b, a)
 }
 
 fn squash(s: &str) -> String {
@@ -280,6 +296,22 @@ mod tests {
         let out = render("insertion = \"sideways\"\n");
         assert!(out.contains("`sideways` is not a valid value"), "{out}");
         assert!(out.contains("`append`"), "{out}");
+    }
+
+    #[test]
+    fn a_near_miss_value_is_suggested_singular_for_plural_included() {
+        let out = render("insertion = \"Chronological\"\n");
+        assert!(out.contains("did you mean `chronological`?"), "{out}");
+        // The mistake the plural check names invite: `payee` for `payees`.
+        assert_eq!(
+            suggest("payee", "`accounts`, `commodities`, `payees`"),
+            Some("payees")
+        );
+        assert_eq!(
+            suggest("accounts", "`accounts`, `commodities`"),
+            Some("accounts")
+        );
+        assert_eq!(suggest("wibble", "`accounts`, `commodities`"), None);
     }
 
     #[test]

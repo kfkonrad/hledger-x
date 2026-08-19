@@ -32,6 +32,12 @@ fields in the Enter flow were implemented, tried, and rejected because they
 lengthened the common no-comment path. Do not reintroduce them. The field
 count must stay date → description → account → amount.
 
+`strict` was made **per check** on 2026-08-19: `true`/`false` still work, and a
+list picks individual checks by hledger's own plural names — `accounts`,
+`commodities`, `payees`. Only those spellings, no aliases, and an unrecognised
+one is an error, since tolerating it would silently switch a guard off. See
+`DESIGN.md` § Strict mode.
+
 Four epic 3 facts that are easy to get wrong and are pinned by tests:
 
 - **Aliases apply in reverse declaration order**, each to the running result.

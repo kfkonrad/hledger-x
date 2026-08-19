@@ -142,7 +142,7 @@ are never pre-filled from the previous transaction.
 | `Ctrl-C`                                         | abort the current transaction                                    |
 | `Ctrl-D`, or `q`+`Enter` at the date prompt      | quit                                                             |
 | `u`+`Enter` at the date prompt                   | undo the last completed transaction                              |
-| `y`/`n` at the strict mode's confirmation prompt | accept/don't accept a new payee/account/commodity in strict mode |
+| `y`/`n` at a strict-mode confirmation prompt     | accept/don't accept an new payee/account/commodity               |
 
 #### Recovery
 
@@ -164,7 +164,7 @@ sort = false                         # sort transactions by date
 [add]
 format_file = true                   # rewrite the whole file, formatted, on write
 insertion = "append"                 # or "chronological"
-strict = false                       # ask before using new payees/accounts/commodities
+strict = false                       # or true, or a list: ["accounts", "commodities", "payees"]
 account_completion = "substring"     # prefix | substring | fuzzy
 description_completion = "substring" # prefix | substring | fuzzy
 # default_commodity = ""             # fill in this commodity (e.g. USD, EUR, $, ¥) on bare amounts
@@ -173,11 +173,13 @@ equity_conversion_account = "equity:conversion"
 ```
 
 - `ledger_file` and `add.default_commodity` have no default. If `ledger_file` is unset, `-f main.journal` has to be
-  passed or `$LEDGER_FILE` needs to be set.
+  passed or `$LEDGER_FILE` needs to be set
+- `strict` is a list of checks to opt into. Support `accounts`, `commodities` and `payees`. You can also set this to
+  `true` to opt into all checks or `false` to opt into none
 - `format_file = false` writes only the new lines and warns when the file's existing lines become stale; combining it
-  with `sort = true` is rejected.
+  with `sort = true` is rejected
 - `substring` and `fuzzy` account completions don't complete cross `:`-boundaries. That means, `ac` doesn't complete to
-  `assets:cash` but `a:c` does.
+  `assets:cash` but `a:c` does
 - With `equity_conversion = true`, each `@`/`@@` cost gets a pair of postings to `equity_conversion_account` cancelling
   it, written after the postings that conversion covers:
 
@@ -189,7 +191,7 @@ equity_conversion_account = "equity:conversion"
       equity:conversion     9.06 EUR
   ```
 
-  A transaction with several conversions is written as one group per conversion, separated by a `;` line.
+  A transaction with several conversions is written as one group per conversion, separated by a `;` line
 
 ## Maintainers
 

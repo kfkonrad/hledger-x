@@ -178,7 +178,7 @@ mod tests {
     use crate::add::parser::{parse_journal, FileMap};
     use crate::add::ui::SessionCtx;
     use crate::add::write::Posting;
-    use crate::config::Config;
+    use crate::config::{Config, StrictChecks};
     use chrono::NaiveDate;
     use std::fs;
     use std::io::Cursor;
@@ -260,7 +260,7 @@ mod tests {
     fn strict_confirmation_via_pipe() {
         let src = "payee X\naccount expenses:groceries\naccount assets:cash\ncommodity 1.00 EUR\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         // date, desc, undeclared account → y, amount, second account
@@ -280,7 +280,7 @@ mod tests {
     fn declining_an_undeclared_account_stays_on_the_field() {
         let src = "payee X\naccount expenses:groceries\n";
         let cfg = Config {
-            strict: true,
+            strict: StrictChecks::all(),
             ..Config::default()
         };
         let input = "\nX\nexpenses:zzz\nn\n";

@@ -1133,12 +1133,27 @@ fn a_wrongly_typed_config_value_says_what_it_wanted() {
     write(
         &dir,
         ".hledger-x.toml",
-        "sort = true\n[add]\nstrict = \"yes\"\n",
+        "sort = true\n[add]\nformat_file = \"yes\"\n",
     );
     let out = run_in(&dir, &["fmt", "-"], "");
     assert_eq!(out.code, 2, "stderr: {}", out.stderr);
     assert!(
         out.stderr.contains("line 3") && out.stderr.contains("expected true or false"),
+        "{}",
+        out.stderr
+    );
+    assert_no_leaks(&out.stderr);
+}
+
+#[test]
+fn an_unknown_strict_check_stops_with_the_valid_names() {
+    let dir = scratch("err_cfg_strict");
+    write(&dir, ".hledger-x.toml", "[add]\nstrict = [\"payee\"]\n");
+    let out = run_in(&dir, &["fmt", "-"], "");
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("`payee` is not a valid value")
+            && out.stderr.contains("did you mean `payees`?"),
         "{}",
         out.stderr
     );

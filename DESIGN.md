@@ -1135,22 +1135,50 @@ echoed to the terminal, with no extra prompt.
 
 ## Strict mode — the undeclared-name guard
 
-Config `strict = true | false`, default `false`. (Supersedes the earlier
-`new_account = confirm | warn | allow | error` design: one switch, two
-checks, wording fixed.)
+Config `strict`, default off. (Supersedes the earlier
+`new_account = confirm | warn | allow | error` design: wording fixed, and the
+question asked per kind of name rather than per outcome.)
 
+There are **three independent checks** — `accounts`, `commodities`,
+`payees` — and they are chosen individually (settled with the user,
+2026-08-19). One boolean was wrong the moment the payee check existed: a
+journal that declares its accounts and commodities but uses payees as
+free-form notes is ordinary, and under a single switch such a journal had to
+give up the other two guards to avoid being asked about every description.
+
+```toml
+strict = true                         # every check, including ones added later
+strict = ["accounts", "commodities"]  # exactly these, pinned
+strict = false                        # or [] — none, the default
+```
+
+- **The names are hledger's**, taken verbatim from the subcommands each check
+  mirrors: `hledger check accounts` / `check commodities` / `check payees`.
+  Plural, and **only** plural — no singular aliases, no `all`. One spelling
+  per check is the whole point of naming them after something the user
+  already knows.
+- **`true` is not sugar for the full list.** `true` means "every check
+  hledger-x has", and grows when a fourth is added; a list is pinned to what
+  it names. Both forms are worth keeping for that reason.
+- **An unrecognised name is an error, not a warning.** This is the one place
+  the "warn and proceed" preference does not apply: a tolerated `["payes"]`
+  silently switches a guard *off*, which is degraded safety reporting itself
+  as configured safety. Config is read once at startup, so stopping costs
+  nothing. Since the chosen names are plural, `suggest` in `errors.rs`
+  matches across a trailing `s`, so `["payee"]` is answered with *did you
+  mean `payees`?* rather than a bare list.
 - **Wording matters**: hledger-x never declares anything — the question is
   whether to *use* an undeclared name. "`exp:trav` is not a declared account
   — use it anyway? (did you mean `expenses:travel:train`?)"
-- **Strict** checks both accounts and commodities against the declarations
-  visible at the insertion point (the position-filtered sets — exactly what
-  `hledger check accounts` / `check commodities` would accept there), and
-  asks before using anything undeclared. The commodity check covers the face
-  amount and any second commodity in an `@`/`@@` cost or assertion tail. A
-  unitless amount is always valid, even in strict mode.
-- **Not strict** (default): everything is accepted; a name that is neither
-  declared nor used anywhere in the journal gets a passing, non-blocking
-  note, so typos stay visible without a prompt.
+- **A check that is on** tests against the declarations visible at the
+  insertion point (the position-filtered sets — exactly what the
+  corresponding `hledger check` would accept there) and asks before using
+  anything undeclared. The commodity check covers the face amount and any
+  second commodity in an `@`/`@@` cost or assertion tail. A unitless amount
+  is always valid, even then.
+- **A check that is off**: everything of that kind is accepted; a name that
+  is neither declared nor used anywhere in the journal gets a passing,
+  non-blocking note, so typos stay visible without a prompt.
 
 ## Write modes
 
