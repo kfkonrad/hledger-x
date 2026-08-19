@@ -30,6 +30,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
   commodity from the file. Spelling `D` out is `fmt --explicit`'s job now
 
 ### Fixed
+- `add`: a transaction with two or more `@`/`@@` conversions is no longer written in a form hledger rejects as
+  unbalanced when using automatic equity conversion (`equity_conversion = true`)
+  - Each conversion now gets its own pair of `equity:conversion` postings, written as a group next to each other after
+    the postings that conversion covers
+  - A `;` line separates groups
+  - Transactions with a single conversion are unaffected.
+  - A posting that funds more than one conversion is written last, after every group
 - `commodity` directives are now properly scoped and only applied after they are declared
 - `fmt`: a `D` directive now also settles which character is the decimal mark for commodities that declare no format of
   their own, matching hledger

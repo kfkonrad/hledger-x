@@ -945,6 +945,61 @@ fn add_appends_equity_conversion_postings_when_configured() {
 }
 
 #[test]
+fn add_writes_each_conversion_as_its_own_group() {
+    let dir = scratch("add_two_conversions");
+    write(&dir, ".hledger-x.toml", "[add]\nequity_conversion = true\n");
+    let journal = write(
+        &dir,
+        "main.journal",
+        "2026-08-01 seed\n    a:b   1.00 EUR\n    c:d  -1.00 EUR\n",
+    );
+    // Two conversions in one transaction, with the yen posting typed before
+    // the postings it funds.
+    let input = "2026-08-04\ntwo conversions\nassets:dollars\n$-135\nassets:yen\n\u{a5}-100\nassets:euros\n\u{20ac}100 @ $1.35\nassets:euros\n\u{20ac}1 @@ \u{a5}100\n\n.\n";
+    let out = run_add(&dir, &["-f", journal.to_str().unwrap()], input);
+    assert_eq!(
+        out.code, 0,
+        "stderr: {}\nstdout: {}",
+        out.stderr, out.stdout
+    );
+    let text = fs::read_to_string(&journal).unwrap();
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|l| !l.contains("two conversions"))
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .collect();
+    // Each conversion's postings, then the pair cancelling its cost; the
+    // yen posting has moved beside the conversion it funds.
+    assert_eq!(body.len(), 9, "file was:\n{text}");
+    assert!(body[0].starts_with("assets:dollars"), "{body:?}");
+    assert!(body[1].starts_with("assets:euros"), "{body:?}");
+    assert!(body[2].starts_with("equity:conversion"), "{body:?}");
+    assert!(body[3].starts_with("equity:conversion"), "{body:?}");
+    assert_eq!(body[4], ";", "{body:?}");
+    assert!(body[5].starts_with("assets:yen"), "{body:?}");
+    assert!(body[6].starts_with("assets:euros"), "{body:?}");
+    assert!(body[7].starts_with("equity:conversion"), "{body:?}");
+    assert!(body[8].starts_with("equity:conversion"), "{body:?}");
+
+    // The point of the grouping: hledger only matches equity postings with
+    // the costs they cancel when they sit in adjacent pairs. A single
+    // summed posting per commodity is rejected as unbalanced.
+    if Command::new("hledger").arg("--version").output().is_ok() {
+        let print = Command::new("hledger")
+            .args(["-n", "-f", journal.to_str().unwrap(), "print"])
+            .output()
+            .unwrap();
+        assert!(
+            print.status.success(),
+            "hledger rejected the journal: {}",
+            String::from_utf8_lossy(&print.stderr)
+        );
+    }
+}
+
+#[test]
 fn add_leaves_conversions_alone_by_default() {
     let dir = scratch("add_no_equity_conversion");
     let journal = write(
