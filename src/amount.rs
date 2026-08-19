@@ -110,6 +110,10 @@ pub struct ParsedAmount {
     /// What this posting contributes to the transaction balance: the face
     /// value, or the cost when an `@`/`@@` tail converts it.
     pub contributes: (Decimal, String),
+    /// Whether an `@`/`@@` cost tail is what produced [`Self::contributes`].
+    /// A balance assertion tail does not count, and neither does a cost that
+    /// happens to leave the amount unchanged.
+    pub has_cost: bool,
 }
 
 /// Parse a commodity directive sample (`1_000.00 EUR`, `$1000.00`,
@@ -319,10 +323,23 @@ pub fn parse_amount(text: &str, ctx: &AmountCtx) -> Option<ParsedAmount> {
     let (num_field, commodity, rest) = split_amount(&toks);
     let (value, commodity) = parse_face(&num_field, &commodity, ctx)?;
     let contributes = cost_contribution(value, &commodity, &rest, ctx)?;
+    let has_cost = has_cost_tail(&rest);
     Some(ParsedAmount {
         value,
         commodity,
         contributes,
+        has_cost,
+    })
+}
+
+/// Whether an amount's tail opens with an `@`/`@@` cost. A balance assertion
+/// tail (`=`, `==`, `=*`, `==*`) is not a cost: it says what the account
+/// holds afterwards, and converts nothing.
+fn has_cost_tail(rest: &[&str]) -> bool {
+    rest.first().is_some_and(|first| {
+        OPS.iter()
+            .find(|o| first.starts_with(**o))
+            .is_some_and(|op| op.starts_with('@'))
     })
 }
 
@@ -544,29 +561,102 @@ pub fn face_imbalance(amounts: &[&str], ctx: &AmountCtx) -> Option<Vec<(String, 
     face_balance(amounts, ctx).map(|sums| sums.into_iter().filter(|(_, v)| !v.is_zero()).collect())
 }
 
-/// The amounts of the equity conversion postings a transaction needs.
+/// One conversion within a transaction: the postings it covers, and the two
+/// equity postings that cancel its cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionGroup {
+    /// Indices into the transaction's postings, in the order they were
+    /// typed. Always contains the posting carrying the `@`/`@@` cost.
+    pub postings: Vec<usize>,
+    /// The two equity conversion amounts, in write order: the negated face
+    /// amount, then the cost. Written after [`Self::postings`].
+    pub equity: [String; 2],
+}
+
+/// How a transaction's postings are laid out once the equity conversion
+/// postings its costs need are added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionLayout {
+    /// One group per `@`/`@@` posting, in the order those postings appear.
+    pub groups: Vec<ConversionGroup>,
+    /// Postings belonging to no single conversion, in the order they were
+    /// typed. Written after every group.
+    pub unassigned: Vec<usize>,
+}
+
+/// Plan where a transaction's equity conversion postings go.
 ///
-/// The negated face imbalance, one per commodity, in the order the
-/// commodities first appear. Posting these makes the transaction sum to zero
-/// without interpreting the cost — what `hledger print --infer-equity`
-/// generates, in a flat account rather than per-commodity subaccounts.
+/// Each `@`/`@@` cost gets the pair of equity postings that cancels it —
+/// the negated face amount and the cost — written directly after that
+/// conversion's own postings. A costless posting belongs to a conversion
+/// when its commodity is one of the two that conversion moves between; when
+/// that names exactly one conversion it joins it, and otherwise (a payment
+/// funding two conversions, say) it is left [unassigned] rather than
+/// attached to one arbitrarily.
 ///
-/// Empty when nothing is converted, and equally when the face imbalance is
-/// unknown (an unparseable or elided amount) — never guess.
+/// The pairs are a refinement of the whole-transaction face imbalance, not a
+/// departure from it: they sum to the same amounts whenever the transaction
+/// balances at cost, which is checked before a transaction is written.
+/// Posting them makes it sum to zero without interpreting the costs — what
+/// `hledger print --infer-equity` generates, in a flat account rather than
+/// per-commodity subaccounts, and in the same posting order.
+///
+/// `None` when nothing is converted, and equally when any amount is elided
+/// or does not parse — never guess.
+///
+/// [unassigned]: ConversionLayout::unassigned
 #[must_use]
-pub fn equity_conversions(amounts: &[&str], ctx: &AmountCtx) -> Vec<String> {
-    if amounts.iter().any(|a| a.trim().is_empty()) {
-        return Vec::new();
+pub fn conversion_layout(amounts: &[&str], ctx: &AmountCtx) -> Option<ConversionLayout> {
+    let parsed: Vec<ParsedAmount> = amounts
+        .iter()
+        .map(|t| parse_amount(t, ctx))
+        .collect::<Option<_>>()?;
+    // The two commodities each conversion moves between, in posting order.
+    let moves: Vec<(usize, String, String)> = parsed
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.has_cost)
+        .map(|(i, p)| (i, p.commodity.clone(), p.contributes.1.clone()))
+        .collect();
+    if moves.is_empty() {
+        return None;
     }
-    let Some(sums) = face_imbalance(amounts, ctx) else {
-        return Vec::new();
-    };
-    sums.into_iter()
-        .filter_map(|(commodity, value)| {
-            let negated = Decimal::ZERO.checked_sub(value)?;
-            Some(render_amount_like(negated, &commodity, ctx, amounts))
-        })
-        .collect()
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); moves.len()];
+    let mut unassigned: Vec<usize> = Vec::new();
+    for (j, p) in parsed.iter().enumerate() {
+        if p.has_cost {
+            continue;
+        }
+        let mut matched = moves
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, from, to))| *from == p.commodity || *to == p.commodity)
+            .map(|(k, _)| k);
+        match (matched.next(), matched.next()) {
+            (Some(k), None) => {
+                if let Some(m) = members.get_mut(k) {
+                    m.push(j);
+                }
+            }
+            _ => unassigned.push(j),
+        }
+    }
+    let mut groups = Vec::with_capacity(moves.len());
+    for (k, (i, from, to)) in moves.iter().enumerate() {
+        let p = parsed.get(*i)?;
+        let mut postings = members.get(k).cloned().unwrap_or_default();
+        postings.push(*i);
+        postings.sort_unstable();
+        let face = Decimal::ZERO.checked_sub(p.value)?;
+        groups.push(ConversionGroup {
+            postings,
+            equity: [
+                render_amount_like(face, from, ctx, amounts),
+                render_amount_like(p.contributes.0, to, ctx, amounts),
+            ],
+        });
+    }
+    Some(ConversionLayout { groups, unassigned })
 }
 
 /// The cost and assertion operators, longest first so a prefix match picks
@@ -1357,31 +1447,98 @@ mod tests {
         );
     }
 
+    // ---- conversion layout ----
+
+    /// The pair a group writes, for terser assertions.
+    fn pairs(l: &ConversionLayout) -> Vec<(Vec<usize>, [String; 2])> {
+        l.groups
+            .iter()
+            .map(|g| (g.postings.clone(), g.equity.clone()))
+            .collect()
+    }
+
     #[test]
-    fn equity_conversions_negate_the_face_imbalance_in_first_appearance_order() {
+    fn a_conversions_postings_are_written_before_its_equity_pair() {
+        // One conversion: every posting joins it, so the pair lands at the
+        // end however the postings were typed.
+        let l = conversion_layout(&["10 USD @@ 9.06 EUR", "-9.06 EUR"], &ctx()).unwrap();
         assert_eq!(
-            equity_conversions(&["10 USD @@ 9.06 EUR", "-9.06 EUR"], &ctx()),
-            vec!["-10 USD".to_owned(), "9.06 EUR".to_owned()]
+            pairs(&l),
+            vec![(vec![0, 1], ["-10 USD".to_owned(), "9.06 EUR".to_owned()])]
         );
+        assert!(l.unassigned.is_empty());
     }
 
     #[test]
-    fn equity_conversions_are_empty_when_nothing_is_converted() {
-        // A single-commodity transaction needs none.
-        assert!(equity_conversions(&["5 EUR", "-5 EUR"], &ctx()).is_empty());
-        // Unknown imbalance: never guess.
-        assert!(equity_conversions(&["5 EUR", "wat"], &ctx()).is_empty());
-        // An elided amount makes the face imbalance meaningless.
-        assert!(equity_conversions(&["5 EUR", ""], &ctx()).is_empty());
+    fn each_posting_joins_the_one_conversion_its_commodity_belongs_to() {
+        // Typed dollars, yen, then the two converted postings: the yen
+        // posting belongs with the second conversion, not the first.
+        let l =
+            conversion_layout(&["$-135", "¥-100", "€100 @ $1.35", "€1 @@ ¥100"], &ctx()).unwrap();
+        assert_eq!(
+            pairs(&l),
+            vec![
+                (vec![0, 2], ["€-100".to_owned(), "$135".to_owned()]),
+                (vec![1, 3], ["€-1".to_owned(), "¥100".to_owned()]),
+            ]
+        );
+        assert!(l.unassigned.is_empty());
     }
 
     #[test]
-    fn equity_conversions_follow_declared_styles() {
+    fn a_posting_shared_by_two_conversions_is_set_aside() {
+        // One payment funds both conversions, so it belongs to neither.
+        let l = conversion_layout(&["€20 @ $1.10", "€2 @ $1.10", "$-24.20"], &ctx()).unwrap();
+        assert_eq!(
+            pairs(&l),
+            vec![
+                (vec![0], ["€-20".to_owned(), "$22.00".to_owned()]),
+                (vec![1], ["€-2".to_owned(), "$2.20".to_owned()]),
+            ]
+        );
+        assert_eq!(l.unassigned, vec![2]);
+    }
+
+    #[test]
+    fn there_is_no_layout_when_nothing_is_converted() {
+        // No cost anywhere.
+        assert!(conversion_layout(&["5 EUR", "-5 EUR"], &ctx()).is_none());
+        // A balance assertion is not a cost.
+        assert!(conversion_layout(&["5 EUR = 5 EUR", "-5 EUR"], &ctx()).is_none());
+        // Unknown amounts: never guess.
+        assert!(conversion_layout(&["10 USD @@ 9.06 EUR", "wat"], &ctx()).is_none());
+        assert!(conversion_layout(&["10 USD @@ 9.06 EUR", ""], &ctx()).is_none());
+    }
+
+    #[test]
+    fn layout_equity_amounts_follow_declared_styles() {
         let c = ctx_with("EUR", "1.000,00 EUR");
+        let l = conversion_layout(&["10 USD @@ 9,06 EUR", "-9,06 EUR"], &c).unwrap();
         assert_eq!(
-            equity_conversions(&["10 USD @@ 9,06 EUR", "-9,06 EUR"], &c),
-            vec!["-10 USD".to_owned(), "9,06 EUR".to_owned()]
+            l.groups.first().unwrap().equity,
+            ["-10 USD".to_owned(), "9,06 EUR".to_owned()]
         );
+    }
+
+    #[test]
+    fn the_layouts_equity_amounts_cancel_the_face_imbalance() {
+        // Per-conversion pairs are a refinement of the whole-transaction
+        // face imbalance, not a departure from it: they sum to the same
+        // thing whenever the transaction balances at cost.
+        let amounts = ["$-135", "¥-100", "€100 @ $1.35", "€1 @@ ¥100"];
+        assert!(imbalance(&amounts, &ctx()).unwrap().is_empty());
+        let l = conversion_layout(&amounts, &ctx()).unwrap();
+        let equity: Vec<String> = l.groups.iter().flat_map(|g| g.equity.clone()).collect();
+        let refs: Vec<&str> = equity.iter().map(String::as_str).collect();
+        let mut summed: Vec<(String, Decimal)> = face_balance(&amounts, &ctx()).unwrap();
+        for (c, v) in face_balance(&refs, &ctx()).unwrap() {
+            if let Some(slot) = summed.iter_mut().find(|(s, _)| *s == c) {
+                slot.1 += v;
+            } else {
+                summed.push((c, v));
+            }
+        }
+        assert!(summed.iter().all(|(_, v)| v.is_zero()), "{summed:?}");
     }
 
     // ---- styles and rendering ----

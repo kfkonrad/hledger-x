@@ -24,6 +24,11 @@ use crate::amount::{imbalance, parse_amount, render_amount_like, AmountCtx};
 use crate::config::{Completion, Config};
 use crate::fmt::posting::{parse_posting, render};
 
+/// The bare comment line written between conversion groups. A posting with
+/// this account and no amount renders as `    ;`, which both `hledger` and
+/// `hledger-x fmt` carry through untouched.
+const GROUP_SEPARATOR: &str = ";";
+
 /// The field currently being edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Field {
@@ -1031,8 +1036,7 @@ impl Session {
         let Some(date) = self.draft.date else {
             return Submit::Invalid("no date".to_owned());
         };
-        let mut postings = self.draft.postings.clone();
-        postings.extend(self.equity_conversions());
+        let postings = self.with_equity_conversions(self.draft.postings.clone());
         let txn = NewTransaction {
             date,
             description: self.draft.description.clone(),
@@ -1041,19 +1045,58 @@ impl Session {
         Submit::Done(Box::new(txn))
     }
 
-    /// The equity conversion postings for the finished draft: the negated
-    /// face-value imbalance, which is what is left over when a `@`/`@@` cost
-    /// balances the transaction but the face amounts do not. Empty unless
-    /// `equity_conversion` is on.
-    fn equity_conversions(&self) -> Vec<(String, String)> {
+    /// Lay out the finished draft's postings, adding the equity conversion
+    /// postings its `@`/`@@` costs need.
+    ///
+    /// Each conversion is written as a group — its own postings, then the
+    /// pair of equity postings cancelling its cost — and groups are
+    /// separated by a bare `;` line. A posting belonging to no single
+    /// conversion, such as one payment funding two of them, is written after
+    /// every group rather than assigned to one arbitrarily. Grouping can
+    /// reorder the postings; see [`crate::amount::conversion_layout`].
+    ///
+    /// Returned unchanged when `equity_conversion` is off, when nothing is
+    /// converted, or when any amount does not parse.
+    fn with_equity_conversions(&self, postings: Vec<(String, String)>) -> Vec<(String, String)> {
         if !self.ctx.config.equity_conversion.is_on() {
-            return Vec::new();
+            return postings;
         }
         let amounts = self.draft.committed_amounts();
-        crate::amount::equity_conversions(&amounts, &self.ctx.amount_ctx)
-            .into_iter()
-            .map(|amount| (self.ctx.config.equity_conversion_account.clone(), amount))
-            .collect()
+        let Some(layout) = crate::amount::conversion_layout(&amounts, &self.ctx.amount_ctx) else {
+            return postings;
+        };
+        let account = &self.ctx.config.equity_conversion_account;
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut sections: Vec<Vec<(String, String)>> = Vec::new();
+        for group in &layout.groups {
+            let mut section: Vec<(String, String)> = group
+                .postings
+                .iter()
+                .filter_map(|i| postings.get(*i).cloned())
+                .collect();
+            section.extend(
+                group
+                    .equity
+                    .iter()
+                    .map(|amount| (account.clone(), amount.clone())),
+            );
+            sections.push(section);
+        }
+        let trailing: Vec<(String, String)> = layout
+            .unassigned
+            .iter()
+            .filter_map(|i| postings.get(*i).cloned())
+            .collect();
+        if !trailing.is_empty() {
+            sections.push(trailing);
+        }
+        for (n, section) in sections.into_iter().enumerate() {
+            if n > 0 {
+                out.push((GROUP_SEPARATOR.to_owned(), String::new()));
+            }
+            out.extend(section);
+        }
+        out
     }
 
     /// Move to `field`, loading whatever text it already holds. Proposals
@@ -1515,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn equity_conversions_are_appended_once_the_transaction_is_finished() {
+    fn equity_conversions_follow_the_postings_they_convert() {
         let config = Config {
             equity_conversion: crate::config::EquityConversion::On,
             ..Config::default()
@@ -1523,6 +1566,8 @@ mod tests {
         let Submit::Done(txn) = conversion_txn(config) else {
             panic!("expected Done");
         };
+        // One conversion: both postings belong to it, so its pair closes the
+        // transaction whichever of them was typed first.
         assert_eq!(
             txn.postings,
             vec![
@@ -1535,6 +1580,76 @@ mod tests {
                 ("equity:conversion".to_owned(), "9.06 EUR".to_owned()),
             ]
         );
+    }
+
+    /// Lay out `postings` as a finished transaction would be written.
+    fn laid_out(postings: &[(&str, &str)]) -> Vec<(String, String)> {
+        let config = Config {
+            equity_conversion: crate::config::EquityConversion::On,
+            ..Config::default()
+        };
+        let (mut s, _t) = session_with(JOURNAL, config);
+        s.draft.postings = postings
+            .iter()
+            .map(|(a, m)| ((*a).to_owned(), (*m).to_owned()))
+            .collect();
+        s.with_equity_conversions(s.draft.postings.clone())
+    }
+
+    #[test]
+    fn each_conversion_is_written_as_its_own_group() {
+        // The yen posting was typed second but belongs to the second
+        // conversion, so it is written beside it.
+        assert_eq!(
+            laid_out(&[
+                ("assets:dollars", "$-135"),
+                ("assets:yen", "¥-100"),
+                ("assets:euros", "€100 @ $1.35"),
+                ("assets:euros", "€1 @@ ¥100"),
+            ]),
+            vec![
+                ("assets:dollars".to_owned(), "$-135".to_owned()),
+                ("assets:euros".to_owned(), "€100 @ $1.35".to_owned()),
+                ("equity:conversion".to_owned(), "€-100".to_owned()),
+                ("equity:conversion".to_owned(), "$135".to_owned()),
+                (";".to_owned(), String::new()),
+                ("assets:yen".to_owned(), "¥-100".to_owned()),
+                ("assets:euros".to_owned(), "€1 @@ ¥100".to_owned()),
+                ("equity:conversion".to_owned(), "€-1".to_owned()),
+                ("equity:conversion".to_owned(), "¥100".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_posting_funding_two_conversions_is_written_last() {
+        assert_eq!(
+            laid_out(&[
+                ("expenses:food", "€20 @ $1.10"),
+                ("expenses:tips", "€2 @ $1.10"),
+                ("assets:checking", "$-24.20"),
+            ]),
+            vec![
+                ("expenses:food".to_owned(), "€20 @ $1.10".to_owned()),
+                ("equity:conversion".to_owned(), "€-20".to_owned()),
+                ("equity:conversion".to_owned(), "$22.00".to_owned()),
+                (";".to_owned(), String::new()),
+                ("expenses:tips".to_owned(), "€2 @ $1.10".to_owned()),
+                ("equity:conversion".to_owned(), "€-2".to_owned()),
+                ("equity:conversion".to_owned(), "$2.20".to_owned()),
+                (";".to_owned(), String::new()),
+                ("assets:checking".to_owned(), "$-24.20".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_conversion_gets_no_separator() {
+        let out = laid_out(&[
+            ("assets:dollars", "$-135"),
+            ("assets:euros", "€100 @ $1.35"),
+        ]);
+        assert!(out.iter().all(|(a, _)| a != ";"), "{out:?}");
     }
 
     #[test]

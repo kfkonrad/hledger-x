@@ -55,6 +55,7 @@ hledger-x fmt --quiet                    # do not print a list of changed files
 `-f`/`--follow` is repeatable and can be combined with plain, non-following file arguments. Unreadable files are
 reported and skipped.
 
+<details><summary>Details about the formatting rules</summary>
 Sorting is directive-bounded: directives and standalone comment blocks act as barriers, so transactions only reorder
 within the runs between them. A comment directly above a transaction travels with it. `--sort` and `--no-sort` override
 the configured `sort`.
@@ -88,10 +89,11 @@ further down is not yet known when it reaches an amount, and `1,234 GBP` written
 1.234 rather than 1234. Amounts above their commodity's declaration are therefore passed through exactly as written,
 by `fmt` and `--explicit` alike. Keeping your declarations at the top of the journal, or in a file you `include`
 first, is what most journals do already and is the layout everything is formatted against.
+</details>
 
 #### `--explicit`
 
-`--explicit` (`-x`, the same name `hledger print` uses) writes out what the journal leaves implied. It does two things:
+`--explicit` writes out what the journal leaves implied. It does two things:
 
 - **Fills in the amount you left off.** A transaction may omit one posting's amount and let hledger work it out;
   `--explicit` writes that amount into the file, exactly as `hledger print -x` would show it.
@@ -106,6 +108,7 @@ first, is what most journals do already and is the layout everything is formatte
   `1.00 EUR` — the same rule `add` applies to an amount you type. The declared places are a minimum, never a maximum,
   so `4.001 EUR` is left alone, and a commodity with no `commodity` directive is left alone entirely.
 
+<details><summary>Details about explicit formatting rules</summary>
 A `D` directive gives amounts written without a commodity that commodity, so `--explicit` writes it out: under
 `D 1,000.00 GBP`, a bare `10` becomes `10.00 GBP`. `add` does not do this — its default commodity comes from
 `add.default_commodity` in the configuration alone, so an amount you type never quietly picks one up from the
@@ -142,6 +145,7 @@ all of this at once — including what is deliberately left alone. It is valid h
 Real, `[balanced virtual]` and `(unbalanced virtual)` postings balance separately, the way hledger balances them: an
 unbalanced virtual posting contributes to nothing and never receives an inferred amount. When the remainder spans
 several commodities the inferred posting is split into one posting per commodity, again matching `hledger print -x`.
+</details>
 
 #### Exit codes
 
@@ -248,8 +252,8 @@ or `$LEDGER_FILE` needs to be set.
 Note that `substring` and `fuzzy` account completions don't complete cross `:`-boundaries. That means, `ac` doesn't
 complete to `assets:cash` but `a:c` does.
 
-With `equity_conversion = true`, a transaction that balances at cost but whose face amounts do not sum to zero gets the
-difference posted to `equity_conversion_account`, one posting per commodity:
+With `equity_conversion = true`, each `@`/`@@` cost gets a pair of postings to `equity_conversion_account` cancelling
+it, written after the postings that conversion covers:
 
 ```txt
 2001-01-01 Example
@@ -258,6 +262,26 @@ difference posted to `equity_conversion_account`, one posting per commodity:
     equity:conversion      -10 USD
     equity:conversion     9.06 EUR
 ```
+
+A transaction with several conversions is written as one group per conversion, separated by a `;` line. A posting joins
+the conversion whose commodities include its own, so the groups read in order however you typed the postings:
+
+```txt
+2001-01-01 Example
+    assets:dollars       $-135
+    assets:euros          €100 @ $1.35
+    equity:conversion    €-100
+    equity:conversion     $135
+    ;
+    assets:yen           ¥-100
+    assets:euros            €1 @@ ¥100
+    equity:conversion      €-1
+    equity:conversion     ¥100
+```
+
+The pairing matters: hledger only recognises equity postings as cancelling a cost when the two sit next to each other,
+so a single summed posting per commodity would make the transaction unbalanced. A posting that funds more than one
+conversion belongs to none of them and is written last, after every group.
 
 ## Maintainers
 

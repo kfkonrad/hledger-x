@@ -1056,18 +1056,47 @@ own `--infer-equity` uses.
 A transaction with a cost (`10 USD @@ 9.06 EUR` against `-9.06 EUR`) balances
 *at cost* but its face amounts do not sum to zero. hledger accepts either form;
 some people prefer the conversion made explicit, as a pair of postings to an
-equity account. When the option is on, they are appended to the transaction the
+equity account. When the option is on, they are added to the transaction the
 moment it is finished — so they land in the written file and in the block
 echoed to the terminal, with no extra prompt.
 
-- The amounts are the **negated face-value imbalance** (`face_balance` in
-  `amount`, which reads `ParsedAmount::value` where the ordinary balance reads
-  `contributes`). One posting per imbalanced commodity, in the order the
-  commodities first appear in the transaction.
-- **Never guess.** Nothing is generated when the face imbalance is unknown —
-  an unparseable amount, or an elided one — mirroring how an unknown imbalance
-  is already handled everywhere else.
-- Single-commodity transactions are untouched: their face imbalance is zero.
+- **One pair per cost, adjacent** (`conversion_layout` in `amount`). Each
+  `@`/`@@` posting gets two postings — its negated face amount, then its cost
+  (reading `ParsedAmount::value` and `contributes` respectively) — written
+  directly after that conversion's own postings.
+
+  The first design summed them into the negated face-value imbalance, one
+  posting per commodity. That is wrong for any transaction with two or more
+  conversions, and hledger rejects it outright (2026-08-19, verified against
+  1.99): hledger matches equity postings against the cost they cancel only in
+  *adjacent pairs*, each pair against one costful posting, so a summed posting
+  matches nothing and both the costs and the equity postings get counted. The
+  per-cost pairs are a refinement, not a departure — they sum to the same
+  amounts whenever the transaction balances at cost, which `complete_draft`
+  has already checked. Single-conversion transactions are unaffected, which is
+  why this went unnoticed.
+
+  hledger cannot in general recover the pairing once it is summed away — with
+  no costs written, `$135 / ¥100 / €-101` against `€100` and `€1` has two
+  equally valid readings with wildly different rates, and today `--infer-costs`
+  silently produces a negative exchange rate for it. So the pairing has to be
+  written correctly, not repaired later.
+- **Grouped, which can reorder the postings** (2026-08-19, with the user).
+  A costless posting joins the conversion whose two commodities include its
+  own; groups are written in the order their costful postings appear,
+  separated by a bare `;` line. A posting matching several conversions or none
+  — one payment funding two of them — belongs to no group and is written after
+  all of them rather than assigned to one arbitrarily. This is the one place
+  `add` does not write postings strictly as typed, and it is what makes the
+  layout the same however the user ordered them.
+
+  Placement is presentation only: hledger needs the pair adjacent and nothing
+  more, so a posting landing in a group the user did not have in mind costs
+  nothing semantically.
+- **Never guess.** Nothing is generated when any amount is unparseable or
+  elided, mirroring how an unknown imbalance is already handled everywhere
+  else.
+- Transactions with no cost at all are untouched.
 - This is a flat account, not hledger's per-pair
   `equity:conversion:EUR-USD:USD` subaccounts. Verified against hledger 1.99:
   it reads the flat form back as balanced.
