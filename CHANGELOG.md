@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 - `fmt`: a new `--explicit` (`-x`) flag writes out what your journal leaves implied.
   - The amount a transaction omits is written into the file
@@ -90,6 +92,7 @@ Initial release.
 - Dispatch as an hledger subcommand: with `hledger-x` on `PATH`, `hledger x fmt` and `hledger x add` work
 - TOML configuration (`.hledger-x.toml`), including an `[add]` section for entry-specific settings
 
-[Unreleased]: https://github.com/kfkonrad/hledger-x/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kfkonrad/hledger-x/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kfkonrad/hledger-x/compare/v0.3.0...HEAD
 [0.2.0]: https://github.com/kfkonrad/hledger-x/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kfkonrad/hledger-x/releases/tag/v0.1.0
