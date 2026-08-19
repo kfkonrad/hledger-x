@@ -526,6 +526,33 @@ alone" — it was a worse guess. `add` shares the path (`render_amount_like`), s
 the two tools write the same journal the same way, and the running-imbalance
 status line uses it too.
 
+**A lone tab between account and amount is ambiguous, so nothing is inferred
+in that transaction** (2026-08-19, with the user). This is the one place where
+hledger disagrees with itself. Every *released* hledger — verified directly
+against 1.52.1 and 1.99.3 — reads `a:b\t1234 EUR` as a single account name,
+`a:b<tab>1234 EUR`, holding no amount at all; an unreleased build on hledger's
+master branch (`1.99-g0e5c58ccf-20260803`) reads the tab as a separator, so
+the posting holds `1234 EUR`. Two whitespace characters, `space tab` or
+`tab tab` included, separate in every version; only the lone tab differs.
+
+We follow the releases — `split_account_amount` cuts at a run of two or more
+whitespace characters and nothing else — because that is what the hledger on
+people's machines does today. But following either reading is not enough on
+its own: the two versions disagree about *which posting is waiting for an
+amount*, so an amount inferred under one is wrong under the other, and in the
+fixture above the file we would write is one that master hledger refuses to
+parse. `--explicit` therefore treats a transaction holding such a posting as
+one it cannot work out alone, and leaves it entirely as it stands. A journal
+formatted that way means the same thing under both.
+
+The narrower alternative — follow master, since 2.0 may ship the change — was
+rejected: it makes `fmt` silently rewrite a lone tab into two spaces, changing
+what the journal means for everyone still on a release.
+
+CI runs the semantic-equivalence tests against **both** 1.52.1 and 1.99.3 for
+exactly this reason; a divergence of this kind should surface there rather
+than in somebody's journal.
+
 **Reference journal.** `tests/golden/explicit.in.ledger` is one transaction
 per case, annotated, with `explicit.explicit.golden` as the expected output —
 including the cases deliberately left alone, so a future fix shows up as a

@@ -76,7 +76,7 @@ Exact semantics, all operating on a single line — except
 | `comment_block_len(after_opener)` | lines the block spans past its opener: contents plus the terminator, or the whole slice if unterminated |
 | `rstrip(s)` | drop trailing whitespace |
 | `split_comment(s)` | split at the **first** `;`. Returns `(rstrip(before), Option<comment_including_semicolon>)`. Accounts and amounts never contain `;`, so the first one is the boundary. |
-| `split_account_amount(s)` | split at the first run of **2 or more** whitespace chars (space or tab). Returns `(account, rest_after_dropping_the_run)`. No such run → whole string is the account, rest is empty. A *single* space or tab is not a separator — account names may contain single spaces. |
+| `split_account_amount(s)` | split at the first run of **2 or more** whitespace chars (space or tab). Returns `(account, rest_after_dropping_the_run)`. No such run → whole string is the account, rest is empty. A *single* space or tab is not a separator — account names may contain single spaces, and every released hledger reads a lone tab as part of the account name (see `DESIGN.md` § `--explicit`, which declines to infer anything in a transaction holding one). |
 | `is_rest_start(tok)` | token starts with `@` or `=` |
 | `is_number_like(tok)` | first char in `+-.0123456789` **and** the token contains at least one digit. Deliberately rejects `$100` and bare `AMD`. |
 | `split_amount(tokens)` | see below |
