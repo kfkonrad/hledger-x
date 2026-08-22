@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+## [0.4.1]
+
 ### Changed
 - `add`: a payee new to your journal is only pointed out when it looks like one you already use. Typing `bahn` still
   gets `bahn is new to this journal — did you mean Deutsche Bahn?`, but a payee with nothing resembling it (e.g. a shop
@@ -127,7 +129,8 @@ Initial release.
 - Dispatch as an hledger subcommand: with `hledger-x` on `PATH`, `hledger x fmt` and `hledger x add` work
 - TOML configuration (`.hledger-x.toml`), including an `[add]` section for entry-specific settings
 
-[Unreleased]: https://github.com/kfkonrad/hledger-x/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kfkonrad/hledger-x/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/kfkonrad/hledger-x/compare/v0.4.1...v0,4,0
 [0.4.0]: https://github.com/kfkonrad/hledger-x/compare/v0.4.0...v0.3.0
 [0.3.0]: https://github.com/kfkonrad/hledger-x/compare/v0.3.0...HEAD
 [0.2.0]: https://github.com/kfkonrad/hledger-x/releases/tag/v0.2.0
