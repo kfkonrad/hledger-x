@@ -93,12 +93,20 @@ accepts `-f` only once.
 
 #### Completion
 
-`hledger-x add` walks you through date, description, account and amount, showing the transaction as it grows. Each
-field offers a greyed-out suggestion you can accept or type over: today's date (or a partial date, with the year and
-month filled in), completions for descriptions and declared `payee`s on `Tab`, and the account and amount of the last
-transaction with that payee. An empty account closes the transaction, as does accepting the calculated balancing
-amount on the last posting. A payee that is new to your journal is accepted with a note and a "did you mean …?", so
-typing `bahn` when you meant `Deutsche Bahn` does not quietly fork it.
+`hledger-x add` walks you through date, description, account and amount, showing the transaction as it grows.
+
+Each field offers a greyed-out suggestion you can accept or type over:
+
+- today's date (or a partial date, with the year and month filled in)
+- completions for descriptions and declared `payee`s on `Tab`
+- the account of the last transaction with that payee
+- the amount of the last transaction with that payee
+
+An empty account closes the transaction, as does accepting the calculated balancing amount on the last posting.
+
+A payee new to your journal that looks like one you already use is accepted with a "did you mean …?" note, so typing
+`bahn` when you meant `Deutsche Bahn` does not quietly fork it; a new payee with nothing resembling it passes without
+comment.
 
 An amount you enter is filled out to the decimal places its commodity declares — with `commodity 1_000.00 EUR`, typing
 `4 EUR` writes `4.00 EUR` — as are prices and balance assertions.
@@ -147,10 +155,12 @@ are never pre-filled from the previous transaction.
 #### Recovery
 
 Every transaction you finish is appended to a recovery journal under `$XDG_STATE_HOME/hledger-x/` (one file per write
-target) before the session ends, and the whole batch is written to the journal in one go when you quit. If the session
-dies first — a crash, a closed terminal, a failed write — nothing is lost: the next `hledger-x add` against the same
-target replays the pending transactions into the new session and tells you it did. `u` (undo) rewrites the recovery
-journal too, so an undone transaction does not come back. The file is removed once the batch reaches the journal.
+target) before the session ends, and the whole batch is written to the journal in one go when you quit.
+
+If the session dies first — a crash, a closed terminal, a failed write — nothing is lost: the next `hledger-x add`
+against the same target replays the pending transactions into the new session and tells you it did. `u` (undo) rewrites
+the recovery journal too, so an undone transaction does not come back. The file is removed once the batch reaches the
+journal.
 
 ## Configuration
 

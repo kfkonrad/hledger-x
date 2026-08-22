@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Changed
+- `add`: a payee new to your journal is only pointed out when it looks like one you already use. Typing `bahn` still
+  gets `bahn is new to this journal — did you mean Deutsche Bahn?`, but a payee with nothing resembling it (e.g. a shop
+  you are entering for the first time) now passes without a note. Under `strict`, an undeclared payee still asks first.
+
 ## [0.4.0]
 
 ### Added

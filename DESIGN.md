@@ -1309,16 +1309,45 @@ only, so `bahn` is answered with `Deutsche Bahn` and not with some longer
 description that happens to contain it; the pool the *field* completes from
 holds whole descriptions, since re-entering one wholesale is the point.
 
-Behaviour **mirrors accounts exactly** (settled with the user):
+Behaviour follows accounts, with one deliberate exception:
 
 - **not strict** (default) — a description that is neither declared nor ever
-  used is accepted with a passing note plus a near-miss: `"bahn" is new to
-  this journal — did you mean "Deutsche Bahn"?`. This is the direct fix for
-  motivation #1 (§ Motivation), where hledger's `add` matches `bahn` against
-  `Deutsche Bahn` to pick defaults and then writes the literal `bahn`,
-  quietly forking the payee.
+  used is accepted with a passing note carrying a near-miss: `"bahn" is new
+  to this journal — did you mean "Deutsche Bahn"?`. This is the direct fix
+  for motivation #1 (§ Motivation), where hledger's `add` matches `bahn`
+  against `Deutsche Bahn` to pick defaults and then writes the literal
+  `bahn`, quietly forking the payee. **The note fires only when a near-miss
+  is found** — see below.
 - **strict** — asks before using an undeclared payee, mirroring
   `hledger check payees`, exactly as the account and commodity checks do.
+
+### The payee note is conditional on a near-miss
+
+Settled with the user on 2026-08-22, revising the 2026-08-12 decision that
+the payee checks mirror the account ones exactly. A payee new to the journal
+is noted only if the near-miss search answers; with nothing close to it, the
+entry passes quietly.
+
+The two cases are not alike, which is why they now diverge:
+
+- **Accounts** are a small, deliberately curated set. A brand-new one is a
+  structural event — a new category in the chart of accounts — and saying so
+  is worth an interruption even when nothing resembles it.
+- **Payees** are open-ended and grow with every shop, every landlord, every
+  one-off counterparty. A payee never seen before is the *ordinary* case, so
+  an unconditional note fires on entries that are entirely correct, and the
+  one that matters — the typo — is lost in it.
+
+The note's only job is catching a fork like `bahn` / `Deutsche Bahn`, and
+that job is exactly what the near-miss search decides. With no near-miss
+there is nothing to have mistyped and nothing to say. A useful consequence:
+in an empty or new journal, where the pool has nothing to compare against,
+the note vanishes entirely instead of firing on every first-ever payee.
+
+**Strict is unchanged**, and deliberately so: it asks whether an *undeclared*
+payee may be used at all, which is a question about declaration, not about
+spelling. It fires with or without a near-miss; the hint is only appended
+when one exists.
 
 ## `tag` directive
 
