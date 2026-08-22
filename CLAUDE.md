@@ -23,9 +23,17 @@ the shipped tool; `DESIGN.md` has no open questions left.
 
 Epic 3 decisions, all settled with the user on 2026-08-12: `apply
 account`/`alias` get **full support** (not detect-and-refuse); the payee checks
-**mirror the account ones exactly** — a passing note by default, a confirmation
-under `strict`; and comments are entered **inline**, as the `; …` tail of the
+follow the account ones — a passing note by default, a confirmation under
+`strict`; and comments are entered **inline**, as the `; …` tail of the
 description or amount field.
+
+The payee note **diverges** from the account one, deliberately, since
+2026-08-22: it fires **only when the near-miss search answers**. A payee never
+seen before is the ordinary case, unlike a brand-new account, so the note is
+reserved for what it is actually for — catching `bahn` / `Deutsche Bahn`. Do
+not "restore the symmetry"; `DESIGN.md` § The payee note is conditional on a
+near-miss has the reasoning. `strict` is untouched — that question is about
+declaration, not spelling.
 
 That last one was decided *after* building the alternative: dedicated comment
 fields in the Enter flow were implemented, tried, and rejected because they

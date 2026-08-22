@@ -1037,11 +1037,15 @@ impl Session {
         // string.
         let (payee, _note) = crate::lex::split_payee_note(&text);
         let payee = payee.to_owned();
-        // The payee checks mirror the account ones exactly: `strict` asks
-        // before using an undeclared payee (as `hledger check payees` would),
-        // otherwise a name new to the journal gets a passing note. This is
-        // the fix for hledger `add` matching `bahn` against `Deutsche Bahn`
-        // to pick defaults and then writing the literal `bahn`.
+        // `strict` asks before using an undeclared payee, as
+        // `hledger check payees` would. Otherwise a name new to the journal
+        // is noted *only* when something close to it already exists: the
+        // note is here to catch a typo — hledger `add` matching `bahn`
+        // against `Deutsche Bahn` to pick defaults and then writing the
+        // literal `bahn` — and a new payee with nothing like it in the
+        // journal is the ordinary case, not a mistake. This is the one place
+        // the payee checks deliberately do not mirror the account ones,
+        // where a brand-new name is structural enough to be worth saying.
         let mut note = None;
         if !confirmed && !payee.is_empty() {
             if self.ctx.strict.payees && !self.ctx.declared_payees_visible.contains(&payee) {
@@ -1053,10 +1057,9 @@ impl Session {
                 };
             }
             if !self.payee_known(&payee) {
-                let hint = self
+                note = self
                     .near_payee(&payee)
-                    .map_or_else(String::new, |s| format!(" — did you mean {s}?"));
-                note = Some(format!("{payee} is new to this journal{hint}"));
+                    .map(|near| format!("{payee} is new to this journal — did you mean {near}?"));
             }
         }
         self.draft.description.clone_from(&text);
@@ -2052,6 +2055,32 @@ mod tests {
     }
 
     #[test]
+    fn a_new_payee_with_nothing_like_it_passes_quietly() {
+        // The note exists to catch a typo, so with no near-miss to report
+        // there is nothing to say: a payee genuinely new to the journal is
+        // the ordinary case, and noting every one of them is noise.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Hofpfisterei");
+        assert_eq!(s.submit(), Submit::Advanced);
+    }
+
+    #[test]
+    fn the_new_payee_note_names_the_payee_not_the_description() {
+        // `Rew` is a near-miss for `Rewe`, so the note fires; what it must
+        // name is the payee half of the description.
+        let (mut s, _t) = session(JOURNAL);
+        s.submit();
+        type_in(&mut s, "Rew | coffee");
+        let Submit::AdvancedWithNote(note) = s.submit() else {
+            panic!("expected a note");
+        };
+        assert!(note.starts_with("Rew is new"), "{note}");
+        // …and the near-miss answers with a payee, never a whole description.
+        assert!(!note.contains('|'), "{note}");
+    }
+
+    #[test]
     fn a_description_already_in_the_journal_passes_quietly() {
         let (mut s, _t) = session(JOURNAL);
         s.submit();
@@ -2166,19 +2195,6 @@ mod tests {
             question.starts_with("Deutsche Bahn is not a declared payee"),
             "{question}"
         );
-    }
-
-    #[test]
-    fn the_new_payee_note_names_the_payee_not_the_description() {
-        let (mut s, _t) = session(JOURNAL);
-        s.submit();
-        type_in(&mut s, "Bahnhof Kiosk | coffee");
-        let Submit::AdvancedWithNote(note) = s.submit() else {
-            panic!("expected a note");
-        };
-        assert!(note.starts_with("Bahnhof Kiosk is new"), "{note}");
-        // …and the near-miss answers with a payee, never a whole description.
-        assert!(!note.contains('|'), "{note}");
     }
 
     #[test]
@@ -2485,12 +2501,12 @@ mod tests {
         let (mut s, _t) = session(JOURNAL);
         type_in(&mut s, "q");
         assert_eq!(s.submit(), Submit::Quit);
-        // Anywhere else `q` is just text — a description new to the journal,
-        // so it is accepted with the passing note.
+        // Anywhere else `q` is just text — a description new to the journal
+        // with nothing resembling it there, so it is accepted without a note.
         type_in(&mut s, "today");
         s.submit();
         type_in(&mut s, "q");
-        assert!(matches!(s.submit(), Submit::AdvancedWithNote(_)));
+        assert!(matches!(s.submit(), Submit::Advanced));
         assert_eq!(s.draft.description, "q");
     }
 
