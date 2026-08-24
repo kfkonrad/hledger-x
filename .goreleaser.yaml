@@ -8,29 +8,49 @@ before:
     - cargo install --locked cargo-zigbuild
 
 builds:
-  - id: hledger-x
+  - id: hledger-xfmt
     builder: rust
-    binary: hledger-x
+    binary: hledger-xfmt
     flags:
       - --release
-    targets:
+      - --bin=hledger-xfmt
+    targets: &targets
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
       - arm-unknown-linux-gnueabihf
       - x86_64-apple-darwin
       - aarch64-apple-darwin
       - x86_64-pc-windows-gnu
+  - id: hledger-xadd
+    builder: rust
+    binary: hledger-xadd
+    flags:
+      - --release
+      - --bin=hledger-xadd
+    targets: *targets
 
 archives:
-  - formats:
+  # One archive per binary per target: each build gets its own `ids` entry, so
+  # a target yields a hledger-xfmt tarball and a hledger-xadd tarball.
+  - id: hledger-xfmt
+    ids:
+      - hledger-xfmt
+    formats: &formats
       - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Target }}"
-    format_overrides:
+    name_template: "hledger-xfmt_{{ .Version }}_{{ .Target }}"
+    format_overrides: &format_overrides
       - goos: windows
         formats:
           - zip
-    files:
+    files: &files
       - none*
+  - id: hledger-xadd
+    ids:
+      - hledger-xadd
+    formats: *formats
+    name_template: "hledger-xadd_{{ .Version }}_{{ .Target }}"
+    format_overrides: *format_overrides
+    files: *files
 
 checksum:
   name_template: checksums.txt

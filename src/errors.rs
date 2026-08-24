@@ -2,7 +2,7 @@
 //!
 //! Everything the user reads on stderr is phrased here. The rule: no Rust and
 //! no OS internals. No `os error 2`, no serde's `invalid type: string "yes",
-//! expected a boolean`, no `Location: src/main.rs:156` frame from an
+//! expected a boolean`, no `Location:` frame from an
 //! [`eyre::Report`](color_eyre::eyre::Report). A message names what failed,
 //! says why in plain language, and — where knowing why is not enough to act —
 //! carries an indented hint saying what to do about it.
@@ -10,7 +10,7 @@
 //! The house shape, which every call site follows:
 //!
 //! ```text
-//! hledger-x fmt: main.journal: no such file
+//! hledger-xfmt: main.journal: no such file
 //!   (create it, or name a different file)
 //! ```
 

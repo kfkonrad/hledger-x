@@ -1,4 +1,4 @@
-//! `hledger-x add` — interactive data entry (epic 2).
+//! `hledger-xadd`'s core — interactive data entry (epic 2).
 //!
 //! Built on top of `fmt` and the shared lexical layer; the dependency
 //! direction is one-way. Everything except `ui` is terminal-free and

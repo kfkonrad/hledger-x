@@ -6,8 +6,12 @@ description = "Plain text accounting tooling: a journal formatter and interactiv
 license = "MIT"
 
 [[bin]]
-name = "hledger-x"
-path = "src/main.rs"
+name = "hledger-xfmt"
+path = "src/bin/hledger-xfmt.rs"
+
+[[bin]]
+name = "hledger-xadd"
+path = "src/bin/hledger-xadd.rs"
 
 [lib]
 name = "hledger_x"

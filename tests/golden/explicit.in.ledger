@@ -1,9 +1,9 @@
-; A reference journal for `hledger-x fmt --explicit`.
+; A reference journal for `hledger-xfmt --explicit`.
 ;
 ; Every case --explicit changes, and the notable ones it deliberately leaves
 ; alone. The file is valid hledger, so the two can be compared directly:
 ;
-;   hledger-x fmt --explicit --diff tests/golden/explicit.in.ledger
+;   hledger-xfmt --explicit --diff tests/golden/explicit.in.ledger
 ;   hledger print -x -f tests/golden/explicit.in.ledger
 ;
 ; Accounts are namespaced per transaction so every balance assertion stands on
