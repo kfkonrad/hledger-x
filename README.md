@@ -4,17 +4,17 @@
 
 Format hledger journals and enter transactions ergonomically
 
-`hledger-x` has two subcommands:
+`hledger-x` ships two commands:
 
-- `hledger-x fmt` — a journal formatter that can also sort transactions by date
-- `hledger-x add` — interactive data entry, a better `hledger add`
+- `hledger-xfmt` — a journal formatter that can also sort transactions by date
+- `hledger-xadd` — interactive data entry, an alternative to `hledger add`
 
 ## Table of Contents
 
 - [Install](#install)
 - [Usage](#usage)
-  - [fmt](#fmt)
-  - [add](#add)
+  - [hledger-xfmt](#hledger-xfmt)
+  - [hledger-xadd](#hledger-xadd)
 - [Configuration](#configuration)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
@@ -22,33 +22,33 @@ Format hledger journals and enter transactions ergonomically
 
 ## Install
 
-Download a binary from the [releases section of this repo](https://github.com/kfkonrad/hledger-x/releases), or build
-from source:
+Every release ships both commands, each as its own archive per platform — grab `hledger-xfmt`, `hledger-xadd`, or
+both from the [releases section of this repo](https://github.com/kfkonrad/hledger-x/releases), or build from source:
 
 ```sh
 cargo install --path .
 ```
 
-With `hledger-x` on your `PATH`, hledger dispatches to it too, so e.g. `hledger x fmt` and `hledger-x fmt` are
-interchangeable.
+With them on your `PATH`, hledger dispatches to them too, so `hledger xfmt` and `hledger-xfmt` are interchangeable, as
+are `hledger xadd` and `hledger-xadd`.
 
 ## Usage
 
-### fmt
+### hledger-xfmt
 
-An opinionated formatter heavily inspired by [`hledger-fmt`](https://github.com/mikluko/hledger-fmt). It fixes
-indentation and amount formatting, leaving directives untouched, so the result reads much like `hledger print`.
+An opinionated formatter inspired by [`hledger-fmt`](https://github.com/mikluko/hledger-fmt). It fixes indentation and
+amount formatting, leaving directives untouched, so the result reads much like `hledger print`.
 
 ```sh
-hledger-x fmt                            # the configured ledger_file (or $LEDGER_FILE) and its includes
-hledger-x fmt -f 2025/main.journal       # another journal, with its includes
-hledger-x fmt main.journal 2025.journal  # exactly these files, includes not followed
-hledger-x fmt - < main.journal           # stdin to stdout
-hledger-x fmt --check                    # write nothing, exit non-zero if anything needs formatting
-hledger-x fmt --diff                     # show a unified diff of the changes; writes nothing
-hledger-x fmt --sort                     # sort transactions by date in addition to formatting them
-hledger-x fmt --explicit                 # write out inferred amounts and pad decimals
-hledger-x fmt --quiet                    # do not print a list of changed files
+hledger-xfmt                            # the configured ledger_file (or $LEDGER_FILE) and its includes
+hledger-xfmt -f 2025/main.journal       # another journal, with its includes
+hledger-xfmt main.journal 2025.journal  # exactly these files, includes not followed
+hledger-xfmt - < main.journal           # stdin to stdout
+hledger-xfmt --check                    # write nothing, exit non-zero if anything needs formatting
+hledger-xfmt --diff                     # show a unified diff of the changes; writes nothing
+hledger-xfmt --sort                     # sort transactions by date in addition to formatting them
+hledger-xfmt --explicit                 # write out inferred amounts and pad decimals
+hledger-xfmt --quiet                    # do not print a list of changed files
 ```
 
 `-f`/`--follow` is repeatable and can be combined with plain, non-following file arguments. Unreadable files are
@@ -70,30 +70,30 @@ would show it:
     assets:cash                  assets:cash    -10 EUR
 ```
 
-It also pads amounts to their commodity's declared decimal places, the same rule `add` applies to an amount you type:
+It also pads amounts to their commodity's declared decimal places, the same rule `hledger-xadd` applies to an amount you type:
 under `commodity 1_000.00 EUR`, `1 EUR` becomes `1.00 EUR`. The declared places are a minimum, so `4.001 EUR` is left
 alone, as is a commodity with no `commodity` directive. It never guesses — no conversion cost is inferred, and a
 transaction it cannot work out with certainty is passed through untouched. `--check` honours `--explicit`.
 
-### add
+### hledger-xadd
 
-An `hledger add` alternative that shows the transaction as you enter it and completes from your journal's history.
+An `hledger add` alternative that shows the transaction as you enter them and completes from your journal's history.
 
 ```sh
-hledger-x add                                              # add to the configured ledger_file (or $LEDGER_FILE)
-hledger-x add -f 2025/main.journal                         # use -f to pass a journal file explicitly
-hledger-x add --to 2025/inbox.journal                      # add transactions into another file of the include tree
-hledger-x add -f 2025/main.journal --to 2025/inbox.journal # -f and --to can be combined
+hledger-xadd                                              # add to the configured ledger_file (or $LEDGER_FILE)
+hledger-xadd -f 2025/main.journal                         # use -f to pass a journal file explicitly
+hledger-xadd --to 2025/inbox.journal                      # add transactions into another file of the include tree
+hledger-xadd -f 2025/main.journal --to 2025/inbox.journal # -f and --to can be combined
 ```
 
-`add` reads the journal from `-f`/`--file`, the `ledger_file` configuration or `$LEDGER_FILE` (in that order of
+`hledger-xadd` reads the journal from `-f`/`--file`, the `ledger_file` configuration or `$LEDGER_FILE` (in that order of
 precedence) and all included files, and honours the directives that change what a transaction means — `account`,
-`commodity`/`D`/`decimal-mark`, `payee`, `tag`, `Y`, `apply account`, `alias` and `include`. Unlike `fmt`, `add`
-accepts `-f` only once.
+`commodity`/`D`/`decimal-mark`, `payee`, `tag`, `Y`, `apply account`, `alias` and `include`. Unlike `hledger-xfmt`,
+`hledger-xadd` accepts `-f` only once.
 
 #### Completion
 
-`hledger-x add` walks you through date, description, account and amount, showing the transaction as it grows.
+`hledger-xadd` walks you through date, description, account and amount, showing the transaction as it grows.
 
 Each field offers a greyed-out suggestion you can accept or type over:
 
@@ -136,7 +136,7 @@ writes
 Past the `;`, `Tab` completes tag names — from `tag` directives and from tags already used in your journal. Comments
 are never pre-filled from the previous transaction.
 
-#### Navigating `hledger-x add`
+#### Navigating `hledger-xadd`
 
 | Key                                              | Action                                                           |
 |--------------------------------------------------|------------------------------------------------------------------|
@@ -157,15 +157,16 @@ are never pre-filled from the previous transaction.
 Every transaction you finish is appended to a recovery journal under `$XDG_STATE_HOME/hledger-x/` (one file per write
 target) before the session ends, and the whole batch is written to the journal in one go when you quit.
 
-If the session dies first — a crash, a closed terminal, a failed write — nothing is lost: the next `hledger-x add`
+If the session dies first — a crash, a closed terminal, a failed write — nothing is lost: the next `hledger-xadd`
 against the same target replays the pending transactions into the new session and tells you it did. `u` (undo) rewrites
 the recovery journal too, so an undone transaction does not come back. The file is removed once the batch reaches the
 journal.
 
 ## Configuration
 
-`hledger-x` reads its config from `~/.config/hledger-x/config.toml`, overridden key-by-key by the nearest
-`.hledger-x.toml` found walking up from the current directory.
+Both commands read the same config, from `~/.config/hledger-x/config.toml`, overridden key-by-key by the nearest
+`.hledger-x.toml` found walking up from the current directory. The `[add]` table applies to `hledger-xadd`; the
+top-level keys apply to both.
 
 ```toml
 # ledger_file = ""                   # default journal path

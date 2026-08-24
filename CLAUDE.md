@@ -1,14 +1,21 @@
 # hledger-x
 
-A Rust CLI for plain text accounting (hledger) journals:
+Rust CLIs for plain text accounting (hledger) journals. One package,
+`hledger-x`, building two binaries:
 
-- `hledger-x fmt` — a formatter; `hledger-fmt`'s output, behind a
+- `hledger-xfmt` — a formatter; `hledger-fmt`'s output, behind a
   project-aware CLI (`DESIGN.md` § CLI ergonomics)
-- `hledger-x add` — ergonomic interactive data entry, a better `hledger add`
+- `hledger-xadd` — ergonomic interactive data entry, a better `hledger add`
 
-The name is load-bearing: `x` is not an hledger built-in, so with `hledger-x` on
-`PATH` hledger dispatches `hledger x add` / `hledger x fmt` to it (verified
-against hledger 1.99). Renaming the binary breaks that.
+The names are load-bearing: `xfmt`/`xadd` are not hledger built-ins, so with
+these on `PATH` hledger dispatches `hledger xfmt` / `hledger xadd` to them
+(verified against hledger 1.99). Renaming a binary breaks that.
+
+`DESIGN.md` and `IMPLEMENTATION.md` predate the binaries and write them as the
+subcommands `fmt` and `add`; read those names as `hledger-xfmt` and
+`hledger-xadd`. Each binary is a thin `src/bin/hledger-x{fmt,add}.rs` over the
+shared `hledger_x` library; `Status` lives in `src/status.rs` so the two cannot
+drift apart on exit codes.
 
 **Status: epics 1 (`fmt`), 2 (`add`) and 3 (the remaining directives —
 `payee`, `tag`, `Y`, `apply account`, `alias`) are implemented and green.**

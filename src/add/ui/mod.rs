@@ -26,7 +26,7 @@ use crate::fmt::posting::{parse_posting, render};
 
 /// The bare comment line written between conversion groups. A posting with
 /// this account and no amount renders as `    ;`, which both `hledger` and
-/// `hledger-x fmt` carry through untouched.
+/// `hledger-xfmt` carry through untouched.
 const GROUP_SEPARATOR: &str = ";";
 
 /// The field currently being edited.

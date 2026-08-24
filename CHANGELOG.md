@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Changed
+- The `hledger-x` binary is now split into two binaries
+  - `hledger-x fmt` becomes `hledger-xfmt`
+  - `hledger-x add` becomes `hledger-xadd`
+  - Going forward releases will ship them as separate downloads, so you can download install just the one you want - or
+    both
+  - They still read the same joint `.hledger-x.toml` files so no configuration needs to change
+
 ## [0.4.1]
 
 ### Changed
