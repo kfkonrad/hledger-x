@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+## [0.5.0]
+
 ### Changed
 - The `hledger-x` binary is now split into two binaries
   - `hledger-x fmt` becomes `hledger-xfmt`
@@ -137,7 +139,8 @@ Initial release.
 - Dispatch as an hledger subcommand: with `hledger-x` on `PATH`, `hledger x fmt` and `hledger x add` work
 - TOML configuration (`.hledger-x.toml`), including an `[add]` section for entry-specific settings
 
-[Unreleased]: https://github.com/kfkonrad/hledger-x/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/kfkonrad/hledger-x/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kfkonrad/hledger-x/compare/v0.5.0...v0.4.1
 [0.4.1]: https://github.com/kfkonrad/hledger-x/compare/v0.4.1...v0,4,0
 [0.4.0]: https://github.com/kfkonrad/hledger-x/compare/v0.4.0...v0.3.0
 [0.3.0]: https://github.com/kfkonrad/hledger-x/compare/v0.3.0...HEAD
