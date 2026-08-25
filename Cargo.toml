@@ -1,6 +1,6 @@
 [package]
 name = "hledger-x"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Plain text accounting tooling: a journal formatter and interactive data entry"
 license = "MIT"
