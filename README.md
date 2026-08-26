@@ -29,6 +29,16 @@ both from the [releases section of this repo](https://github.com/kfkonrad/hledge
 cargo install --path .
 ```
 
+You can also use [`mise`](https://mise.jdx.dev/) to install `hledger-add` and `hledger-xfmt` like so:
+
+```sh
+mise tool-alias set hledger-xadd 'github:kfkonrad/hledger-x[matching=hledger-xadd]'
+mise use -g hledger-xadd
+
+mise tool-alias set hledger-xfmt 'github:kfkonrad/hledger-x[matching=hledger-xfmt]'
+mise use -g hledger-xfmt
+```
+
 With them on your `PATH`, hledger dispatches to them too, so `hledger xfmt` and `hledger-xfmt` are interchangeable, as
 are `hledger xadd` and `hledger-xadd`.
 
