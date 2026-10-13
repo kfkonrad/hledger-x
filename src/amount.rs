@@ -1431,7 +1431,7 @@ mod tests {
     #[test]
     fn cost_postings_balance_in_the_priced_commodity() {
         let imb = imbalance(&["-5 EUR @ 1.2 USD", "6.0 USD"], &ctx()).unwrap();
-        assert!(imb.is_empty());
+        assert_eq!(imb, Vec::<(String, Decimal)>::new());
     }
 
     // ---- face balance and equity conversions ----
@@ -1440,7 +1440,10 @@ mod tests {
     fn face_balance_ignores_cost_tails() {
         // At cost this balances; at face value it does not.
         let amounts = ["10 USD @@ 9.06 EUR", "-9.06 EUR"];
-        assert!(imbalance(&amounts, &ctx()).unwrap().is_empty());
+        assert_eq!(
+            imbalance(&amounts, &ctx()).unwrap(),
+            Vec::<(String, Decimal)>::new()
+        );
         assert_eq!(
             face_imbalance(&amounts, &ctx()).unwrap(),
             vec![("USD".into(), dec("10")), ("EUR".into(), dec("-9.06"))]
@@ -1466,7 +1469,7 @@ mod tests {
             pairs(&l),
             vec![(vec![0, 1], ["-10 USD".to_owned(), "9.06 EUR".to_owned()])]
         );
-        assert!(l.unassigned.is_empty());
+        assert_eq!(l.unassigned, Vec::<usize>::new());
     }
 
     #[test]
@@ -1482,7 +1485,7 @@ mod tests {
                 (vec![1, 3], ["€-1".to_owned(), "¥100".to_owned()]),
             ]
         );
-        assert!(l.unassigned.is_empty());
+        assert_eq!(l.unassigned, Vec::<usize>::new());
     }
 
     #[test]
@@ -1526,7 +1529,10 @@ mod tests {
         // face imbalance, not a departure from it: they sum to the same
         // thing whenever the transaction balances at cost.
         let amounts = ["$-135", "¥-100", "€100 @ $1.35", "€1 @@ ¥100"];
-        assert!(imbalance(&amounts, &ctx()).unwrap().is_empty());
+        assert_eq!(
+            imbalance(&amounts, &ctx()).unwrap(),
+            Vec::<(String, Decimal)>::new()
+        );
         let l = conversion_layout(&amounts, &ctx()).unwrap();
         let equity: Vec<String> = l.groups.iter().flat_map(|g| g.equity.clone()).collect();
         let refs: Vec<&str> = equity.iter().map(String::as_str).collect();

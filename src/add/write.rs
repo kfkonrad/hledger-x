@@ -687,7 +687,7 @@ mod tests {
             out.contents,
             "2026-01-05 a\n    aa:bb   1.00 EUR\n    cc:dd  -1.00 EUR\n\n2026-01-06 b\n    aa:bb   2.00 EUR\n    cc:dd  -2.00 EUR\n"
         );
-        assert!(out.warnings.is_empty());
+        assert_eq!(out.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -751,7 +751,7 @@ mod tests {
             out.contents,
             "2026-01-05 a\n    x:y  1 EUR\n\n2026-01-07 b\n    x:y  2 EUR\n\n2026-01-10 c\n    x:y  1 EUR\n"
         );
-        assert!(out.warnings.is_empty());
+        assert_eq!(out.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -845,7 +845,7 @@ mod tests {
         );
         // A later fmt run must be a no-op.
         assert_eq!(crate::fmt::format(&out.contents), out.contents);
-        assert!(out.warnings.is_empty());
+        assert_eq!(out.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -1085,7 +1085,7 @@ mod tests {
         rec.record(&t2).unwrap();
         assert_eq!(rec.pending(), vec![t1, t2]);
         rec.clear();
-        assert!(rec.pending().is_empty());
+        assert_eq!(rec.pending(), Vec::<NewTransaction>::new());
     }
 
     #[test]

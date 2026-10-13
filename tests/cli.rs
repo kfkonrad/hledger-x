@@ -630,7 +630,7 @@ fn an_already_formatted_file_is_left_untouched_on_disk() {
 fn unknown_options_are_a_usage_error() {
     let out = run(&["--nope"], "");
     assert_eq!(out.code, 2);
-    assert!(!out.stderr.is_empty());
+    assert_ne!(out.stderr, "");
 }
 
 #[test]
