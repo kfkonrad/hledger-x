@@ -800,7 +800,7 @@ mod tests {
         s.submit();
         assert_eq!(s.suggestion(), None);
         ui.navigate(&mut s, KeyCode::Tab);
-        assert!(s.draft.buffer.is_empty());
+        assert_eq!(s.draft.buffer, "");
         assert!(ui.menu.is_some());
     }
 
@@ -831,7 +831,7 @@ mod tests {
         assert!(!after.contains("Edeka"), "{after}");
 
         assert!(s.undo().is_some());
-        assert!(log_rows(&s, 40).is_empty());
+        assert_eq!(log_rows(&s, 40), Vec::<Vec<(String, bool)>>::new());
     }
 
     #[test]
@@ -855,6 +855,6 @@ mod tests {
         let (mut s, _t) = session();
         complete(&mut s, "One");
         assert_eq!(text(&log_rows(&s, 2)), "  … 1 earlier transaction(s)");
-        assert!(log_rows(&s, 0).is_empty());
+        assert_eq!(log_rows(&s, 0), Vec::<Vec<(String, bool)>>::new());
     }
 }

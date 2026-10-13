@@ -2021,7 +2021,7 @@ mod tests {
         s.submit();
         // Past the colon this is a value: free text, nothing to offer.
         type_in(&mut s, "x ; project: ac");
-        assert!(s.candidates().is_empty());
+        assert_eq!(s.candidates(), Vec::<String>::new());
         // After a comma a new tag name starts, and completion resumes.
         type_in(&mut s, "x ; project: acme, rec");
         assert_eq!(
@@ -2218,7 +2218,7 @@ mod tests {
         assert_eq!(s.draft.field, Field::Account(0));
         // The template account is offered as a ghost, not typed into the
         // buffer.
-        assert!(s.draft.buffer.is_empty());
+        assert_eq!(s.draft.buffer, "");
         assert_eq!(s.suggestion().as_deref(), Some("expenses:groceries"));
         // Account ranking is conditioned on the payee.
         assert_eq!(s.account_pool()[0], "expenses:groceries");
@@ -2978,7 +2978,7 @@ mod tests {
         type_in(&mut s, "u");
         assert_eq!(s.submit(), Submit::Undo);
         assert!(s.undo().is_some());
-        assert!(s.completed.is_empty());
+        assert_eq!(s.completed, Vec::<NewTransaction>::new());
         // Nothing left: `u` is now invalid.
         type_in(&mut s, "u");
         assert!(matches!(s.submit(), Submit::Invalid(_)));

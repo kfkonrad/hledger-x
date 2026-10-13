@@ -238,15 +238,15 @@ mod tests {
             vec!["assets:bank:checking", "assets:bank:savings"]
         );
         // A query may be shorter than the candidate, never longer.
-        assert!(hits(Completion::Prefix, "a:b:c:d").is_empty());
+        assert_eq!(hits(Completion::Prefix, "a:b:c:d"), Vec::<&str>::new());
     }
 
     #[test]
     fn prefix_allows_no_gaps_leading_or_otherwise() {
         // `gro` is not a leading segment of anything.
-        assert!(hits(Completion::Prefix, "gro").is_empty());
+        assert_eq!(hits(Completion::Prefix, "gro"), Vec::<&str>::new());
         // `s` would have to skip `bank` to reach `savings`.
-        assert!(hits(Completion::Prefix, "a:s").is_empty());
+        assert_eq!(hits(Completion::Prefix, "a:s"), Vec::<&str>::new());
         assert_eq!(
             hits(Completion::Prefix, "a:b:s"),
             vec!["assets:bank:savings"]
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn substring_never_matches_across_a_colon() {
-        assert!(hits(Completion::Substring, "tsbank").is_empty());
+        assert_eq!(hits(Completion::Substring, "tsbank"), Vec::<&str>::new());
         // Segment-wise, the same characters do match.
         assert_eq!(
             hits(Completion::Substring, "ts:ba"),
@@ -358,7 +358,7 @@ mod tests {
         );
         assert_eq!(hits(Completion::Fuzzy, "sl"), vec!["income:salary"]);
         // `asbk` spans `assets:bank` — deliberately no longer a match.
-        assert!(hits(Completion::Fuzzy, "asbk").is_empty());
+        assert_eq!(hits(Completion::Fuzzy, "asbk"), Vec::<&str>::new());
         assert_eq!(
             hits(Completion::Fuzzy, "as:bk"),
             vec!["assets:bank:checking", "assets:bank:savings"]

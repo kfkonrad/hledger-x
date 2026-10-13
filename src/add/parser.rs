@@ -934,7 +934,7 @@ mod tests {
         let j = parse(&t, "main.journal");
         let accounts: Vec<&str> = j.accounts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(accounts, vec!["Assets:Real"]);
-        assert!(j.commodities.is_empty());
+        assert_eq!(j.commodities, Vec::<CommodityDecl>::new());
         assert_eq!(j.transactions.len(), 1);
         assert_eq!(j.transactions[0].date, d(2025, 1, 1));
         assert_eq!(
@@ -1093,8 +1093,8 @@ mod tests {
             "~ monthly\n    a  1 EUR\n\n= expenses:food\n    b  1 EUR\n",
         )]);
         let j = parse(&t, "main.journal");
-        assert!(j.transactions.is_empty());
-        assert!(j.warnings.is_empty());
+        assert_eq!(j.transactions, Vec::<Transaction>::new());
+        assert_eq!(j.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -1238,7 +1238,7 @@ mod tests {
         ]);
         let j = parse(&t, "main.journal");
         let sub = j.file(&t.path().join("sub.journal")).unwrap();
-        assert!(j.accounts_visible_at(sub.eof_pos).is_empty());
+        assert_eq!(j.accounts_visible_at(sub.eof_pos), Vec::<&str>::new());
         let main = j.file(&t.path().join("main.journal")).unwrap();
         assert_eq!(j.accounts_visible_at(main.eof_pos), vec!["declared:late"]);
     }
@@ -1280,8 +1280,8 @@ mod tests {
             "P 2026-01-01 USD 0.9 EUR\nN EUR\nassert foo\n",
         )]);
         let j = parse(&t, "main.journal");
-        assert!(j.warnings.is_empty());
-        assert!(j.transactions.is_empty());
+        assert_eq!(j.warnings, Vec::<String>::new());
+        assert_eq!(j.transactions, Vec::<Transaction>::new());
     }
 
     // ---- epic 3: payee and tag declarations (scope model 2) ----
@@ -1330,7 +1330,7 @@ mod tests {
         let j = parse(&t, "main.journal");
         let dates: Vec<NaiveDate> = j.transactions.iter().map(|t| t.date).collect();
         assert_eq!(dates, vec![d(2019, 1, 15), d(2021, 3, 3), d(2024, 6, 6)]);
-        assert!(j.warnings.is_empty());
+        assert_eq!(j.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -1350,7 +1350,7 @@ mod tests {
         let j = parse(&t, "main.journal");
         let this_year = chrono::Local::now().date_naive().year();
         assert_eq!(j.transactions[0].date, d(this_year, 1, 15));
-        assert!(j.warnings.is_empty());
+        assert_eq!(j.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -1505,7 +1505,7 @@ mod tests {
             "account assets:bank\n    note Checking\ncommodity EUR\n    format 1.000,00 EUR\n",
         )]);
         let j = parse(&t, "main.journal");
-        assert!(j.transactions.is_empty());
+        assert_eq!(j.transactions, Vec::<Transaction>::new());
         assert_eq!(j.accounts.len(), 1);
     }
 
@@ -1538,6 +1538,6 @@ mod tests {
         // `accountant` is not an `account` directive.
         let t = tree(&[("main.journal", "accountant fees\nDecimal x\n")]);
         let j = parse(&t, "main.journal");
-        assert!(j.accounts.is_empty());
+        assert_eq!(j.accounts, Vec::<Declaration>::new());
     }
 }

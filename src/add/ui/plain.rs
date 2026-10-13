@@ -252,7 +252,7 @@ mod tests {
     fn invalid_input_reprompts() {
         let input = "banana\n";
         let (done, out, _t) = run_session(JOURNAL, input);
-        assert!(done.is_empty());
+        assert_eq!(done, Vec::<NewTransaction>::new());
         assert!(out.contains("error: cannot understand date"), "{out}");
     }
 
@@ -285,7 +285,7 @@ mod tests {
         };
         let input = "\nX\nexpenses:zzz\nn\n";
         let (done, out, _t) = run_session_with(src, cfg, input);
-        assert!(done.is_empty());
+        assert_eq!(done, Vec::<NewTransaction>::new());
         assert!(out.contains("kept the field"), "{out}");
     }
 
@@ -321,7 +321,7 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("recovered 1 transaction"), "{text}");
         assert!(text.contains("undid: 2026-08-10 Ghost"), "{text}");
-        assert!(done.is_empty());
-        assert!(recovery.pending().is_empty());
+        assert_eq!(done, Vec::<NewTransaction>::new());
+        assert_eq!(recovery.pending(), Vec::<NewTransaction>::new());
     }
 }
